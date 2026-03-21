@@ -59,6 +59,9 @@ use codex_api::common::ResponsesWsRequest;
 use codex_api::create_text_param_for_request;
 use codex_api::error::ApiError;
 use codex_api::requests::responses::Compression;
+use codex_client::RetryPolicy as HttpRetryPolicy;
+use codex_client::backoff as retry_backoff;
+use codex_client::retry_delay_for_error;
 use codex_otel::SessionTelemetry;
 
 use codex_protocol::ThreadId;
@@ -161,6 +164,17 @@ impl RequestRouteTelemetry {
         Self { endpoint }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct RequestRetryNotice {
+    pub endpoint: &'static str,
+    pub attempt: u64,
+    pub max_attempts: u64,
+    pub delay: Duration,
+    pub status: Option<HttpStatusCode>,
+}
+
+pub type RequestRetryNotifier = Arc<dyn Fn(RequestRetryNotice) + Send + Sync>;
 
 /// A session-scoped client for model-provider API calls.
 ///
@@ -343,12 +357,14 @@ impl ModelClient {
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
         session_telemetry: &SessionTelemetry,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<Vec<ResponseItem>> {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
         let client_setup = self.current_client_setup().await?;
         let transport = ReqwestTransport::new(build_reqwest_client());
+        let retry_policy = client_setup.api_provider.retry.to_policy();
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
             AuthRequestTelemetryContext::new(
@@ -358,6 +374,8 @@ impl ModelClient {
             ),
             RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
             self.state.auth_env_telemetry.clone(),
+            retry_policy,
+            retry_notifier,
         );
         let client =
             ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
@@ -411,6 +429,7 @@ impl ModelClient {
         model_info: &ModelInfo,
         effort: Option<ReasoningEffortConfig>,
         session_telemetry: &SessionTelemetry,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<Vec<ApiMemorySummarizeOutput>> {
         if raw_memories.is_empty() {
             return Ok(Vec::new());
@@ -418,6 +437,7 @@ impl ModelClient {
 
         let client_setup = self.current_client_setup().await?;
         let transport = ReqwestTransport::new(build_reqwest_client());
+        let retry_policy = client_setup.api_provider.retry.to_policy();
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
             AuthRequestTelemetryContext::new(
@@ -427,6 +447,8 @@ impl ModelClient {
             ),
             RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
             self.state.auth_env_telemetry.clone(),
+            retry_policy,
+            retry_notifier,
         );
         let client =
             ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
@@ -472,12 +494,16 @@ impl ModelClient {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        retry_policy: HttpRetryPolicy,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Arc<dyn RequestTelemetry> {
         let telemetry = Arc::new(ApiTelemetry::new(
             session_telemetry.clone(),
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            retry_policy,
+            retry_notifier,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry;
         request_telemetry
@@ -1001,6 +1027,7 @@ impl ModelClientSession {
         summary: ReasoningSummaryConfig,
         service_tier: Option<ServiceTier>,
         turn_metadata_header: Option<&str>,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<ResponseStream> {
         if let Some(path) = &*CODEX_RS_SSE_FIXTURE {
             warn!(path, "Streaming from fixture");
@@ -1021,6 +1048,7 @@ impl ModelClientSession {
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let transport = ReqwestTransport::new(build_reqwest_client());
+            let retry_policy = client_setup.api_provider.retry.to_policy();
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 &client_setup.api_auth,
@@ -1031,6 +1059,8 @@ impl ModelClientSession {
                 request_auth_context,
                 RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
                 self.client.state.auth_env_telemetry.clone(),
+                retry_policy,
+                retry_notifier.clone(),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let options = self.build_responses_options(turn_metadata_header, compression);
@@ -1099,6 +1129,7 @@ impl ModelClientSession {
         service_tier: Option<ServiceTier>,
         turn_metadata_header: Option<&str>,
         warmup: bool,
+        _retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<WebsocketStreamOutcome> {
         let auth_manager = self.client.state.auth_manager.clone();
 
@@ -1192,12 +1223,16 @@ impl ModelClientSession {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        retry_policy: HttpRetryPolicy,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
         let telemetry = Arc::new(ApiTelemetry::new(
             session_telemetry.clone(),
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            retry_policy,
+            retry_notifier,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry.clone();
         let sse_telemetry: Arc<dyn SseTelemetry> = telemetry;
@@ -1216,6 +1251,16 @@ impl ModelClientSession {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            HttpRetryPolicy {
+                max_attempts: 0,
+                base_delay: Duration::from_millis(0),
+                retry_on: codex_client::RetryOn {
+                    retry_429: false,
+                    retry_5xx: false,
+                    retry_transport: false,
+                },
+            },
+            None,
         ));
         let websocket_telemetry: Arc<dyn WebsocketTelemetry> = telemetry;
         websocket_telemetry
@@ -1231,6 +1276,7 @@ impl ModelClientSession {
         summary: ReasoningSummaryConfig,
         service_tier: Option<ServiceTier>,
         turn_metadata_header: Option<&str>,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<()> {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
@@ -1249,6 +1295,7 @@ impl ModelClientSession {
                 service_tier,
                 turn_metadata_header,
                 /*warmup*/ true,
+                retry_notifier,
             )
             .await
         {
@@ -1287,6 +1334,7 @@ impl ModelClientSession {
         summary: ReasoningSummaryConfig,
         service_tier: Option<ServiceTier>,
         turn_metadata_header: Option<&str>,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.wire_api;
         match wire_api {
@@ -1302,6 +1350,7 @@ impl ModelClientSession {
                             service_tier,
                             turn_metadata_header,
                             /*warmup*/ false,
+                            retry_notifier.clone(),
                         )
                         .await?
                     {
@@ -1320,6 +1369,7 @@ impl ModelClientSession {
                     summary,
                     service_tier,
                     turn_metadata_header,
+                    retry_notifier,
                 )
                 .await
             }
@@ -1669,6 +1719,8 @@ struct ApiTelemetry {
     auth_context: AuthRequestTelemetryContext,
     request_route_telemetry: RequestRouteTelemetry,
     auth_env_telemetry: AuthEnvTelemetry,
+    retry_policy: HttpRetryPolicy,
+    retry_notifier: Option<RequestRetryNotifier>,
 }
 
 impl ApiTelemetry {
@@ -1677,12 +1729,16 @@ impl ApiTelemetry {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        retry_policy: HttpRetryPolicy,
+        retry_notifier: Option<RequestRetryNotifier>,
     ) -> Self {
         Self {
             session_telemetry,
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            retry_policy,
+            retry_notifier,
         }
     }
 }
@@ -1696,13 +1752,13 @@ impl RequestTelemetry for ApiTelemetry {
         duration: Duration,
     ) {
         let error_message = error.map(telemetry_transport_error_message);
-        let status = status.map(|s| s.as_u16());
+        let status_u16 = status.map(|s| s.as_u16());
         let debug = error
             .map(extract_response_debug_context)
             .unwrap_or_default();
         self.session_telemetry.record_api_request(
             attempt,
-            status,
+            status_u16,
             error_message.as_deref(),
             duration,
             self.auth_context.auth_header_attached,
@@ -1737,11 +1793,36 @@ impl RequestTelemetry for ApiTelemetry {
                 auth_recovery_followup_status: self
                     .auth_context
                     .retry_after_unauthorized
-                    .then_some(status)
+                    .then_some(status_u16)
                     .flatten(),
             },
             &self.auth_env_telemetry,
         );
+
+        let should_emit_retry_warning = error.is_some_and(|err| {
+            matches!(
+                err,
+                TransportError::Http { status, .. } if *status == HttpStatusCode::TOO_MANY_REQUESTS
+            ) && self.retry_policy.retry_on.should_retry(
+                err,
+                attempt,
+                self.retry_policy.max_attempts,
+            )
+        });
+        if should_emit_retry_warning
+            && let Some(notifier) = self.retry_notifier.as_ref()
+            && let Some(err) = error
+        {
+            let delay = retry_delay_for_error(err)
+                .unwrap_or_else(|| retry_backoff(self.retry_policy.base_delay, attempt + 1));
+            notifier(RequestRetryNotice {
+                endpoint: self.request_route_telemetry.endpoint,
+                attempt: attempt + 1,
+                max_attempts: self.retry_policy.max_attempts,
+                delay,
+                status,
+            });
+        }
     }
 }
 

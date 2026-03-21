@@ -585,46 +585,63 @@ impl PickerState {
         self.requester.schedule_frame();
     }
 
+    async fn selection_for_current_row(
+        &mut self,
+        action: SessionPickerAction,
+    ) -> Result<Option<SessionSelection>> {
+        if let Some(row) = self.filtered_rows.get(self.selected) {
+            let path = row.path.clone();
+            let thread_id = match row.thread_id {
+                Some(thread_id) => Some(thread_id),
+                None => match path.as_ref() {
+                    Some(path) => {
+                        crate::resolve_session_thread_id(
+                            path.as_path(),
+                            /*id_str_if_uuid*/ None,
+                        )
+                        .await
+                    }
+                    None => None,
+                },
+            };
+            if let Some(thread_id) = thread_id {
+                return Ok(Some(action.selection(path, thread_id)));
+            }
+            self.inline_error = Some(match path {
+                Some(path) => {
+                    format!("Failed to read session metadata from {}", path.display())
+                }
+                None => String::from("Failed to read session metadata from selected session"),
+            });
+            self.request_frame();
+        }
+        Ok(None)
+    }
+
     async fn handle_key(&mut self, key: KeyEvent) -> Result<Option<SessionSelection>> {
         self.inline_error = None;
         match key.code {
             KeyCode::Esc => return Ok(Some(SessionSelection::StartFresh)),
-            KeyCode::Char('c')
+            KeyCode::Char(c)
                 if key
                     .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && c.eq_ignore_ascii_case(&'c') =>
             {
                 return Ok(Some(SessionSelection::Exit));
             }
+            KeyCode::Char(c)
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && c.eq_ignore_ascii_case(&'f') =>
+            {
+                return self
+                    .selection_for_current_row(SessionPickerAction::Fork)
+                    .await;
+            }
             KeyCode::Enter => {
-                if let Some(row) = self.filtered_rows.get(self.selected) {
-                    let path = row.path.clone();
-                    let thread_id = match row.thread_id {
-                        Some(thread_id) => Some(thread_id),
-                        None => match path.as_ref() {
-                            Some(path) => {
-                                crate::resolve_session_thread_id(
-                                    path.as_path(),
-                                    /*id_str_if_uuid*/ None,
-                                )
-                                .await
-                            }
-                            None => None,
-                        },
-                    };
-                    if let Some(thread_id) = thread_id {
-                        return Ok(Some(self.action.selection(path, thread_id)));
-                    }
-                    self.inline_error = Some(match path {
-                        Some(path) => {
-                            format!("Failed to read session metadata from {}", path.display())
-                        }
-                        None => {
-                            String::from("Failed to read session metadata from selected session")
-                        }
-                    });
-                    self.request_frame();
-                }
+                return self.selection_for_current_row(self.action).await;
             }
             KeyCode::Up => {
                 if self.selected > 0 {
@@ -1166,9 +1183,16 @@ fn draw_picker(tui: &mut Tui, state: &PickerState) -> std::io::Result<()> {
 
         // Hint line
         let action_label = state.action.action_label();
-        let hint_line: Line = vec![
+        let mut hint_line: Vec<Span<'static>> = vec![
             key_hint::plain(KeyCode::Enter).into(),
             format!(" to {action_label} ").dim(),
+        ];
+        if matches!(state.action, SessionPickerAction::Resume) {
+            hint_line.push("    ".dim());
+            hint_line.push(key_hint::ctrl(KeyCode::Char('f')).into());
+            hint_line.push(" to fork ".dim());
+        }
+        hint_line.extend([
             "    ".dim(),
             key_hint::plain(KeyCode::Esc).into(),
             " to start new ".dim(),
@@ -1183,9 +1207,8 @@ fn draw_picker(tui: &mut Tui, state: &PickerState) -> std::io::Result<()> {
             "/".dim(),
             key_hint::plain(KeyCode::Down).into(),
             " to browse".dim(),
-        ]
-        .into();
-        frame.render_widget_ref(hint_line, hint);
+        ]);
+        frame.render_widget_ref(Line::from(hint_line), hint);
     })
 }
 
@@ -1980,6 +2003,83 @@ mod tests {
         assert_snapshot!("resume_picker_search_error", snapshot);
     }
 
+    #[tokio::test]
+    async fn ctrl_f_forks_selected_row_in_resume_mode() {
+        let loader: PageLoader = Arc::new(|_| {});
+        let mut state = PickerState::new(
+            PathBuf::from("/tmp"),
+            FrameRequester::test_dummy(),
+            loader,
+            ProviderFilter::MatchDefault(String::from("openai")),
+            true,
+            None,
+            SessionPickerAction::Resume,
+        );
+        let thread_id = ThreadId::new();
+        let row = Row {
+            path: Some(PathBuf::from("/tmp/fork-target.jsonl")),
+            preview: String::from("fork target"),
+            thread_id: Some(thread_id),
+            thread_name: None,
+            created_at: None,
+            updated_at: None,
+            cwd: None,
+            git_branch: None,
+        };
+        state.all_rows = vec![row.clone()];
+        state.filtered_rows = vec![row];
+
+        let selection = state
+            .handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+f should not abort the picker");
+
+        match selection {
+            Some(SessionSelection::Fork(SessionTarget {
+                path,
+                thread_id: selected_thread_id,
+            })) => {
+                assert_eq!(path, Some(PathBuf::from("/tmp/fork-target.jsonl")));
+                assert_eq!(selected_thread_id, thread_id);
+            }
+            other => panic!("unexpected selection: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resume_picker_hint_mentions_ctrl_f_to_fork() {
+        let loader: PageLoader = Arc::new(|_| {});
+        let mut state = PickerState::new(
+            PathBuf::from("/tmp"),
+            FrameRequester::test_dummy(),
+            loader,
+            ProviderFilter::MatchDefault(String::from("openai")),
+            true,
+            None,
+            SessionPickerAction::Resume,
+        );
+        state.all_rows = vec![Row {
+            path: Some(PathBuf::from("/tmp/visible.jsonl")),
+            preview: String::from("visible row"),
+            thread_id: Some(ThreadId::new()),
+            thread_name: None,
+            created_at: None,
+            updated_at: None,
+            cwd: None,
+            git_branch: None,
+        }];
+        state.filtered_rows = state.all_rows.clone();
+
+        let width: u16 = 160;
+        let height: u16 = 5;
+        let rendered = render_picker_for_test(&state, width, height);
+        assert!(
+            rendered.contains("ctrl + f"),
+            "rendered picker:\n{rendered}"
+        );
+        assert!(rendered.contains("to fork"), "rendered picker:\n{rendered}");
+    }
+
     // TODO(jif) fix
     // #[tokio::test]
     // async fn resume_picker_screen_snapshot() {
@@ -2248,6 +2348,74 @@ mod tests {
 
         let snapshot = terminal.backend().to_string();
         assert_snapshot!("resume_picker_thread_names", snapshot);
+    }
+
+    fn render_picker_for_test(state: &PickerState, width: u16, height: u16) -> String {
+        use crate::custom_terminal::Terminal;
+        use crate::test_backend::VT100Backend;
+
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = Terminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 0, width, height));
+
+        {
+            let mut frame = terminal.get_frame();
+            let area = frame.area();
+            let [header, search, columns, list, hint] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(area.height.saturating_sub(4)),
+                Constraint::Length(1),
+            ])
+            .areas(area);
+
+            let header_line: Line = vec![
+                state.action.title().bold().cyan(),
+                "  ".into(),
+                "Sort:".dim(),
+                " ".into(),
+                sort_key_label(state.sort_key).magenta(),
+            ]
+            .into();
+            frame.render_widget_ref(header_line, header);
+            frame.render_widget_ref(search_line(state), search);
+
+            let metrics = calculate_column_metrics(&state.filtered_rows, state.show_all);
+            render_column_headers(&mut frame, columns, &metrics, state.sort_key);
+            render_list(&mut frame, list, state, &metrics);
+
+            let action_label = state.action.action_label();
+            let mut hint_line: Vec<Span<'static>> = vec![
+                key_hint::plain(KeyCode::Enter).into(),
+                format!(" to {action_label} ").dim(),
+            ];
+            if matches!(state.action, SessionPickerAction::Resume) {
+                hint_line.push("    ".dim());
+                hint_line.push(key_hint::ctrl(KeyCode::Char('f')).into());
+                hint_line.push(" to fork ".dim());
+            }
+            hint_line.extend([
+                "    ".dim(),
+                key_hint::plain(KeyCode::Esc).into(),
+                " to start new ".dim(),
+                "    ".dim(),
+                key_hint::ctrl(KeyCode::Char('c')).into(),
+                " to quit ".dim(),
+                "    ".dim(),
+                key_hint::plain(KeyCode::Tab).into(),
+                " to toggle sort ".dim(),
+                "    ".dim(),
+                key_hint::plain(KeyCode::Up).into(),
+                "/".dim(),
+                key_hint::plain(KeyCode::Down).into(),
+                " to browse".dim(),
+            ]);
+            frame.render_widget_ref(Line::from(hint_line), hint);
+        }
+
+        terminal.flush().expect("flush");
+        terminal.backend().to_string()
     }
 
     #[test]

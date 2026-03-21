@@ -123,6 +123,12 @@ async fn run_remote_compact_task_inner_impl(
             turn_context.reasoning_effort,
             turn_context.reasoning_summary,
             &turn_context.session_telemetry,
+            Some(
+                crate::request_retry_notifier::make_request_retry_warning_notifier(
+                    sess.clone(),
+                    turn_context.clone(),
+                ),
+            ),
         )
         .or_else(|err| async {
             let total_usage_breakdown = sess.get_total_token_usage_breakdown().await;

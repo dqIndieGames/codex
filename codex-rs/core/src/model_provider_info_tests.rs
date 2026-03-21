@@ -1,5 +1,6 @@
 use super::*;
 use pretty_assertions::assert_eq;
+use std::time::Duration;
 
 #[test]
 fn test_deserialize_ollama_model_provider_toml() {
@@ -120,4 +121,35 @@ supports_websockets = true
 
     let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
     assert_eq!(provider.websocket_connect_timeout_ms, Some(15_000));
+}
+
+#[test]
+fn request_retry_policy_retries_retryable_429s_by_default() {
+    let provider = ModelProviderInfo {
+        name: "OpenAI".into(),
+        base_url: Some("https://api.openai.com/v1".into()),
+        env_key: None,
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        wire_api: WireApi::Responses,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+    };
+
+    let api_provider = provider
+        .to_api_provider(None)
+        .expect("provider should convert to api provider");
+
+    assert_eq!(api_provider.retry.max_attempts, 4);
+    assert_eq!(api_provider.retry.base_delay, Duration::from_millis(200));
+    assert!(api_provider.retry.retry_429);
+    assert!(api_provider.retry.retry_5xx);
+    assert!(api_provider.retry.retry_transport);
 }

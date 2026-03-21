@@ -49,6 +49,7 @@ use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_message_item_added;
 use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
@@ -1913,6 +1914,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
             summary.unwrap_or(ReasoningSummary::Auto),
             None,
             None,
+            None,
         )
         .await
         .expect("responses stream to start");
@@ -2183,6 +2185,72 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         error_event.message.to_lowercase().contains("usage limit"),
         "unexpected error message for submission {submission_id}: {}",
         error_event.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retryable_429_retries_request_and_emits_warning_event() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+
+    let first = ResponseTemplate::new(429)
+        .insert_header("retry-after", "0")
+        .set_body_json(json!({
+            "error": {
+                "code": "rate_limit_exceeded",
+                "message": "Rate limit exceeded. Try again in 0 seconds."
+            }
+        }));
+    let second = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(sse(vec![
+            ev_response_created("resp_1"),
+            ev_completed("resp_1"),
+        ]));
+
+    let response_mock = mount_response_sequence(&server, vec![first, second]).await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(1);
+        config.model_provider.stream_max_retries = Some(0);
+    });
+    let codex_fixture = builder.build(&server).await?;
+    let codex = codex_fixture.codex.clone();
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await
+        .expect("submission should succeed after retry");
+
+    let warning_event = wait_for_event(&codex, |msg| matches!(msg, EventMsg::Warning(_))).await;
+    let EventMsg::Warning(warning) = warning_event else {
+        unreachable!();
+    };
+    assert!(
+        warning.message.contains("429"),
+        "expected 429 warning, got: {}",
+        warning.message
+    );
+    assert!(
+        warning.message.to_ascii_lowercase().contains("retry"),
+        "expected retry wording, got: {}",
+        warning.message
+    );
+
+    wait_for_event(&codex, |msg| matches!(msg, EventMsg::TurnComplete(_))).await;
+
+    assert_eq!(
+        response_mock.requests().len(),
+        2,
+        "expected one retry after 429"
     );
 
     Ok(())

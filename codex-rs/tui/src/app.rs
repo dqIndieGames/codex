@@ -37,7 +37,6 @@ use crate::resume_picker::SessionSelection;
 use crate::tui;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
-use crate::version::CODEX_CLI_VERSION;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_core::AuthManager;
@@ -1173,7 +1172,7 @@ impl App {
     }
 
     fn clear_ui_header_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.clear_ui_header_lines_with_version(width, CODEX_CLI_VERSION)
+        self.clear_ui_header_lines_with_version(width, crate::version::CODEX_CLI_DISPLAY_VERSION)
     }
 
     fn queue_clear_ui_header(&mut self, tui: &mut tui::Tui) {
@@ -1940,6 +1939,18 @@ impl App {
         )
     }
 
+    fn resume_picker_action_and_target(
+        selection: &SessionSelection,
+    ) -> Option<(CwdPromptAction, &crate::resume_picker::SessionTarget)> {
+        match selection {
+            SessionSelection::Resume(target_session) => {
+                Some((CwdPromptAction::Resume, target_session))
+            }
+            SessionSelection::Fork(target_session) => Some((CwdPromptAction::Fork, target_session)),
+            SessionSelection::StartFresh | SessionSelection::Exit => None,
+        }
+    }
+
     fn should_handle_active_thread_events(
         waiting_for_initial_session_configured: bool,
         has_active_thread_receiver: bool,
@@ -2424,22 +2435,22 @@ impl App {
                 self.start_fresh_session_with_summary_hint(tui).await;
             }
             AppEvent::OpenResumePicker => {
-                match crate::resume_picker::run_resume_picker(
+                let selection = crate::resume_picker::run_resume_picker(
                     tui,
                     &self.config,
                     /*show_all*/ false,
                 )
-                .await?
-                {
-                    SessionSelection::Resume(target_session) => {
+                .await?;
+                match Self::resume_picker_action_and_target(&selection) {
+                    Some((action, target_session)) => {
                         let current_cwd = self.config.cwd.clone();
-                        let resume_cwd = match crate::resolve_cwd_for_resume_or_fork(
+                        let selected_cwd = match crate::resolve_cwd_for_resume_or_fork(
                             tui,
                             &self.config,
                             &current_cwd,
                             target_session.thread_id,
                             &target_session.path,
-                            CwdPromptAction::Resume,
+                            action,
                             /*allow_prompt*/ true,
                         )
                         .await?
@@ -2450,37 +2461,60 @@ impl App {
                                 return Ok(AppRunControl::Exit(ExitReason::UserRequested));
                             }
                         };
-                        let mut resume_config = match self
-                            .rebuild_config_for_resume_or_fallback(&current_cwd, resume_cwd)
+                        let mut selected_config = match self
+                            .rebuild_config_for_resume_or_fallback(&current_cwd, selected_cwd)
                             .await
                         {
                             Ok(cfg) => cfg,
                             Err(err) => {
+                                let action_label = match action {
+                                    CwdPromptAction::Resume => "resume",
+                                    CwdPromptAction::Fork => "fork",
+                                };
                                 self.chat_widget.add_error_message(format!(
-                                    "Failed to rebuild configuration for resume: {err}"
+                                    "Failed to rebuild configuration for {action_label}: {err}"
                                 ));
                                 return Ok(AppRunControl::Continue);
                             }
                         };
-                        self.apply_runtime_policy_overrides(&mut resume_config);
+                        self.apply_runtime_policy_overrides(&mut selected_config);
                         let summary = session_summary(
                             self.chat_widget.token_usage(),
                             self.chat_widget.thread_id(),
                             self.chat_widget.thread_name(),
                         );
-                        match self
-                            .server
-                            .resume_thread_from_rollout(
-                                resume_config.clone(),
-                                target_session.path.clone(),
-                                self.auth_manager.clone(),
-                                /*parent_trace*/ None,
-                            )
-                            .await
-                        {
+                        let selection_result = match action {
+                            CwdPromptAction::Resume => {
+                                self.server
+                                    .resume_thread_from_rollout(
+                                        selected_config.clone(),
+                                        target_session.path.clone(),
+                                        self.auth_manager.clone(),
+                                        /*parent_trace*/ None,
+                                    )
+                                    .await
+                            }
+                            CwdPromptAction::Fork => {
+                                self.session_telemetry.counter(
+                                    "codex.thread.fork",
+                                    /*inc*/ 1,
+                                    &[("source", "resume_picker")],
+                                );
+                                self.server
+                                    .fork_thread(
+                                        usize::MAX,
+                                        selected_config.clone(),
+                                        target_session.path.clone(),
+                                        /*persist_extended_history*/ false,
+                                        /*parent_trace*/ None,
+                                    )
+                                    .await
+                            }
+                        };
+                        match selection_result {
                             Ok(resumed) => {
                                 self.shutdown_current_thread().await;
-                                self.config = resume_config;
+                                self.config = selected_config;
                                 tui.set_notification_method(self.config.tui_notification_method);
                                 self.file_search.update_search_dir(self.config.cwd.clone());
                                 let init = self.chatwidget_init_for_forked_or_resumed_thread(
@@ -2508,15 +2542,17 @@ impl App {
                             }
                             Err(err) => {
                                 let path_display = target_session.path.display();
+                                let action_verb = match action {
+                                    CwdPromptAction::Resume => "resume",
+                                    CwdPromptAction::Fork => "fork",
+                                };
                                 self.chat_widget.add_error_message(format!(
-                                    "Failed to resume session from {path_display}: {err}"
+                                    "Failed to {action_verb} session from {path_display}: {err}"
                                 ));
                             }
                         }
                     }
-                    SessionSelection::Exit
-                    | SessionSelection::StartFresh
-                    | SessionSelection::Fork(_) => {}
+                    None => {}
                 }
 
                 // Leaving alt-screen may blank the inline viewport; force a redraw either way.
@@ -4346,6 +4382,21 @@ mod tests {
             App::should_handle_active_thread_events(wait_for_fork, true),
             true
         );
+    }
+
+    #[test]
+    fn resume_picker_action_and_target_returns_fork_selection() {
+        let selection = SessionSelection::Fork(crate::resume_picker::SessionTarget {
+            path: PathBuf::from("/tmp/fork"),
+            thread_id: ThreadId::new(),
+        });
+
+        match App::resume_picker_action_and_target(&selection) {
+            Some((CwdPromptAction::Fork, target_session)) => {
+                assert_eq!(target_session.path, PathBuf::from("/tmp/fork"));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     #[tokio::test]

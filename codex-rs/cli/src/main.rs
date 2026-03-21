@@ -34,6 +34,8 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use supports_color::Stream;
 
+const CODEX_CLI_DISPLAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (local.1)");
+
 #[cfg(target_os = "macos")]
 mod app_cmd;
 #[cfg(target_os = "macos")]
@@ -58,7 +60,7 @@ use codex_core::terminal::TerminalName;
 #[derive(Debug, Parser)]
 #[clap(
     author,
-    version,
+    version = CODEX_CLI_DISPLAY_VERSION,
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
@@ -1365,6 +1367,12 @@ mod tests {
         assert!(args.last);
         assert_eq!(args.session_id, None);
         assert_eq!(args.prompt.as_deref(), Some("2+2"));
+    }
+
+    #[test]
+    fn clap_version_output_includes_local_suffix() {
+        let version_output = MultitoolCli::command().render_version().to_string();
+        assert!(version_output.contains("local.1"), "{version_output}");
     }
 
     #[test]

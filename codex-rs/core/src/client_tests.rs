@@ -91,7 +91,7 @@ async fn summarize_memories_returns_empty_for_empty_input() {
     let session_telemetry = test_session_telemetry();
 
     let output = client
-        .summarize_memories(Vec::new(), &model_info, None, &session_telemetry)
+        .summarize_memories(Vec::new(), &model_info, None, &session_telemetry, None)
         .await
         .expect("empty summarize request should succeed");
     assert_eq!(output.len(), 0);

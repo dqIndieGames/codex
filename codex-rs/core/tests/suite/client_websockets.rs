@@ -166,6 +166,7 @@ async fn responses_websocket_request_prewarm_reuses_connection() {
             harness.summary,
             None,
             None,
+            None,
         )
         .await
         .expect("websocket prewarm failed");
@@ -247,6 +248,7 @@ async fn responses_websocket_preconnect_is_reused_even_with_header_changes() {
             harness.summary,
             None,
             None,
+            None,
         )
         .await
         .expect("websocket stream failed");
@@ -285,6 +287,7 @@ async fn responses_websocket_request_prewarm_is_reused_even_with_header_changes(
             harness.summary,
             None,
             None,
+            None,
         )
         .await
         .expect("websocket prewarm failed");
@@ -295,6 +298,7 @@ async fn responses_websocket_request_prewarm_is_reused_even_with_header_changes(
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
+            None,
             None,
             None,
         )
@@ -348,6 +352,7 @@ async fn responses_websocket_prewarm_uses_v2_when_provider_supports_websockets()
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
+            None,
             None,
             None,
         )
@@ -697,6 +702,7 @@ async fn responses_websocket_emits_reasoning_included_event() {
             harness.summary,
             None,
             None,
+            None,
         )
         .await
         .expect("websocket stream failed");
@@ -768,6 +774,7 @@ async fn responses_websocket_emits_rate_limit_events() {
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
+            None,
             None,
             None,
         )
@@ -1350,6 +1357,7 @@ async fn responses_websocket_v2_after_error_uses_full_create_without_previous_re
             harness.summary,
             None,
             None,
+            None,
         )
         .await
         .expect("websocket stream failed");
@@ -1435,6 +1443,7 @@ async fn responses_websocket_v2_surfaces_terminal_error_without_close_handshake(
             &harness.session_telemetry,
             harness.effort,
             harness.summary,
+            None,
             None,
             None,
         )
@@ -1668,6 +1677,7 @@ async fn stream_until_complete_with_turn_metadata(
             harness.summary,
             service_tier,
             turn_metadata_header,
+            None,
         )
         .await
         .expect("websocket stream failed");

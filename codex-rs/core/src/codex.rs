@@ -6990,6 +6990,12 @@ async fn try_run_sampling_request(
             turn_context.reasoning_summary,
             turn_context.config.service_tier,
             turn_metadata_header,
+            Some(
+                crate::request_retry_notifier::make_request_retry_warning_notifier(
+                    sess.clone(),
+                    turn_context.clone(),
+                ),
+            ),
         )
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)

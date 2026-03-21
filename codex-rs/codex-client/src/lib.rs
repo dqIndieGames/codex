@@ -27,6 +27,7 @@ pub use crate::request::Response;
 pub use crate::retry::RetryOn;
 pub use crate::retry::RetryPolicy;
 pub use crate::retry::backoff;
+pub use crate::retry::retry_delay_for_error;
 pub use crate::retry::run_with_retry;
 pub use crate::sse::sse_stream;
 pub use crate::telemetry::RequestTelemetry;

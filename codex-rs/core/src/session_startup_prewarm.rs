@@ -234,6 +234,12 @@ async fn schedule_startup_prewarm_inner(
             startup_turn_context.reasoning_summary,
             startup_turn_context.config.service_tier,
             startup_turn_metadata_header.as_deref(),
+            Some(
+                crate::request_retry_notifier::make_request_retry_warning_notifier(
+                    session.clone(),
+                    startup_turn_context.clone(),
+                ),
+            ),
         )
         .await?;
 
