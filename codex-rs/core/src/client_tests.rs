@@ -16,14 +16,14 @@ fn test_model_client(session_source: SessionSource) -> ModelClient {
         crate::model_provider_info::WireApi::Responses,
     );
     ModelClient::new(
-        None,
+        /*auth_manager*/ None,
         ThreadId::new(),
         provider,
         session_source,
-        None,
-        false,
-        false,
-        None,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
     )
 }
 
@@ -62,11 +62,11 @@ fn test_session_telemetry() -> SessionTelemetry {
         ThreadId::new(),
         "gpt-test",
         "gpt-test",
-        None,
-        None,
-        None,
+        /*account_id*/ None,
+        /*account_email*/ None,
+        /*auth_mode*/ None,
         "test-originator".to_string(),
-        false,
+        /*log_user_prompts*/ false,
         "test-terminal".to_string(),
         SessionSource::Cli,
     )
@@ -91,7 +91,12 @@ async fn summarize_memories_returns_empty_for_empty_input() {
     let session_telemetry = test_session_telemetry();
 
     let output = client
-        .summarize_memories(Vec::new(), &model_info, None, &session_telemetry)
+        .summarize_memories(
+            Vec::new(),
+            &model_info,
+            /*effort*/ None,
+            &session_telemetry,
+        )
         .await
         .expect("empty summarize request should succeed");
     assert_eq!(output.len(), 0);
@@ -114,4 +119,67 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
     assert!(auth_context.retry_after_unauthorized);
     assert_eq!(auth_context.recovery_mode, Some("managed"));
     assert_eq!(auth_context.recovery_phase, Some("refresh_token"));
+}
+
+#[test]
+fn refresh_provider_runtime_updates_only_runtime_fields_and_clears_cached_websocket_session() {
+    let provider = crate::model_provider_info::ModelProviderInfo::create_openai_provider(Some(
+        "https://old.example.com/v1".to_string(),
+    ));
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        provider.clone(),
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+    );
+
+    client
+        .state
+        .disable_websockets
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut cached_websocket_session = WebsocketSession::default();
+    cached_websocket_session.set_connection_reused(true);
+    client.store_cached_websocket_session(cached_websocket_session);
+
+    client.refresh_provider_runtime(
+        Some("https://new.example.com/v1".to_string()),
+        Some("new-token".to_string()),
+    );
+
+    let refreshed_provider = client.provider_snapshot();
+    assert_eq!(
+        refreshed_provider.base_url.as_deref(),
+        Some("https://new.example.com/v1")
+    );
+    assert_eq!(
+        refreshed_provider.experimental_bearer_token.as_deref(),
+        Some("new-token")
+    );
+    assert_eq!(refreshed_provider.wire_api, provider.wire_api);
+    assert_eq!(
+        refreshed_provider.supports_websockets,
+        provider.supports_websockets
+    );
+    assert_eq!(
+        refreshed_provider.request_max_retries,
+        provider.request_max_retries
+    );
+    assert_eq!(
+        refreshed_provider.stream_max_retries,
+        provider.stream_max_retries
+    );
+    assert!(
+        client
+            .state
+            .disable_websockets
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let cached_websocket_session = client.take_cached_websocket_session();
+    assert!(!cached_websocket_session.connection_reused());
+    assert!(cached_websocket_session.last_request.is_none());
 }

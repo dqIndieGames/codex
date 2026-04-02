@@ -12,6 +12,7 @@ use crate::tui::Tui;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
 use crate::updates;
+use crate::version::CODEX_CLI_DISPLAY_VERSION;
 use codex_core::config::Config;
 use color_eyre::Result;
 use crossterm::event::KeyCode;
@@ -108,7 +109,7 @@ impl UpdatePromptScreen {
         Self {
             request_frame,
             latest_version,
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            current_version: CODEX_CLI_DISPLAY_VERSION.to_string(),
             update_action,
             highlighted: UpdateSelection::UpdateNow,
             selection: None,
@@ -244,6 +245,7 @@ mod tests {
     use super::*;
     use crate::test_backend::VT100Backend;
     use crate::tui::FrameRequester;
+    use crate::version::CODEX_CLI_DISPLAY_VERSION;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
@@ -255,6 +257,11 @@ mod tests {
             "9.9.9".into(),
             UpdateAction::NpmGlobalLatest,
         )
+    }
+
+    #[test]
+    fn uses_display_version_for_current_version() {
+        assert_eq!(new_prompt().current_version, CODEX_CLI_DISPLAY_VERSION);
     }
 
     #[test]

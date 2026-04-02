@@ -1,9 +1,5 @@
 use crate::exec::ExecToolCallOutput;
 use crate::network_policy_decision::NetworkPolicyDecisionPayload;
-use crate::token_data::KnownPlan;
-use crate::token_data::PlanType;
-use crate::truncate::TruncationPolicy;
-use crate::truncate::truncate_text;
 use chrono::DateTime;
 use chrono::Datelike;
 use chrono::Local;
@@ -11,10 +7,14 @@ use chrono::Utc;
 use codex_async_utils::CancelErr;
 pub use codex_login::auth::RefreshTokenFailedError;
 pub use codex_login::auth::RefreshTokenFailedReason;
+use codex_login::token_data::KnownPlan;
+use codex_login::token_data::PlanType;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::RateLimitSnapshot;
+use codex_utils_output_truncation::TruncationPolicy;
+use codex_utils_output_truncation::truncate_text;
 use reqwest::StatusCode;
 use serde_json;
 use std::io;
@@ -214,11 +214,9 @@ impl CodexErr {
             | CodexErr::AgentLimitReached { .. }
             | CodexErr::Spawn
             | CodexErr::SessionConfiguredNotFirstEvent
-            | CodexErr::UsageLimitReached(_)
             | CodexErr::ServerOverloaded => false,
             CodexErr::Stream(..)
             | CodexErr::Timeout
-            | CodexErr::UnexpectedStatus(_)
             | CodexErr::ResponseStreamFailed(_)
             | CodexErr::ConnectionFailed(_)
             | CodexErr::InternalServerError
@@ -226,6 +224,11 @@ impl CodexErr {
             | CodexErr::Io(_)
             | CodexErr::Json(_)
             | CodexErr::TokioJoin(_) => true,
+            CodexErr::UsageLimitReached(_) => false,
+            CodexErr::UnexpectedStatus(err) => !matches!(
+                err.status,
+                StatusCode::UNAUTHORIZED | StatusCode::PAYMENT_REQUIRED
+            ),
             #[cfg(target_os = "linux")]
             CodexErr::LandlockRuleset(_) | CodexErr::LandlockPathFd(_) => false,
         }
@@ -403,6 +406,7 @@ impl std::fmt::Display for RetryLimitReachedError {
 
 #[derive(Debug)]
 pub struct UsageLimitReachedError {
+    pub(crate) status: Option<StatusCode>,
     pub(crate) plan_type: Option<PlanType>,
     pub(crate) resets_at: Option<DateTime<Utc>>,
     pub(crate) rate_limits: Option<Box<RateLimitSnapshot>>,
@@ -439,7 +443,12 @@ impl std::fmt::Display for UsageLimitReachedError {
                 "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits{}",
                 retry_suffix_after_or(self.resets_at.as_ref())
             ),
-            Some(PlanType::Known(KnownPlan::Team)) | Some(PlanType::Known(KnownPlan::Business)) => {
+            Some(PlanType::Known(
+                KnownPlan::Team
+                | KnownPlan::SelfServeBusinessUsageBased
+                | KnownPlan::Business
+                | KnownPlan::EnterpriseCbpUsageBased,
+            )) => {
                 format!(
                     "You've hit your usage limit. To get more access now, send a request to your admin{}",
                     retry_suffix_after_or(self.resets_at.as_ref())
@@ -602,6 +611,7 @@ impl CodexErr {
         let http_status_code = match self {
             CodexErr::RetryLimit(err) => Some(err.status),
             CodexErr::UnexpectedStatus(err) => Some(err.status),
+            CodexErr::UsageLimitReached(err) => err.status,
             CodexErr::ConnectionFailed(err) => err.source.status(),
             CodexErr::ResponseStreamFailed(err) => err.source.status(),
             _ => None,

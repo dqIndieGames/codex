@@ -12,10 +12,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use tokio::sync::Mutex as AsyncMutex;
 
 use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_protocol::config_types::ForcedLoginMethod;
+use codex_protocol::config_types::ModelProviderAuthInfo;
 
+use super::external_bearer::ExternalBearerAuth;
 use crate::auth::error::RefreshTokenFailedError;
 use crate::auth::error::RefreshTokenFailedReason;
 pub use crate::auth::storage::AuthCredentialsStoreMode;
@@ -28,6 +31,7 @@ use crate::token_data::KnownPlan as InternalKnownPlan;
 use crate::token_data::PlanType as InternalPlanType;
 use crate::token_data::TokenData;
 use crate::token_data::parse_chatgpt_jwt_claims;
+use crate::token_data::parse_jwt_expiration;
 use codex_client::CodexHttpClient;
 use codex_protocol::account::PlanType as AccountPlanType;
 use serde_json::Value;
@@ -69,7 +73,6 @@ impl PartialEq for CodexAuth {
     }
 }
 
-// TODO(pakrym): use token exp field to check for expiration instead
 const TOKEN_REFRESH_INTERVAL: i64 = 8;
 
 const REFRESH_TOKEN_EXPIRED_MESSAGE: &str = "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.";
@@ -92,8 +95,40 @@ pub enum RefreshTokenError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalAuthTokens {
     pub access_token: String,
-    pub chatgpt_account_id: String,
-    pub chatgpt_plan_type: Option<String>,
+    pub chatgpt_metadata: Option<ExternalAuthChatgptMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalAuthChatgptMetadata {
+    pub account_id: String,
+    pub plan_type: Option<String>,
+}
+
+impl ExternalAuthTokens {
+    pub fn access_token_only(access_token: impl Into<String>) -> Self {
+        Self {
+            access_token: access_token.into(),
+            chatgpt_metadata: None,
+        }
+    }
+
+    pub fn chatgpt(
+        access_token: impl Into<String>,
+        chatgpt_account_id: impl Into<String>,
+        chatgpt_plan_type: Option<String>,
+    ) -> Self {
+        Self {
+            access_token: access_token.into(),
+            chatgpt_metadata: Some(ExternalAuthChatgptMetadata {
+                account_id: chatgpt_account_id.into(),
+                plan_type: chatgpt_plan_type,
+            }),
+        }
+    }
+
+    pub fn chatgpt_metadata(&self) -> Option<&ExternalAuthChatgptMetadata> {
+        self.chatgpt_metadata.as_ref()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +144,10 @@ pub struct ExternalAuthRefreshContext {
 
 #[async_trait]
 pub trait ExternalAuthRefresher: Send + Sync {
+    async fn resolve(&self) -> std::io::Result<Option<ExternalAuthTokens>> {
+        Ok(None)
+    }
+
     async fn refresh(
         &self,
         context: ExternalAuthRefreshContext,
@@ -265,7 +304,11 @@ impl CodexAuth {
             InternalKnownPlan::Plus => AccountPlanType::Plus,
             InternalKnownPlan::Pro => AccountPlanType::Pro,
             InternalKnownPlan::Team => AccountPlanType::Team,
+            InternalKnownPlan::SelfServeBusinessUsageBased => {
+                AccountPlanType::SelfServeBusinessUsageBased
+            }
             InternalKnownPlan::Business => AccountPlanType::Business,
+            InternalKnownPlan::EnterpriseCbpUsageBased => AccountPlanType::EnterpriseCbpUsageBased,
             InternalKnownPlan::Enterprise => AccountPlanType::Enterprise,
             InternalKnownPlan::Edu => AccountPlanType::Edu,
         };
@@ -731,11 +774,16 @@ fn refresh_token_endpoint() -> String {
 
 impl AuthDotJson {
     fn from_external_tokens(external: &ExternalAuthTokens) -> std::io::Result<Self> {
+        let Some(chatgpt_metadata) = external.chatgpt_metadata() else {
+            return Err(std::io::Error::other(
+                "external auth tokens are missing ChatGPT metadata",
+            ));
+        };
         let mut token_info =
             parse_chatgpt_jwt_claims(&external.access_token).map_err(std::io::Error::other)?;
-        token_info.chatgpt_account_id = Some(external.chatgpt_account_id.clone());
-        token_info.chatgpt_plan_type = external
-            .chatgpt_plan_type
+        token_info.chatgpt_account_id = Some(chatgpt_metadata.account_id.clone());
+        token_info.chatgpt_plan_type = chatgpt_metadata
+            .plan_type
             .as_deref()
             .map(InternalPlanType::from_raw_value)
             .or(token_info.chatgpt_plan_type)
@@ -744,7 +792,7 @@ impl AuthDotJson {
             id_token: token_info,
             access_token: external.access_token.clone(),
             refresh_token: String::new(),
-            account_id: Some(external.chatgpt_account_id.clone()),
+            account_id: Some(chatgpt_metadata.account_id.clone()),
         };
 
         Ok(Self {
@@ -760,11 +808,11 @@ impl AuthDotJson {
         chatgpt_account_id: &str,
         chatgpt_plan_type: Option<&str>,
     ) -> std::io::Result<Self> {
-        let external = ExternalAuthTokens {
-            access_token: access_token.to_string(),
-            chatgpt_account_id: chatgpt_account_id.to_string(),
-            chatgpt_plan_type: chatgpt_plan_type.map(str::to_string),
-        };
+        let external = ExternalAuthTokens::chatgpt(
+            access_token,
+            chatgpt_account_id,
+            chatgpt_plan_type.map(str::to_string),
+        );
         Self::from_external_tokens(&external)
     }
 
@@ -794,8 +842,36 @@ impl AuthDotJson {
 #[derive(Clone)]
 struct CachedAuth {
     auth: Option<CodexAuth>,
-    /// Callback used to refresh external auth by asking the parent app for new tokens.
-    external_refresher: Option<Arc<dyn ExternalAuthRefresher>>,
+    /// Permanent refresh failure cached for the current auth snapshot so
+    /// later refresh attempts for the same credentials fail fast without network.
+    permanent_refresh_failure: Option<AuthScopedRefreshFailure>,
+}
+
+#[derive(Clone)]
+struct AuthScopedRefreshFailure {
+    auth: CodexAuth,
+    error: RefreshTokenFailedError,
+}
+
+#[derive(Clone)]
+enum ExternalAuth {
+    Bearer(ExternalBearerAuth),
+    ChatgptRefresher(Arc<dyn ExternalAuthRefresher>),
+}
+
+impl Debug for ExternalAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bearer(_) => f
+                .debug_tuple("ExternalAuth::Bearer")
+                .field(&"present")
+                .finish(),
+            Self::ChatgptRefresher(_) => f
+                .debug_tuple("ExternalAuth::ChatgptRefresher")
+                .field(&"present")
+                .finish(),
+        }
+    }
 }
 
 impl Debug for CachedAuth {
@@ -806,8 +882,11 @@ impl Debug for CachedAuth {
                 &self.auth.as_ref().map(CodexAuth::api_auth_mode),
             )
             .field(
-                "external_refresher",
-                &self.external_refresher.as_ref().map(|_| "present"),
+                "permanent_refresh_failure",
+                &self
+                    .permanent_refresh_failure
+                    .as_ref()
+                    .map(|failure| failure.error.reason),
             )
             .finish()
     }
@@ -845,9 +924,14 @@ enum UnauthorizedRecoveryMode {
 // 2. Attempt to refresh the token using OAuth token refresh flow.
 // If after both steps the server still responds with 401 we let the error bubble to the user.
 //
-// For external ChatGPT auth tokens (chatgptAuthTokens), UnauthorizedRecovery does not touch disk or refresh
-// tokens locally. Instead it calls the ExternalAuthRefresher (account/chatgptAuthTokens/refresh) to ask the
-// parent app for new tokens, stores them in the ephemeral auth store, and retries once.
+// For external auth sources, UnauthorizedRecovery retries once.
+//
+// - External ChatGPT auth tokens (`chatgptAuthTokens`) are refreshed by asking
+//   the parent app for new tokens through the configured
+//   `ExternalAuthRefresher`, persisting them in the ephemeral auth store, and
+//   reloading the cached auth snapshot.
+// - External bearer auth sources for custom model providers rerun the provider
+//   auth command without touching disk.
 pub struct UnauthorizedRecovery {
     manager: Arc<AuthManager>,
     step: UnauthorizedRecoveryStep,
@@ -870,9 +954,10 @@ impl UnauthorizedRecovery {
     fn new(manager: Arc<AuthManager>) -> Self {
         let cached_auth = manager.auth_cached();
         let expected_account_id = cached_auth.as_ref().and_then(CodexAuth::get_account_id);
-        let mode = if cached_auth
-            .as_ref()
-            .is_some_and(CodexAuth::is_external_chatgpt_tokens)
+        let mode = if manager.has_external_bearer_auth()
+            || cached_auth
+                .as_ref()
+                .is_some_and(CodexAuth::is_external_chatgpt_tokens)
         {
             UnauthorizedRecoveryMode::External
         } else {
@@ -891,6 +976,10 @@ impl UnauthorizedRecovery {
     }
 
     pub fn has_next(&self) -> bool {
+        if self.manager.has_external_bearer_auth() {
+            return !matches!(self.step, UnauthorizedRecoveryStep::Done);
+        }
+
         if !self
             .manager
             .auth_cached()
@@ -901,7 +990,7 @@ impl UnauthorizedRecovery {
         }
 
         if self.mode == UnauthorizedRecoveryMode::External
-            && !self.manager.has_external_auth_refresher()
+            && !self.manager.has_external_chatgpt_auth_refresher()
         {
             return false;
         }
@@ -910,6 +999,14 @@ impl UnauthorizedRecovery {
     }
 
     pub fn unavailable_reason(&self) -> &'static str {
+        if self.manager.has_external_bearer_auth() {
+            return if matches!(self.step, UnauthorizedRecoveryStep::Done) {
+                "recovery_exhausted"
+            } else {
+                "ready"
+            };
+        }
+
         if !self
             .manager
             .auth_cached()
@@ -920,7 +1017,7 @@ impl UnauthorizedRecovery {
         }
 
         if self.mode == UnauthorizedRecoveryMode::External
-            && !self.manager.has_external_auth_refresher()
+            && !self.manager.has_external_chatgpt_auth_refresher()
         {
             return "no_external_refresher";
         }
@@ -1022,6 +1119,8 @@ pub struct AuthManager {
     enable_codex_api_key_env: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     forced_chatgpt_workspace_id: RwLock<Option<String>>,
+    refresh_lock: AsyncMutex<()>,
+    external_auth: RwLock<Option<ExternalAuth>>,
 }
 
 impl AuthManager {
@@ -1045,11 +1144,13 @@ impl AuthManager {
             codex_home,
             inner: RwLock::new(CachedAuth {
                 auth: managed_auth,
-                external_refresher: None,
+                permanent_refresh_failure: None,
             }),
             enable_codex_api_key_env,
             auth_credentials_store_mode,
             forced_chatgpt_workspace_id: RwLock::new(None),
+            refresh_lock: AsyncMutex::new(()),
+            external_auth: RwLock::new(None),
         }
     }
 
@@ -1057,7 +1158,7 @@ impl AuthManager {
     pub fn from_auth_for_testing(auth: CodexAuth) -> Arc<Self> {
         let cached = CachedAuth {
             auth: Some(auth),
-            external_refresher: None,
+            permanent_refresh_failure: None,
         };
 
         Arc::new(Self {
@@ -1066,6 +1167,8 @@ impl AuthManager {
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             forced_chatgpt_workspace_id: RwLock::new(None),
+            refresh_lock: AsyncMutex::new(()),
+            external_auth: RwLock::new(None),
         })
     }
 
@@ -1073,7 +1176,7 @@ impl AuthManager {
     pub fn from_auth_for_testing_with_home(auth: CodexAuth, codex_home: PathBuf) -> Arc<Self> {
         let cached = CachedAuth {
             auth: Some(auth),
-            external_refresher: None,
+            permanent_refresh_failure: None,
         };
         Arc::new(Self {
             codex_home,
@@ -1081,6 +1184,23 @@ impl AuthManager {
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             forced_chatgpt_workspace_id: RwLock::new(None),
+            refresh_lock: AsyncMutex::new(()),
+            external_auth: RwLock::new(None),
+        })
+    }
+
+    pub fn external_bearer_only(config: ModelProviderAuthInfo) -> Arc<Self> {
+        Arc::new(Self {
+            codex_home: PathBuf::from("non-existent"),
+            inner: RwLock::new(CachedAuth {
+                auth: None,
+                permanent_refresh_failure: None,
+            }),
+            enable_codex_api_key_env: false,
+            auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+            forced_chatgpt_workspace_id: RwLock::new(None),
+            refresh_lock: AsyncMutex::new(()),
+            external_auth: RwLock::new(Some(ExternalAuth::Bearer(ExternalBearerAuth::new(config)))),
         })
     }
 
@@ -1089,11 +1209,28 @@ impl AuthManager {
         self.inner.read().ok().and_then(|c| c.auth.clone())
     }
 
+    pub fn refresh_failure_for_auth(&self, auth: &CodexAuth) -> Option<RefreshTokenFailedError> {
+        self.inner.read().ok().and_then(|cached| {
+            cached
+                .permanent_refresh_failure
+                .as_ref()
+                .filter(|failure| Self::auths_equal_for_refresh(Some(auth), Some(&failure.auth)))
+                .map(|failure| failure.error.clone())
+        })
+    }
+
     /// Current cached auth (clone). May be `None` if not logged in or load failed.
-    /// Refreshes cached ChatGPT tokens if they are stale before returning.
+    /// For stale managed ChatGPT auth, first performs a guarded reload and then
+    /// refreshes only if the on-disk auth is unchanged.
     pub async fn auth(&self) -> Option<CodexAuth> {
+        if let Some(auth) = self.resolve_external_bearer_auth().await {
+            return Some(auth);
+        }
+
         let auth = self.auth_cached()?;
-        if let Err(err) = self.refresh_if_stale(&auth).await {
+        if Self::is_stale_for_proactive_refresh(&auth)
+            && let Err(err) = self.refresh_token().await
+        {
             tracing::error!("Failed to refresh token: {}", err);
             return Some(auth);
         }
@@ -1163,6 +1300,25 @@ impl AuthManager {
         }
     }
 
+    /// Records a permanent refresh failure only if the failed refresh was
+    /// attempted against the auth snapshot that is still cached.
+    fn record_permanent_refresh_failure_if_unchanged(
+        &self,
+        attempted_auth: &CodexAuth,
+        error: &RefreshTokenFailedError,
+    ) {
+        if let Ok(mut guard) = self.inner.write() {
+            let current_auth_matches =
+                Self::auths_equal_for_refresh(Some(attempted_auth), guard.auth.as_ref());
+            if current_auth_matches {
+                guard.permanent_refresh_failure = Some(AuthScopedRefreshFailure {
+                    auth: attempted_auth.clone(),
+                    error: error.clone(),
+                });
+            }
+        }
+    }
+
     fn load_auth_from_storage(&self) -> Option<CodexAuth> {
         load_auth(
             &self.codex_home,
@@ -1177,6 +1333,11 @@ impl AuthManager {
         if let Ok(mut guard) = self.inner.write() {
             let previous = guard.auth.as_ref();
             let changed = !AuthManager::auths_equal(previous, new_auth.as_ref());
+            let auth_changed_for_refresh =
+                !Self::auths_equal_for_refresh(previous, new_auth.as_ref());
+            if auth_changed_for_refresh {
+                guard.permanent_refresh_failure = None;
+            }
             tracing::info!("Reloaded auth, changed: {changed}");
             guard.auth = new_auth;
             changed
@@ -1185,15 +1346,15 @@ impl AuthManager {
         }
     }
 
-    pub fn set_external_auth_refresher(&self, refresher: Arc<dyn ExternalAuthRefresher>) {
-        if let Ok(mut guard) = self.inner.write() {
-            guard.external_refresher = Some(refresher);
+    pub fn set_external_chatgpt_auth_refresher(&self, refresher: Arc<dyn ExternalAuthRefresher>) {
+        if let Ok(mut guard) = self.external_auth.write() {
+            *guard = Some(ExternalAuth::ChatgptRefresher(refresher));
         }
     }
 
-    pub fn clear_external_auth_refresher(&self) {
-        if let Ok(mut guard) = self.inner.write() {
-            guard.external_refresher = None;
+    pub fn clear_external_chatgpt_auth_refresher(&self) {
+        if let Ok(mut guard) = self.external_auth.write() {
+            *guard = None;
         }
     }
 
@@ -1210,15 +1371,15 @@ impl AuthManager {
             .and_then(|guard| guard.clone())
     }
 
-    pub fn has_external_auth_refresher(&self) -> bool {
-        self.inner
+    pub fn has_external_chatgpt_auth_refresher(&self) -> bool {
+        self.external_auth
             .read()
             .ok()
-            .map(|guard| guard.external_refresher.is_some())
+            .map(|guard| matches!(guard.as_ref(), Some(ExternalAuth::ChatgptRefresher(_))))
             .unwrap_or(false)
     }
 
-    pub fn is_external_auth_active(&self) -> bool {
+    pub fn is_external_chatgpt_auth_active(&self) -> bool {
         self.auth_cached()
             .as_ref()
             .is_some_and(CodexAuth::is_external_chatgpt_tokens)
@@ -1241,8 +1402,48 @@ impl AuthManager {
         ))
     }
 
+    pub fn shared_with_external_chatgpt_auth_refresher(
+        codex_home: PathBuf,
+        enable_codex_api_key_env: bool,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+        refresher: Arc<dyn ExternalAuthRefresher>,
+    ) -> Arc<Self> {
+        let manager = Self::shared(
+            codex_home,
+            enable_codex_api_key_env,
+            auth_credentials_store_mode,
+        );
+        manager.set_external_chatgpt_auth_refresher(refresher);
+        manager
+    }
+
     pub fn unauthorized_recovery(self: &Arc<Self>) -> UnauthorizedRecovery {
         UnauthorizedRecovery::new(Arc::clone(self))
+    }
+
+    fn external_auth(&self) -> Option<ExternalAuth> {
+        self.external_auth
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    fn has_external_bearer_auth(&self) -> bool {
+        matches!(self.external_auth(), Some(ExternalAuth::Bearer(_)))
+    }
+
+    async fn resolve_external_bearer_auth(&self) -> Option<CodexAuth> {
+        let ExternalAuth::Bearer(bearer_auth) = self.external_auth()? else {
+            return None;
+        };
+
+        match bearer_auth.resolve_access_token().await {
+            Ok(access_token) => Some(CodexAuth::from_api_key(&access_token)),
+            Err(err) => {
+                tracing::error!("Failed to resolve external bearer auth: {err}");
+                None
+            }
+        }
     }
 
     /// Attempt to refresh the token by first performing a guarded reload. Auth
@@ -1251,7 +1452,14 @@ impl AuthManager {
     /// can assume that some other instance already refreshed it. If the persisted
     /// token is the same as the cached, then ask the token authority to refresh.
     pub async fn refresh_token(&self) -> Result<(), RefreshTokenError> {
+        let _refresh_guard = self.refresh_lock.lock().await;
         let auth_before_reload = self.auth_cached();
+        if auth_before_reload
+            .as_ref()
+            .is_some_and(CodexAuth::is_api_key_auth)
+        {
+            return Ok(());
+        }
         let expected_account_id = auth_before_reload
             .as_ref()
             .and_then(CodexAuth::get_account_id);
@@ -1261,7 +1469,7 @@ impl AuthManager {
                 tracing::info!("Skipping token refresh because auth changed after guarded reload.");
                 Ok(())
             }
-            ReloadOutcome::ReloadedNoChange => self.refresh_token_from_authority().await,
+            ReloadOutcome::ReloadedNoChange => self.refresh_token_from_authority_impl().await,
             ReloadOutcome::Skipped => {
                 Err(RefreshTokenError::Permanent(RefreshTokenFailedError::new(
                     RefreshTokenFailedReason::Other,
@@ -1276,13 +1484,23 @@ impl AuthManager {
     /// observe refreshed token. If the token refresh fails, returns the error to
     /// the caller.
     pub async fn refresh_token_from_authority(&self) -> Result<(), RefreshTokenError> {
+        let _refresh_guard = self.refresh_lock.lock().await;
+        self.refresh_token_from_authority_impl().await
+    }
+
+    async fn refresh_token_from_authority_impl(&self) -> Result<(), RefreshTokenError> {
         tracing::info!("Refreshing token");
 
         let auth = match self.auth_cached() {
             Some(auth) => auth,
             None => return Ok(()),
         };
-        match auth {
+        if let Some(error) = self.refresh_failure_for_auth(&auth) {
+            return Err(RefreshTokenError::Permanent(error));
+        }
+
+        let attempted_auth = auth.clone();
+        let result = match auth {
             CodexAuth::ChatgptAuthTokens(_) => {
                 self.refresh_external_auth(ExternalAuthRefreshReason::Unauthorized)
                     .await
@@ -1294,11 +1512,14 @@ impl AuthManager {
                     ))
                 })?;
                 self.refresh_and_persist_chatgpt_token(&chatgpt_auth, token_data.refresh_token)
-                    .await?;
-                Ok(())
+                    .await
             }
             CodexAuth::ApiKey(_) => Ok(()),
+        };
+        if let Err(RefreshTokenError::Permanent(error)) = &result {
+            self.record_permanent_refresh_failure_if_unchanged(&attempted_auth, error);
         }
+        result
     }
 
     /// Log out by deleting the on‑disk auth.json (if present). Returns Ok(true)
@@ -1313,54 +1534,54 @@ impl AuthManager {
     }
 
     pub fn get_api_auth_mode(&self) -> Option<ApiAuthMode> {
+        if self.has_external_bearer_auth() {
+            return Some(ApiAuthMode::ApiKey);
+        }
         self.auth_cached().as_ref().map(CodexAuth::api_auth_mode)
     }
 
     pub fn auth_mode(&self) -> Option<crate::AuthMode> {
+        if self.has_external_bearer_auth() {
+            return Some(crate::AuthMode::ApiKey);
+        }
         self.auth_cached().as_ref().map(CodexAuth::auth_mode)
     }
 
-    async fn refresh_if_stale(&self, auth: &CodexAuth) -> Result<bool, RefreshTokenError> {
+    fn is_stale_for_proactive_refresh(auth: &CodexAuth) -> bool {
         let chatgpt_auth = match auth {
             CodexAuth::Chatgpt(chatgpt_auth) => chatgpt_auth,
-            _ => return Ok(false),
+            _ => return false,
         };
 
         let auth_dot_json = match chatgpt_auth.current_auth_json() {
             Some(auth_dot_json) => auth_dot_json,
-            None => return Ok(false),
+            None => return false,
         };
-        let tokens = match auth_dot_json.tokens {
-            Some(tokens) => tokens,
-            None => return Ok(false),
-        };
+        if let Some(tokens) = auth_dot_json.tokens.as_ref()
+            && let Ok(Some(expires_at)) = parse_jwt_expiration(&tokens.access_token)
+        {
+            return expires_at <= Utc::now();
+        }
         let last_refresh = match auth_dot_json.last_refresh {
             Some(last_refresh) => last_refresh,
-            None => return Ok(false),
+            None => return false,
         };
-        if last_refresh >= Utc::now() - chrono::Duration::days(TOKEN_REFRESH_INTERVAL) {
-            return Ok(false);
-        }
-        self.refresh_and_persist_chatgpt_token(chatgpt_auth, tokens.refresh_token)
-            .await?;
-        Ok(true)
+        last_refresh < Utc::now() - chrono::Duration::days(TOKEN_REFRESH_INTERVAL)
     }
 
     async fn refresh_external_auth(
         &self,
         reason: ExternalAuthRefreshReason,
     ) -> Result<(), RefreshTokenError> {
-        let forced_chatgpt_workspace_id = self.forced_chatgpt_workspace_id();
-        let refresher = match self.inner.read() {
-            Ok(guard) => guard.external_refresher.clone(),
-            Err(_) => {
-                return Err(RefreshTokenError::Transient(std::io::Error::other(
-                    "failed to read external auth state",
-                )));
-            }
-        };
+        if let Some(ExternalAuth::Bearer(bearer_auth)) = self.external_auth() {
+            return bearer_auth
+                .refresh_after_unauthorized()
+                .await
+                .map_err(RefreshTokenError::Transient);
+        }
 
-        let Some(refresher) = refresher else {
+        let forced_chatgpt_workspace_id = self.forced_chatgpt_workspace_id();
+        let Some(ExternalAuth::ChatgptRefresher(refresher)) = self.external_auth() else {
             return Err(RefreshTokenError::Transient(std::io::Error::other(
                 "external auth refresher is not configured",
             )));
@@ -1376,13 +1597,18 @@ impl AuthManager {
         };
 
         let refreshed = refresher.refresh(context).await?;
+        let Some(chatgpt_metadata) = refreshed.chatgpt_metadata() else {
+            return Err(RefreshTokenError::Transient(std::io::Error::other(
+                "external auth refresh did not return ChatGPT metadata",
+            )));
+        };
         if let Some(expected_workspace_id) = forced_chatgpt_workspace_id.as_deref()
-            && refreshed.chatgpt_account_id != expected_workspace_id
+            && chatgpt_metadata.account_id != expected_workspace_id
         {
             return Err(RefreshTokenError::Transient(std::io::Error::other(
                 format!(
                     "external auth refresh returned workspace {:?}, expected {expected_workspace_id:?}",
-                    refreshed.chatgpt_account_id,
+                    chatgpt_metadata.account_id,
                 ),
             )));
         }

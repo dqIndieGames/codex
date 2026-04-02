@@ -446,7 +446,9 @@ pub struct RealtimeWebsocketClient {
 
 impl RealtimeWebsocketClient {
     pub fn new(provider: Provider) -> Self {
-        Self { provider }
+        Self {
+            provider: provider.with_retry_max_attempts(1),
+        }
     }
 
     pub async fn connect(
@@ -967,8 +969,8 @@ mod tests {
     fn websocket_url_from_http_base_defaults_to_ws_path() {
         let url = websocket_url_from_api_url(
             "http://127.0.0.1:8011",
-            None,
-            None,
+            /*query_params*/ None,
+            /*model*/ None,
             RealtimeEventParser::V1,
             RealtimeSessionMode::Conversational,
         )
@@ -983,7 +985,7 @@ mod tests {
     fn websocket_url_from_ws_base_defaults_to_ws_path() {
         let url = websocket_url_from_api_url(
             "wss://example.com",
-            None,
+            /*query_params*/ None,
             Some("realtime-test-model"),
             RealtimeEventParser::V1,
             RealtimeSessionMode::Conversational,
@@ -999,7 +1001,7 @@ mod tests {
     fn websocket_url_from_v1_base_appends_realtime_path() {
         let url = websocket_url_from_api_url(
             "https://api.openai.com/v1",
-            None,
+            /*query_params*/ None,
             Some("snapshot"),
             RealtimeEventParser::V1,
             RealtimeSessionMode::Conversational,
@@ -1015,7 +1017,7 @@ mod tests {
     fn websocket_url_from_nested_v1_base_appends_realtime_path() {
         let url = websocket_url_from_api_url(
             "https://example.com/openai/v1",
-            None,
+            /*query_params*/ None,
             Some("snapshot"),
             RealtimeEventParser::V1,
             RealtimeSessionMode::Conversational,
@@ -1050,8 +1052,8 @@ mod tests {
     fn websocket_url_v1_ignores_transcription_mode() {
         let url = websocket_url_from_api_url(
             "https://example.com",
-            None,
-            None,
+            /*query_params*/ None,
+            /*model*/ None,
             RealtimeEventParser::V1,
             RealtimeSessionMode::Transcription,
         )
@@ -1085,8 +1087,8 @@ mod tests {
     fn websocket_url_omits_intent_for_realtime_v2_transcription_mode() {
         let url = websocket_url_from_api_url(
             "https://example.com",
-            None,
-            None,
+            /*query_params*/ None,
+            /*model*/ None,
             RealtimeEventParser::RealtimeV2,
             RealtimeSessionMode::Transcription,
         )
@@ -1248,6 +1250,7 @@ mod tests {
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
+                retry_402: false,
                 retry_429: false,
                 retry_5xx: false,
                 retry_transport: false,
@@ -1521,6 +1524,7 @@ mod tests {
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
+                retry_402: false,
                 retry_429: false,
                 retry_5xx: false,
                 retry_transport: false,
@@ -1625,6 +1629,7 @@ mod tests {
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
+                retry_402: false,
                 retry_429: false,
                 retry_5xx: false,
                 retry_transport: false,
@@ -1727,6 +1732,7 @@ mod tests {
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
+                retry_402: false,
                 retry_429: false,
                 retry_5xx: false,
                 retry_transport: false,
@@ -1815,6 +1821,7 @@ mod tests {
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
+                retry_402: false,
                 retry_429: false,
                 retry_5xx: false,
                 retry_transport: false,

@@ -78,9 +78,11 @@ where
 {
     // Wraps `run_with_retry` to attach per-attempt request telemetry for both
     // unary and streaming HTTP calls.
+    let retry_policy = policy.clone();
     run_with_retry(policy, make_request, move |req, attempt| {
         let telemetry = telemetry.clone();
         let send = send.clone();
+        let retry_policy = retry_policy.clone();
         async move {
             let start = Instant::now();
             let result = send(req).await;
@@ -90,6 +92,13 @@ where
                     Err(err) => (http_status(err), Some(err)),
                 };
                 t.on_request(attempt, status, err, start.elapsed());
+                if let Some(err) = err
+                    && retry_policy
+                        .retry_on
+                        .should_retry(err, attempt, retry_policy.max_attempts)
+                {
+                    t.on_request_retry(attempt + 1, retry_policy.max_attempts, status, err);
+                }
             }
             result
         }

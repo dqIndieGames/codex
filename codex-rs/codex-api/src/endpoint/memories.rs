@@ -19,7 +19,7 @@ pub struct MemoriesClient<T: HttpTransport, A: AuthProvider> {
 impl<T: HttpTransport, A: AuthProvider> MemoriesClient<T, A> {
     pub fn new(transport: T, provider: Provider, auth: A) -> Self {
         Self {
-            session: EndpointSession::new(transport, provider, auth),
+            session: EndpointSession::new(transport, provider.with_retry_max_attempts(1), auth),
         }
     }
 
@@ -147,6 +147,7 @@ mod tests {
             retry: RetryConfig {
                 max_attempts: 1,
                 base_delay: Duration::from_millis(1),
+                retry_402: false,
                 retry_429: false,
                 retry_5xx: true,
                 retry_transport: true,

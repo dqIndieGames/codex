@@ -1,5 +1,12 @@
 use super::*;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_absolute_path::AbsolutePathBufGuard;
 use pretty_assertions::assert_eq;
+use std::num::NonZeroU64;
+use std::env;
+use std::ffi::OsStr;
+use serial_test::serial;
+use tempfile::tempdir;
 
 #[test]
 fn test_deserialize_ollama_model_provider_toml() {
@@ -13,6 +20,7 @@ base_url = "http://localhost:11434/v1"
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        auth: None,
         wire_api: WireApi::Responses,
         query_params: None,
         http_headers: None,
@@ -43,6 +51,7 @@ query_params = { api-version = "2025-04-01-preview" }
         env_key: Some("AZURE_OPENAI_API_KEY".into()),
         env_key_instructions: None,
         experimental_bearer_token: None,
+        auth: None,
         wire_api: WireApi::Responses,
         query_params: Some(maplit::hashmap! {
             "api-version".to_string() => "2025-04-01-preview".to_string(),
@@ -76,6 +85,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
         env_key: Some("API_KEY".into()),
         env_key_instructions: None,
         experimental_bearer_token: None,
+        auth: None,
         wire_api: WireApi::Responses,
         query_params: None,
         http_headers: Some(maplit::hashmap! {
@@ -120,4 +130,121 @@ supports_websockets = true
 
     let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
     assert_eq!(provider.websocket_connect_timeout_ms, Some(15_000));
+}
+
+#[test]
+fn test_deserialize_provider_auth_config_defaults() {
+    let base_dir = tempdir().unwrap();
+    let provider_toml = r#"
+name = "Corp"
+
+[auth]
+command = "./scripts/print-token"
+args = ["--format=text"]
+        "#;
+
+    let provider: ModelProviderInfo = {
+        let _guard = AbsolutePathBufGuard::new(base_dir.path());
+        toml::from_str(provider_toml).unwrap()
+    };
+
+    assert_eq!(
+        provider.auth,
+        Some(ModelProviderAuthInfo {
+            command: "./scripts/print-token".to_string(),
+            args: vec!["--format=text".to_string()],
+            timeout_ms: NonZeroU64::new(5_000).unwrap(),
+            refresh_interval_ms: NonZeroU64::new(300_000).unwrap(),
+            cwd: AbsolutePathBuf::resolve_path_against_base(".", base_dir.path()).unwrap(),
+        })
+    );
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &OsStr) -> Self {
+        let original = env::var_os(key);
+        unsafe {
+            env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.original.take() {
+            Some(value) => unsafe {
+                env::set_var(self.key, value);
+            },
+            None => unsafe {
+                env::remove_var(self.key);
+            },
+        }
+    }
+}
+
+#[test]
+fn retry_mode_from_env_defaults_to_unbounded_without_test_threads() {
+    assert_eq!(retry_mode_from_env(None, false), RetryMode::Unbounded);
+}
+
+#[test]
+fn retry_mode_from_env_defaults_to_bounded_with_rust_test_threads() {
+    assert_eq!(retry_mode_from_env(None, true), RetryMode::Bounded);
+}
+
+#[test]
+#[serial]
+fn bounded_retry_mode_preserves_configured_retry_limits() {
+    let _guard = EnvVarGuard::set(INTERNAL_RETRY_MODE_ENV, OsStr::new("bounded"));
+    let provider = ModelProviderInfo::create_openai_provider(None);
+
+    assert_eq!(provider.request_retry_attempts(), provider.request_max_retries());
+    assert_eq!(
+        provider.stream_retry_budget(),
+        Some(provider.stream_max_retries())
+    );
+    assert!(!provider.retries_are_unbounded());
+}
+
+#[test]
+#[serial]
+fn unbounded_retry_mode_exposes_local_retry_defaults() {
+    let _guard = EnvVarGuard::set(INTERNAL_RETRY_MODE_ENV, OsStr::new("unbounded"));
+    let provider = ModelProviderInfo::create_openai_provider(None);
+    let api_provider = provider.to_api_provider(None).expect("api provider");
+
+    assert_eq!(provider.request_retry_attempts(), UNBOUNDED_RETRY_ATTEMPTS);
+    assert_eq!(provider.stream_retry_budget(), None);
+    assert_eq!(
+        provider.stream_fallback_retry_threshold(),
+        provider.stream_max_retries()
+    );
+    assert!(provider.retries_are_unbounded());
+    assert_eq!(api_provider.retry.max_attempts, UNBOUNDED_RETRY_ATTEMPTS);
+    assert!(api_provider.retry.retry_402);
+    assert!(api_provider.retry.retry_429);
+}
+
+#[test]
+#[serial]
+fn current_retry_mode_defaults_to_bounded_when_cargo_target_tmpdir_present() {
+    let _tmpdir = EnvVarGuard::set("CARGO_TARGET_TMPDIR", OsStr::new("tmp"));
+    let _override = EnvVarGuard::set(INTERNAL_RETRY_MODE_ENV, OsStr::new(""));
+
+    assert_eq!(current_retry_mode(), RetryMode::Bounded);
+}
+
+#[test]
+#[serial]
+fn explicit_retry_mode_override_wins_inside_test_harness() {
+    let _tmpdir = EnvVarGuard::set("CARGO_TARGET_TMPDIR", OsStr::new("tmp"));
+    let _override = EnvVarGuard::set(INTERNAL_RETRY_MODE_ENV, OsStr::new("unbounded"));
+
+    assert_eq!(current_retry_mode(), RetryMode::Unbounded);
 }

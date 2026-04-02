@@ -9,6 +9,7 @@ use crate::auth::AuthMode;
 use crate::error::EnvVarError;
 use codex_api::Provider as ApiProvider;
 use codex_api::provider::RetryConfig as ApiRetryConfig;
+use codex_protocol::config_types::ModelProviderAuthInfo;
 use http::HeaderMap;
 use http::header::HeaderName;
 use http::header::HeaderValue;
@@ -27,12 +28,41 @@ pub(crate) const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 const MAX_STREAM_MAX_RETRIES: u64 = 100;
 /// Hard cap for user-configured `request_max_retries`.
 const MAX_REQUEST_MAX_RETRIES: u64 = 100;
+const UNBOUNDED_RETRY_ATTEMPTS: u64 = u64::MAX;
+const INTERNAL_RETRY_MODE_ENV: &str = "CODEX_INTERNAL_RETRY_MODE";
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
 const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub(crate) const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub(crate) const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetryMode {
+    Bounded,
+    Unbounded,
+}
+
+fn retry_mode_from_env(env_override: Option<&str>, rust_test_threads_present: bool) -> RetryMode {
+    match env_override.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if value.eq_ignore_ascii_case("bounded") => RetryMode::Bounded,
+        Some(value) if value.eq_ignore_ascii_case("unbounded") => RetryMode::Unbounded,
+        _ if rust_test_threads_present => RetryMode::Bounded,
+        _ => RetryMode::Unbounded,
+    }
+}
+
+fn running_under_test_harness() -> bool {
+    cfg!(test)
+        || std::env::var_os("RUST_TEST_THREADS").is_some()
+        || std::env::var_os("NEXTEST").is_some()
+        || std::env::var_os("CARGO_TARGET_TMPDIR").is_some()
+}
+
+fn current_retry_mode() -> RetryMode {
+    let env_override = std::env::var(INTERNAL_RETRY_MODE_ENV).ok();
+    retry_mode_from_env(env_override.as_deref(), running_under_test_harness())
+}
 
 /// Wire protocol that the provider speaks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
@@ -86,6 +116,9 @@ pub struct ModelProviderInfo {
     /// this may be necessary when using this programmatically.
     pub experimental_bearer_token: Option<String>,
 
+    /// Command-backed bearer-token configuration for this provider.
+    pub auth: Option<ModelProviderAuthInfo>,
+
     /// Which wire protocol this provider expects.
     #[serde(default)]
     pub wire_api: WireApi,
@@ -130,6 +163,36 @@ pub struct ModelProviderInfo {
 }
 
 impl ModelProviderInfo {
+    pub(crate) fn validate(&self) -> std::result::Result<(), String> {
+        let Some(auth) = self.auth.as_ref() else {
+            return Ok(());
+        };
+
+        if auth.command.trim().is_empty() {
+            return Err("provider auth.command must not be empty".to_string());
+        }
+
+        let mut conflicts = Vec::new();
+        if self.env_key.is_some() {
+            conflicts.push("env_key");
+        }
+        if self.experimental_bearer_token.is_some() {
+            conflicts.push("experimental_bearer_token");
+        }
+        if self.requires_openai_auth {
+            conflicts.push("requires_openai_auth");
+        }
+
+        if conflicts.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "provider auth cannot be combined with {}",
+                conflicts.join(", ")
+            ))
+        }
+    }
+
     fn build_header_map(&self) -> crate::error::Result<HeaderMap> {
         let capacity = self.http_headers.as_ref().map_or(0, HashMap::len)
             + self.env_http_headers.as_ref().map_or(0, HashMap::len);
@@ -173,9 +236,10 @@ impl ModelProviderInfo {
 
         let headers = self.build_header_map()?;
         let retry = ApiRetryConfig {
-            max_attempts: self.request_max_retries(),
+            max_attempts: self.request_retry_attempts(),
             base_delay: Duration::from_millis(200),
-            retry_429: false,
+            retry_402: true,
+            retry_429: true,
             retry_5xx: true,
             retry_transport: true,
         };
@@ -218,11 +282,36 @@ impl ModelProviderInfo {
             .min(MAX_REQUEST_MAX_RETRIES)
     }
 
+    /// Effective request retry attempts for the current runtime mode.
+    pub fn request_retry_attempts(&self) -> u64 {
+        match current_retry_mode() {
+            RetryMode::Bounded => self.request_max_retries(),
+            RetryMode::Unbounded => UNBOUNDED_RETRY_ATTEMPTS,
+        }
+    }
+
     /// Effective maximum number of stream reconnection attempts for this provider.
     pub fn stream_max_retries(&self) -> u64 {
         self.stream_max_retries
             .unwrap_or(DEFAULT_STREAM_MAX_RETRIES)
             .min(MAX_STREAM_MAX_RETRIES)
+    }
+
+    /// Retry budget that can terminate a turn/compact retry loop in the current runtime mode.
+    pub fn stream_retry_budget(&self) -> Option<u64> {
+        match current_retry_mode() {
+            RetryMode::Bounded => Some(self.stream_max_retries()),
+            RetryMode::Unbounded => None,
+        }
+    }
+
+    /// WebSocket fallback still uses the configured threshold even when retries are unbounded.
+    pub fn stream_fallback_retry_threshold(&self) -> u64 {
+        self.stream_max_retries()
+    }
+
+    pub fn retries_are_unbounded(&self) -> bool {
+        matches!(current_retry_mode(), RetryMode::Unbounded)
     }
 
     /// Effective idle timeout for streaming responses.
@@ -246,6 +335,7 @@ impl ModelProviderInfo {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: Some(
@@ -276,6 +366,10 @@ impl ModelProviderInfo {
 
     pub fn is_openai(&self) -> bool {
         self.name == OPENAI_PROVIDER_NAME
+    }
+
+    pub(crate) fn has_command_auth(&self) -> bool {
+        self.auth.is_some()
     }
 }
 
@@ -338,6 +432,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        auth: None,
         wire_api,
         query_params: None,
         http_headers: None,

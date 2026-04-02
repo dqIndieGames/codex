@@ -16,6 +16,7 @@ use url::Url;
 pub struct RetryConfig {
     pub max_attempts: u64,
     pub base_delay: Duration,
+    pub retry_402: bool,
     pub retry_429: bool,
     pub retry_5xx: bool,
     pub retry_transport: bool,
@@ -27,6 +28,7 @@ impl RetryConfig {
             max_attempts: self.max_attempts,
             base_delay: self.base_delay,
             retry_on: RetryOn {
+                retry_402: self.retry_402,
                 retry_429: self.retry_429,
                 retry_5xx: self.retry_5xx,
                 retry_transport: self.retry_transport,
@@ -50,6 +52,11 @@ pub struct Provider {
 }
 
 impl Provider {
+    pub fn with_retry_max_attempts(mut self, max_attempts: u64) -> Self {
+        self.retry.max_attempts = max_attempts;
+        self
+    }
+
     pub fn url_for_path(&self, path: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
         let path = path.trim_start_matches('/');

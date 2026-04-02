@@ -156,6 +156,7 @@ async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result
             final_output_json_schema: None,
             cwd: cwd.path().to_path_buf(),
             approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
             model: session_configured.model.clone(),
             effort: None,
@@ -181,9 +182,9 @@ async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result
     }
 
     let expected_stream_errors = if cfg!(debug_assertions) {
-        vec!["Reconnecting... 1/2", "Reconnecting... 2/2"]
+        vec!["Reconnecting... 1", "Reconnecting... 2"]
     } else {
-        vec!["Reconnecting... 2/2"]
+        vec!["Reconnecting... 2"]
     };
     assert_eq!(stream_error_messages, expected_stream_errors);
     assert_eq!(response_mock.requests().len(), 1);

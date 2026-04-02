@@ -67,6 +67,7 @@ fn provider(name: &str) -> Provider {
         retry: codex_api::provider::RetryConfig {
             max_attempts: 1,
             base_delay: Duration::from_millis(1),
+            retry_402: false,
             retry_429: false,
             retry_5xx: false,
             retry_transport: true,
@@ -125,7 +126,7 @@ async fn responses_stream_parses_items_and_completed_end_to_end() -> Result<()> 
             serde_json::json!({"echo": true}),
             HeaderMap::new(),
             Compression::None,
-            None,
+            /*turn_state*/ None,
         )
         .await?;
 

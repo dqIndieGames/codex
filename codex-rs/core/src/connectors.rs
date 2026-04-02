@@ -16,7 +16,9 @@ pub use codex_app_server_protocol::AppInfo;
 pub use codex_app_server_protocol::AppMetadata;
 use codex_connectors::AllConnectorsCacheKey;
 use codex_connectors::DirectoryListResponse;
+use codex_login::token_data::TokenData;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_tools::DiscoverableTool;
 use rmcp::model::ToolAnnotations;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -43,9 +45,6 @@ use crate::mcp_connection_manager::codex_apps_tools_cache_key;
 use crate::plugins::AppConnectorId;
 use crate::plugins::PluginsManager;
 use crate::plugins::list_tool_suggest_discoverable_plugins;
-use crate::token_data::TokenData;
-use crate::tools::discoverable::DiscoverablePluginInfo;
-use crate::tools::discoverable::DiscoverableTool;
 use codex_features::Feature;
 
 pub use codex_connectors::CONNECTORS_CACHE_TTL;
@@ -103,6 +102,19 @@ pub async fn list_accessible_connectors_from_mcp_tools(
     )
 }
 
+pub(crate) async fn list_accessible_and_enabled_connectors_from_manager(
+    mcp_connection_manager: &McpConnectionManager,
+    config: &Config,
+) -> Vec<AppInfo> {
+    with_app_enabled_state(
+        accessible_connectors_from_mcp_tools(&mcp_connection_manager.list_all_tools().await),
+        config,
+    )
+    .into_iter()
+    .filter(|connector| connector.is_accessible && connector.is_enabled)
+    .collect()
+}
+
 pub(crate) async fn list_tool_suggest_discoverable_tools_with_auth(
     config: &Config,
     auth: Option<&CodexAuth>,
@@ -120,7 +132,6 @@ pub(crate) async fn list_tool_suggest_discoverable_tools_with_auth(
     .map(DiscoverableTool::from);
     let discoverable_plugins = list_tool_suggest_discoverable_plugins(config)?
         .into_iter()
-        .map(DiscoverablePluginInfo::from)
         .map(DiscoverableTool::from);
     Ok(discoverable_connectors
         .chain(discoverable_plugins)

@@ -12,6 +12,7 @@ use codex_features::Feature;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -50,6 +51,26 @@ pub struct CodexThread {
     _watch_registration: WatchRegistration,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderRuntimeRefreshStatus {
+    Applied,
+    Queued,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderRuntimeRefreshFailure {
+    pub thread_id: ThreadId,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProviderRuntimeRefreshAllLoadedReport {
+    pub total_threads: usize,
+    pub applied_thread_ids: Vec<ThreadId>,
+    pub queued_thread_ids: Vec<ThreadId>,
+    pub failed_threads: Vec<ProviderRuntimeRefreshFailure>,
+}
+
 /// Conduit for the bidirectional stream of messages that compose a thread
 /// (formerly called a conversation) in Codex.
 impl CodexThread {
@@ -70,8 +91,22 @@ impl CodexThread {
         self.codex.submit(op).await
     }
 
+    pub async fn refresh_provider_runtime(&self) -> CodexResult<ProviderRuntimeRefreshStatus> {
+        self.codex.session.refresh_provider_runtime().await
+    }
+
     pub async fn shutdown_and_wait(&self) -> CodexResult<()> {
         self.codex.shutdown_and_wait().await
+    }
+
+    #[doc(hidden)]
+    pub async fn ensure_rollout_materialized(&self) {
+        self.codex.session.ensure_rollout_materialized().await;
+    }
+
+    #[doc(hidden)]
+    pub async fn flush_rollout(&self) {
+        self.codex.session.flush_rollout().await;
     }
 
     pub async fn submit_with_trace(
@@ -122,29 +157,58 @@ impl CodexThread {
 
     /// Records a user-role session-prefix message without creating a new user turn boundary.
     pub(crate) async fn inject_user_message_without_turn(&self, message: String) {
-        let pending_item = ResponseInputItem::Message {
+        let message = ResponseItem::Message {
+            id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText { text: message }],
+            end_turn: None,
+            phase: None,
         };
-        let pending_items = vec![pending_item];
-        let Err(items_without_active_turn) = self
+        let pending_item = match pending_message_input_item(&message) {
+            Ok(pending_item) => pending_item,
+            Err(err) => {
+                debug_assert!(false, "session-prefix message append should succeed: {err}");
+                return;
+            }
+        };
+        if self
             .codex
             .session
-            .inject_response_items(pending_items)
+            .inject_response_items(vec![pending_item])
             .await
-        else {
-            return;
-        };
+            .is_err()
+        {
+            let turn_context = self.codex.session.new_default_turn().await;
+            self.codex
+                .session
+                .record_conversation_items(turn_context.as_ref(), &[message])
+                .await;
+        }
+    }
 
-        let turn_context = self.codex.session.new_default_turn().await;
-        let items: Vec<ResponseItem> = items_without_active_turn
-            .into_iter()
-            .map(ResponseItem::from)
-            .collect();
-        self.codex
+    /// Append a prebuilt message to the thread history without treating it as a user turn.
+    ///
+    /// If the thread already has an active turn, the message is queued as pending input for that
+    /// turn. Otherwise it is queued at session scope and a regular turn is started so the agent
+    /// can consume that pending input through the normal turn pipeline.
+    #[cfg(test)]
+    pub(crate) async fn append_message(&self, message: ResponseItem) -> CodexResult<String> {
+        let submission_id = uuid::Uuid::new_v4().to_string();
+        let pending_item = pending_message_input_item(&message)?;
+        if let Err(items) = self
+            .codex
             .session
-            .record_conversation_items(turn_context.as_ref(), &items)
-            .await;
+            .inject_response_items(vec![pending_item])
+            .await
+        {
+            self.codex
+                .session
+                .queue_response_items_for_next_turn(items)
+                .await;
+            self.codex.session.ensure_task_for_pending_inputs().await;
+        }
+
+        Ok(submission_id)
     }
 
     pub fn rollout_path(&self) -> Option<PathBuf> {
@@ -196,5 +260,17 @@ impl CodexThread {
         }
 
         Ok(*guard)
+    }
+}
+
+fn pending_message_input_item(message: &ResponseItem) -> CodexResult<ResponseInputItem> {
+    match message {
+        ResponseItem::Message { role, content, .. } => Ok(ResponseInputItem::Message {
+            role: role.clone(),
+            content: content.clone(),
+        }),
+        _ => Err(CodexErr::InvalidRequest(
+            "append_message only supports ResponseItem::Message".to_string(),
+        )),
     }
 }

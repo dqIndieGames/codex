@@ -43,6 +43,7 @@ fn build_permissions_update_item(
     Some(DeveloperInstructions::from_policy(
         next.sandbox_policy.get(),
         next.approval_policy.value(),
+        next.config.approvals_reviewer,
         exec_policy,
         &next.cwd,
         next.features.enabled(Feature::ExecPermissionApprovals),
@@ -192,6 +193,10 @@ pub(crate) fn build_settings_update_items(
     exec_policy: &Policy,
     personality_feature_enabled: bool,
 ) -> Vec<ResponseItem> {
+    // TODO(ccunningham): build_settings_update_items still does not cover every
+    // model-visible item emitted by build_initial_context. Persist the remaining
+    // inputs or add explicit replay events so fork/resume can diff everything
+    // deterministically.
     let contextual_user_message = build_environment_update_item(previous, next, shell);
     let developer_update_sections = [
         // Keep model-switch instructions first so model-specific guidance is read before

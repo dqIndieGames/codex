@@ -61,6 +61,7 @@ fn map_api_error_maps_usage_limit_limit_name_header() {
             .and_then(|snapshot| snapshot.limit_name.as_deref()),
         Some("codex_other")
     );
+    assert_eq!(usage_limit.status, Some(http::StatusCode::TOO_MANY_REQUESTS));
 }
 
 #[test]
@@ -94,6 +95,23 @@ fn map_api_error_does_not_fallback_limit_name_to_limit_id() {
             .and_then(|snapshot| snapshot.limit_name.as_deref()),
         None
     );
+    assert_eq!(usage_limit.status, Some(http::StatusCode::TOO_MANY_REQUESTS));
+}
+
+#[test]
+fn map_api_error_maps_payment_required_usage_limit_message() {
+    let err = map_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::PAYMENT_REQUIRED,
+        url: Some("http://example.com/v1/responses".to_string()),
+        headers: None,
+        body: Some("Daily spending limit reached for today".to_string()),
+    }));
+
+    let CodexErr::UsageLimitReached(usage_limit) = err else {
+        panic!("expected CodexErr::UsageLimitReached, got {err:?}");
+    };
+    assert_eq!(usage_limit.status, Some(http::StatusCode::PAYMENT_REQUIRED));
+    assert_eq!(usage_limit.plan_type, None);
 }
 
 #[test]

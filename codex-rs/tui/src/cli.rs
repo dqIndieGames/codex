@@ -1,3 +1,4 @@
+use crate::version::CODEX_CLI_DISPLAY_VERSION;
 use clap::Parser;
 use clap::ValueHint;
 use codex_utils_cli::ApprovalModeCliArg;
@@ -5,7 +6,7 @@ use codex_utils_cli::CliConfigOverrides;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(version)]
+#[command(version = CODEX_CLI_DISPLAY_VERSION)]
 pub struct Cli {
     /// Optional user prompt to start the session.
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
@@ -31,6 +32,10 @@ pub struct Cli {
     /// Internal: show all sessions (disables cwd filtering and shows CWD column).
     #[clap(skip)]
     pub resume_show_all: bool,
+
+    /// Internal: include non-interactive sessions in resume listings.
+    #[clap(skip)]
+    pub resume_include_non_interactive: bool,
 
     // Internal controls set by the top-level `codex fork` subcommand.
     // These are not exposed as user flags on the base `codex` command.

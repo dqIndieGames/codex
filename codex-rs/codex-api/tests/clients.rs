@@ -129,6 +129,7 @@ fn provider(name: &str) -> Provider {
         retry: codex_api::provider::RetryConfig {
             max_attempts: 1,
             base_delay: Duration::from_millis(1),
+            retry_402: false,
             retry_429: false,
             retry_5xx: false,
             retry_transport: true,
@@ -203,7 +204,12 @@ async fn responses_client_uses_responses_path() -> Result<()> {
 
     let body = serde_json::json!({ "echo": true });
     let _stream = client
-        .stream(body, HeaderMap::new(), Compression::None, None)
+        .stream(
+            body,
+            HeaderMap::new(),
+            Compression::None,
+            /*turn_state*/ None,
+        )
         .await?;
 
     let requests = state.take_stream_requests();
@@ -220,7 +226,12 @@ async fn streaming_client_adds_auth_headers() -> Result<()> {
 
     let body = serde_json::json!({ "model": "gpt-test" });
     let _stream = client
-        .stream(body, HeaderMap::new(), Compression::None, None)
+        .stream(
+            body,
+            HeaderMap::new(),
+            Compression::None,
+            /*turn_state*/ None,
+        )
         .await?;
 
     let requests = state.take_stream_requests();

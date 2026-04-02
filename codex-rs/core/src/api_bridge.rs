@@ -6,6 +6,7 @@ use codex_api::TransportError;
 use codex_api::error::ApiError;
 use codex_api::rate_limits::parse_promo_message;
 use codex_api::rate_limits::parse_rate_limit_for_limit;
+use codex_login::token_data::PlanType;
 use http::HeaderMap;
 use serde::Deserialize;
 use serde_json::Value;
@@ -16,7 +17,6 @@ use crate::error::RetryLimitReachedError;
 use crate::error::UnexpectedResponseError;
 use crate::error::UsageLimitReachedError;
 use crate::model_provider_info::ModelProviderInfo;
-use crate::token_data::PlanType;
 
 pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
     match err {
@@ -68,7 +68,10 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
                     }
                 } else if status == http::StatusCode::INTERNAL_SERVER_ERROR {
                     CodexErr::InternalServerError
-                } else if status == http::StatusCode::TOO_MANY_REQUESTS {
+                } else if matches!(
+                    status,
+                    http::StatusCode::TOO_MANY_REQUESTS | http::StatusCode::PAYMENT_REQUIRED
+                ) {
                     if let Ok(err) = serde_json::from_str::<UsageErrorResponse>(&body_text) {
                         if err.error.error_type.as_deref() == Some("usage_limit_reached") {
                             let limit_id = extract_header(headers.as_ref(), ACTIVE_LIMIT_HEADER);
@@ -81,6 +84,7 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
                                 .resets_at
                                 .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0));
                             return CodexErr::UsageLimitReached(UsageLimitReachedError {
+                                status: Some(status),
                                 plan_type: err.error.plan_type,
                                 resets_at,
                                 rate_limits: rate_limits.map(Box::new),
@@ -91,10 +95,35 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
                         }
                     }
 
-                    CodexErr::RetryLimit(RetryLimitReachedError {
-                        status,
-                        request_id: extract_request_tracking_id(headers.as_ref()),
-                    })
+                    if body_looks_like_usage_limit_message(&body_text) {
+                        return CodexErr::UsageLimitReached(UsageLimitReachedError {
+                            status: Some(status),
+                            plan_type: None,
+                            resets_at: None,
+                            rate_limits: None,
+                            promo_message: None,
+                        });
+                    }
+
+                    if status == http::StatusCode::TOO_MANY_REQUESTS {
+                        CodexErr::RetryLimit(RetryLimitReachedError {
+                            status,
+                            request_id: extract_request_tracking_id(headers.as_ref()),
+                        })
+                    } else {
+                        CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                            status,
+                            body: body_text,
+                            url,
+                            cf_ray: extract_header(headers.as_ref(), CF_RAY_HEADER),
+                            request_id: extract_request_id(headers.as_ref()),
+                            identity_authorization_error: extract_header(
+                                headers.as_ref(),
+                                X_OPENAI_AUTHORIZATION_ERROR_HEADER,
+                            ),
+                            identity_error_code: extract_x_error_json_code(headers.as_ref()),
+                        })
+                    }
                 } else {
                     CodexErr::UnexpectedStatus(UnexpectedResponseError {
                         status,
@@ -121,6 +150,14 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
         },
         ApiError::RateLimit(msg) => CodexErr::Stream(msg, None),
     }
+}
+
+fn body_looks_like_usage_limit_message(body: &str) -> bool {
+    let normalized = body.trim().to_ascii_lowercase();
+    !normalized.is_empty()
+        && (normalized.contains("usage_limit_reached")
+            || normalized.contains("usage limit reached")
+            || normalized.contains("daily spending limit reached"))
 }
 
 const ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";

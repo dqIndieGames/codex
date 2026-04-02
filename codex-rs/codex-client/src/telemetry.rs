@@ -11,4 +11,13 @@ pub trait RequestTelemetry: Send + Sync {
         error: Option<&TransportError>,
         duration: Duration,
     );
+
+    fn on_request_retry(
+        &self,
+        _retry_number: u64,
+        _max_attempts: u64,
+        _status: Option<StatusCode>,
+        _error: &TransportError,
+    ) {
+    }
 }
