@@ -23,6 +23,7 @@ use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
+use core_test_support::responses::start_websocket_server;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -32,6 +33,7 @@ use tracing_test::traced_test;
 
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_test::internal::MockWriter;
+use wiremock::ResponseTemplate;
 
 fn extract_log_field(line: &str, key: &str) -> Option<String> {
     let quoted_prefix = format!("{key}=\"");
@@ -128,6 +130,120 @@ async fn responses_api_emits_api_request_event() {
             .map(|_| Ok(()))
             .unwrap_or_else(|| Err("expected codex.conversation_starts event".to_string()))
     });
+}
+
+#[tokio::test]
+#[traced_test]
+async fn responses_api_retry_suppresses_request_telemetry_logs() {
+    let server = start_mock_server().await;
+
+    let retry_response = mount_response_once(
+        &server,
+        ResponseTemplate::new(503)
+            .insert_header("content-type", "application/json")
+            .set_body_json(serde_json::json!({
+                "error": {
+                    "code": "slow_down",
+                    "message": "retry please"
+                }
+            })),
+    )
+    .await;
+    let success_response = mount_sse_once(&server, sse(vec![ev_completed("done")])).await;
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_config(|config| {
+            config.model_provider.supports_websockets = false;
+            config.model_provider.request_max_retries = Some(1);
+            config.model_provider.stream_max_retries = Some(0);
+        })
+        .build(&server)
+        .await
+        .unwrap();
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    assert_eq!(retry_response.requests().len(), 1);
+    assert_eq!(success_response.requests().len(), 1);
+
+    logs_assert(|lines: &[&str]| {
+        if lines.iter().any(|line| line.contains("codex.api_request")) {
+            return Err("expected retry-chain request telemetry to be suppressed".to_string());
+        }
+        Ok(())
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[traced_test]
+async fn responses_websocket_retry_suppresses_retry_logs_and_warns() {
+    core_test_support::skip_if_no_network!();
+
+    let server = start_websocket_server(vec![
+        vec![
+            vec![ev_response_created("resp-prewarm"), ev_completed("resp-prewarm")],
+            vec![serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "code": "server_is_overloaded",
+                        "message": "retry please"
+                    }
+                }
+            })],
+        ],
+        vec![vec![ev_response_created("resp-1"), ev_completed("resp-1")]],
+    ])
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+    });
+    let test = builder
+        .build_with_websocket_server(&server)
+        .await
+        .expect("build websocket codex");
+
+    test.submit_turn("hello")
+        .await
+        .expect("websocket retry should complete");
+
+    logs_assert(|lines: &[&str]| {
+        let websocket_connect_count = lines
+            .iter()
+            .filter(|line| line.contains("codex.websocket_connect"))
+            .count();
+        if websocket_connect_count != 1 {
+            return Err(format!(
+                "expected only the first websocket_connect log, got {websocket_connect_count}"
+            ));
+        }
+        if lines.iter().any(|line| {
+            line.contains("codex.websocket_event") && line.contains("event.kind=response.failed")
+        }) {
+            return Err("expected retry-driving websocket_event log to be suppressed".to_string());
+        }
+        if lines.iter().any(|line| {
+            line.contains("stream disconnected - retrying sampling request")
+        }) {
+            return Err("expected reconnect warn to be suppressed".to_string());
+        }
+        Ok(())
+    });
+
+    server.shutdown().await;
 }
 
 #[tokio::test]

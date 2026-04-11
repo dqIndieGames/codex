@@ -59,6 +59,7 @@ impl RequestTelemetry for ModelsRequestTelemetry {
         status: Option<http::StatusCode>,
         error: Option<&TransportError>,
         duration: Duration,
+        _emit_log_trace: bool,
     ) {
         let success = status.is_some_and(|code| code.is_success()) && error.is_none();
         let error_message = error.map(telemetry_transport_error_message);

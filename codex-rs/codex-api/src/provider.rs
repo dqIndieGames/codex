@@ -2,7 +2,9 @@ use codex_client::Request;
 use codex_client::RequestCompression;
 use codex_client::RetryOn;
 use codex_client::RetryPolicy;
+use codex_client::TransportError;
 use http::Method;
+use http::StatusCode;
 use http::header::HeaderMap;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -35,6 +37,56 @@ impl RetryConfig {
             },
         }
     }
+}
+
+pub fn responses_http_status_is_retryable(status: StatusCode) -> bool {
+    status != StatusCode::UNAUTHORIZED
+}
+
+pub fn should_retry_request_error(
+    policy: &RetryPolicy,
+    request: &Request,
+    err: &TransportError,
+    attempt: u64,
+) -> bool {
+    if attempt >= policy.max_attempts {
+        return false;
+    }
+
+    match err {
+        TransportError::Http {
+            status, url, body, ..
+        } => {
+            let effective_url = url.as_deref().unwrap_or(&request.url);
+            if request_targets_responses_endpoint(effective_url) {
+                return responses_http_status_is_retryable(*status);
+            }
+
+            (policy.retry_on.retry_402
+                && status.as_u16() == 402
+                && payment_required_body_is_usage_limit(body.as_deref()))
+                || (policy.retry_on.retry_429 && status.as_u16() == 429)
+                || (policy.retry_on.retry_5xx && status.is_server_error())
+        }
+        TransportError::Timeout | TransportError::Network(_) => policy.retry_on.retry_transport,
+        TransportError::RetryLimit | TransportError::Build(_) => false,
+    }
+}
+
+fn payment_required_body_is_usage_limit(body: Option<&str>) -> bool {
+    let Some(body) = body.map(str::trim).filter(|body| !body.is_empty()) else {
+        return false;
+    };
+    let normalized = body.to_ascii_lowercase();
+    normalized.contains("usage_limit_reached")
+        || normalized.contains("usage limit reached")
+        || normalized.contains("daily spending limit reached")
+}
+
+fn request_targets_responses_endpoint(url: &str) -> bool {
+    Url::parse(url)
+        .map(|parsed| parsed.path().ends_with("/responses"))
+        .unwrap_or_else(|_| url.contains("/responses"))
 }
 
 /// HTTP endpoint configuration used to talk to a concrete API deployment.
@@ -137,6 +189,7 @@ fn matches_azure_responses_base_url(base_url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::StatusCode;
 
     #[test]
     fn detects_azure_responses_base_urls() {
@@ -173,5 +226,106 @@ mod tests {
                 "expected {base_url} not to be detected as Azure"
             );
         }
+    }
+
+    #[test]
+    fn responses_http_status_retry_only_excludes_401() {
+        assert!(responses_http_status_is_retryable(StatusCode::BAD_REQUEST));
+        assert!(responses_http_status_is_retryable(StatusCode::FORBIDDEN));
+        assert!(responses_http_status_is_retryable(StatusCode::PAYMENT_REQUIRED));
+        assert!(responses_http_status_is_retryable(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!responses_http_status_is_retryable(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn responses_requests_retry_non_401_http_statuses_without_whitelist() {
+        let policy = RetryPolicy {
+            max_attempts: 4,
+            base_delay: Duration::from_millis(200),
+            retry_on: RetryOn {
+                retry_402: false,
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+        };
+        let request = Request::new(
+            Method::POST,
+            "https://chatgpt.com/backend-api/codex/responses".to_string(),
+        );
+        let err = TransportError::Http {
+            status: StatusCode::FORBIDDEN,
+            url: Some(request.url.clone()),
+            headers: None,
+            body: Some(r#"{"detail":"forbidden"}"#.to_string()),
+        };
+
+        assert!(should_retry_request_error(&policy, &request, &err, 0));
+    }
+
+    #[test]
+    fn responses_requests_do_not_retry_401() {
+        let policy = RetryPolicy {
+            max_attempts: 4,
+            base_delay: Duration::from_millis(200),
+            retry_on: RetryOn {
+                retry_402: true,
+                retry_429: true,
+                retry_5xx: true,
+                retry_transport: true,
+            },
+        };
+        let request = Request::new(
+            Method::POST,
+            "https://chatgpt.com/backend-api/codex/responses".to_string(),
+        );
+        let err = TransportError::Http {
+            status: StatusCode::UNAUTHORIZED,
+            url: Some(request.url.clone()),
+            headers: None,
+            body: Some(r#"{"detail":"Unauthorized"}"#.to_string()),
+        };
+
+        assert!(!should_retry_request_error(&policy, &request, &err, 0));
+    }
+
+    #[test]
+    fn non_responses_requests_keep_existing_402_whitelist_behavior() {
+        let policy = RetryPolicy {
+            max_attempts: 4,
+            base_delay: Duration::from_millis(200),
+            retry_on: RetryOn {
+                retry_402: true,
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+        };
+        let request = Request::new(Method::GET, "https://chatgpt.com/backend-api/codex/models".to_string());
+        let usage_limit_err = TransportError::Http {
+            status: StatusCode::PAYMENT_REQUIRED,
+            url: Some(request.url.clone()),
+            headers: None,
+            body: Some("Daily spending limit reached".to_string()),
+        };
+        let non_usage_limit_err = TransportError::Http {
+            status: StatusCode::PAYMENT_REQUIRED,
+            url: Some(request.url.clone()),
+            headers: None,
+            body: Some(r#"{"error":{"type":"usage_not_included"}}"#.to_string()),
+        };
+
+        assert!(should_retry_request_error(
+            &policy,
+            &request,
+            &usage_limit_err,
+            0
+        ));
+        assert!(!should_retry_request_error(
+            &policy,
+            &request,
+            &non_usage_limit_err,
+            0
+        ));
     }
 }

@@ -52,6 +52,7 @@ fn runtime_metrics_summary_collects_tool_api_and_streaming_metrics() -> Result<(
         Some(200),
         /*error*/ None,
         Duration::from_millis(300),
+        /*emit_log_trace*/ true,
         /*auth_header_attached*/ false,
         /*auth_header_name*/ None,
         /*retry_after_unauthorized*/ false,
@@ -67,6 +68,7 @@ fn runtime_metrics_summary_collects_tool_api_and_streaming_metrics() -> Result<(
         Duration::from_millis(400),
         /*error*/ None,
         /*connection_reused*/ false,
+        /*emit_log_trace*/ true,
     );
     let sse_response: std::result::Result<
         Option<std::result::Result<StreamEvent, eventsource_stream::EventStreamError<&str>>>,
@@ -84,7 +86,7 @@ fn runtime_metrics_summary_collects_tool_api_and_streaming_metrics() -> Result<(
     > = Ok(Some(Ok(Message::Text(
         r#"{"type":"response.created"}"#.into(),
     ))));
-    manager.record_websocket_event(&ws_response, Duration::from_millis(80));
+    manager.record_websocket_event(&ws_response, Duration::from_millis(80), /*emit_log_trace*/ true);
     let ws_timing_response: std::result::Result<
         Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>,
         codex_api::ApiError,
@@ -92,7 +94,11 @@ fn runtime_metrics_summary_collects_tool_api_and_streaming_metrics() -> Result<(
         r#"{"type":"responsesapi.websocket_timing","timing_metrics":{"responses_duration_excl_engine_and_client_tool_time_ms":124,"engine_service_total_ms":457,"engine_iapi_ttft_total_ms":211,"engine_service_ttft_total_ms":233,"engine_iapi_tbt_across_engine_calls_ms":377,"engine_service_tbt_across_engine_calls_ms":399}}"#
             .into(),
     ))));
-    manager.record_websocket_event(&ws_timing_response, Duration::from_millis(20));
+    manager.record_websocket_event(
+        &ws_timing_response,
+        Duration::from_millis(20),
+        /*emit_log_trace*/ true,
+    );
     manager.record_duration(
         "codex.turn.ttft.duration_ms",
         Duration::from_millis(95),

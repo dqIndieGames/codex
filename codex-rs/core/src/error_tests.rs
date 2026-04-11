@@ -370,6 +370,7 @@ fn unexpected_status_cloudflare_html_is_simplified() {
         request_id: None,
         identity_authorization_error: None,
         identity_error_code: None,
+        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::FORBIDDEN.to_string();
     let url = "http://example.com/blocked";
@@ -389,6 +390,7 @@ fn unexpected_status_non_html_is_unchanged() {
         request_id: None,
         identity_authorization_error: None,
         identity_error_code: None,
+        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::FORBIDDEN.to_string();
     let url = "http://example.com/plain";
@@ -409,6 +411,7 @@ fn unexpected_status_prefers_error_message_when_present() {
         request_id: Some("req-123".to_string()),
         identity_authorization_error: None,
         identity_error_code: None,
+        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::UNAUTHORIZED.to_string();
     assert_eq!(
@@ -430,6 +433,7 @@ fn unexpected_status_truncates_long_body_with_ellipsis() {
         request_id: Some("req-long".to_string()),
         identity_authorization_error: None,
         identity_error_code: None,
+        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::BAD_GATEWAY.to_string();
     let expected_body = format!("{}...", "x".repeat(UNEXPECTED_RESPONSE_BODY_MAX_BYTES));
@@ -451,6 +455,7 @@ fn unexpected_status_includes_cf_ray_and_request_id() {
         request_id: Some("req-xyz".to_string()),
         identity_authorization_error: None,
         identity_error_code: None,
+        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::UNAUTHORIZED.to_string();
     assert_eq!(
@@ -471,6 +476,7 @@ fn unexpected_status_includes_identity_auth_details() {
         request_id: Some("req-auth".to_string()),
         identity_authorization_error: Some("missing_authorization_header".to_string()),
         identity_error_code: Some("token_expired".to_string()),
+        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::UNAUTHORIZED.to_string();
     assert_eq!(
@@ -482,8 +488,41 @@ fn unexpected_status_includes_identity_auth_details() {
 }
 
 #[test]
-fn unexpected_status_401_and_402_are_not_retryable() {
-    for status in [StatusCode::UNAUTHORIZED, StatusCode::PAYMENT_REQUIRED] {
+fn request_layer_http_statuses_are_not_turn_retryable_after_request_retries() {
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::PAYMENT_REQUIRED,
+        StatusCode::BAD_REQUEST,
+        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
+    ] {
+        let err = CodexErr::UnexpectedStatus(UnexpectedResponseError {
+            status,
+            body: "plain text error".to_string(),
+            url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
+            cf_ray: None,
+            request_id: None,
+            identity_authorization_error: None,
+            identity_error_code: None,
+            retry_source: UnexpectedResponseRetrySource::RequestLayer,
+        });
+
+        assert!(
+            !err.is_retryable(),
+            "request-layer status {status} should not turn-retry"
+        );
+    }
+}
+
+#[test]
+fn turn_level_unexpected_status_retries_except_401() {
+    for status in [
+        StatusCode::BAD_REQUEST,
+        StatusCode::FORBIDDEN,
+        StatusCode::PAYMENT_REQUIRED,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::NOT_FOUND,
+    ] {
         let err = CodexErr::UnexpectedStatus(UnexpectedResponseError {
             status,
             body: "plain text error".to_string(),
@@ -492,10 +531,23 @@ fn unexpected_status_401_and_402_are_not_retryable() {
             request_id: None,
             identity_authorization_error: None,
             identity_error_code: None,
+            retry_source: UnexpectedResponseRetrySource::Turn,
         });
 
-        assert!(!err.is_retryable(), "status {status} should not retry");
+        assert!(err.is_retryable(), "turn-level status {status} should retry");
     }
+
+    let unauthorized = CodexErr::UnexpectedStatus(UnexpectedResponseError {
+        status: StatusCode::UNAUTHORIZED,
+        body: "plain text error".to_string(),
+        url: None,
+        cf_ray: None,
+        request_id: None,
+        identity_authorization_error: None,
+        identity_error_code: None,
+        retry_source: UnexpectedResponseRetrySource::Turn,
+    });
+    assert!(!unauthorized.is_retryable());
 }
 
 #[test]

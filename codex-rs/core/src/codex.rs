@@ -170,6 +170,7 @@ use crate::codex_thread::ProviderRuntimeRefreshStatus;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::compact::collect_user_messages;
 use crate::config::Config;
+use crate::config::deserialize_config_toml_with_base;
 use crate::config::ConfigToml;
 use crate::config::Constrained;
 use crate::config::ConstraintResult;
@@ -178,6 +179,7 @@ use crate::config::StartedNetworkProxy;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::config::types::McpServerConfig;
 use crate::config::types::ShellEnvironmentPolicy;
+use crate::config_loader::resolve_relative_paths_in_config_toml;
 use crate::context_manager::ContextManager;
 use crate::context_manager::TotalTokenUsageBreakdown;
 use crate::environment_context::EnvironmentContext;
@@ -4330,15 +4332,28 @@ impl Session {
     fn read_latest_provider_runtime_refresh(config: &Config) -> CodexResult<PendingProviderRuntimeRefresh> {
         let config_toml_path = Self::resolve_user_config_toml_path(config)?;
         let user_config = Self::read_user_config_toml_value(&config_toml_path)?;
+        let config_base_dir = config_toml_path.parent().ok_or_else(|| {
+            CodexErr::InvalidRequest(format!(
+                "failed to resolve base directory for user config `{}`",
+                config_toml_path.display()
+            ))
+        })?;
+        let user_config = resolve_relative_paths_in_config_toml(user_config, &config_base_dir)
+            .map_err(|err| {
+                CodexErr::InvalidRequest(format!(
+                    "failed to normalize user config paths while refreshing provider runtime: {err}"
+                ))
+            })?;
         let merged_toml = config
             .config_layer_stack
             .with_user_config(&config_toml_path, user_config)
             .effective_config();
-        let cfg: ConfigToml = merged_toml.try_into().map_err(|err| {
-            CodexErr::InvalidRequest(format!(
-                "failed to parse effective config while refreshing provider runtime: {err}"
-            ))
-        })?;
+        let cfg: ConfigToml = deserialize_config_toml_with_base(merged_toml, &config_base_dir)
+            .map_err(|err| {
+                CodexErr::InvalidRequest(format!(
+                    "failed to parse effective config while refreshing provider runtime: {err}"
+                ))
+            })?;
 
         Self::resolve_provider_runtime_refresh(cfg, &config.model_provider_id)
     }
@@ -6540,6 +6555,7 @@ async fn run_sampling_request(
         .await;
     let mut retries = 0;
     loop {
+        client_session.set_retry_chain_active(retries > 0);
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -6570,6 +6586,13 @@ async fn run_sampling_request(
             Err(err) => err,
         };
 
+        if client_session
+            .recover_stream_unauthorized(&err, &turn_context.session_telemetry)
+            .await?
+        {
+            continue;
+        }
+
         if !err.is_retryable() {
             return Err(err);
         }
@@ -6598,18 +6621,7 @@ async fn run_sampling_request(
 
         retries += 1;
         let delay = retry_delay_for_error(&err, retries);
-        warn!(
-            "stream disconnected - retrying sampling request (attempt {retries} in {delay:?})...",
-        );
-
-        // In release builds, hide the first websocket retry notification to reduce noisy
-        // transient reconnect messages. In debug builds, keep full visibility for diagnosis.
-        let report_error = retries > 1
-            || cfg!(debug_assertions)
-            || !sess.services.model_client.responses_websocket_enabled();
-        if report_error {
-            emit_retryable_stream_error(sess.as_ref(), &turn_context, retries, err).await;
-        }
+        emit_retryable_stream_error(sess.as_ref(), &turn_context, retries, err).await;
         tokio::time::sleep(delay).await;
     }
 }
@@ -7311,13 +7323,14 @@ async fn emit_retry_status_event(
     turn_context: &TurnContext,
     status: http::StatusCode,
     retry_number: u64,
+    details: String,
 ) {
     sess.send_event(
         turn_context,
         EventMsg::StreamError(StreamErrorEvent {
             message: retry_message_for_status(status, retry_number),
             codex_error_info: Some(retry_error_info_for_status(status)),
-            additional_details: None,
+            additional_details: Some(details),
         }),
     )
     .await;
@@ -7327,6 +7340,7 @@ async fn emit_transport_retry_status_event(
     sess: &Session,
     turn_context: &TurnContext,
     retry_number: u64,
+    details: String,
 ) {
     sess.send_event(
         turn_context,
@@ -7335,7 +7349,7 @@ async fn emit_transport_retry_status_event(
             codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
                 http_status_code: None,
             }),
-            additional_details: None,
+            additional_details: Some(details),
         }),
     )
     .await;
@@ -7347,14 +7361,20 @@ async fn emit_retryable_stream_error(
     retry_number: u64,
     err: CodexErr,
 ) {
+    let details = err.to_string();
     if let Some(status) = err
         .http_status_code_value()
         .and_then(|value| http::StatusCode::from_u16(value).ok())
     {
-        emit_retry_status_event(sess, turn_context, status, retry_number).await;
+        emit_retry_status_event(sess, turn_context, status, retry_number, details).await;
     } else {
-        sess.notify_stream_error(turn_context, format!("Reconnecting... {retry_number}"), err)
-            .await;
+        emit_transport_retry_status_event(
+            sess,
+            turn_context,
+            retry_number,
+            details,
+        )
+        .await;
     }
 }
 
@@ -7398,6 +7418,7 @@ async fn try_run_sampling_request(
                         turn_context.as_ref(),
                         status,
                         event.retry_number,
+                        event.details,
                     )
                     .await;
                 } else {
@@ -7405,6 +7426,7 @@ async fn try_run_sampling_request(
                         sess.as_ref(),
                         turn_context.as_ref(),
                         event.retry_number,
+                        event.details,
                     )
                     .await;
                 }

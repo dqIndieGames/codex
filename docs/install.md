@@ -53,7 +53,7 @@ cargo test --all-features
 
 Codex is written in Rust, so it honors the `RUST_LOG` environment variable to configure its logging behavior.
 
-The TUI defaults to `RUST_LOG=codex_core=info,codex_tui=info,codex_rmcp_client=info` and log messages are written to `~/.codex/log/codex-tui.log` by default. For a single run, you can override the log directory with `-c log_dir=...` (for example, `-c log_dir=./.codex-log`).
+When `RUST_LOG` is unset, the TUI defaults to `RUST_LOG=warn` and log messages are written to `~/.codex/log/codex-tui.log` by default. If you want more detail for debugging, set `RUST_LOG` explicitly. For a single run, you can override the log directory with `-c log_dir=...` (for example, `-c log_dir=./.codex-log`).
 
 ```bash
 tail -F ~/.codex/log/codex-tui.log

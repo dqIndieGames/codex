@@ -13,12 +13,50 @@ use serde_json::Value;
 
 use crate::auth::CodexAuth;
 use crate::error::CodexErr;
+use crate::error::UnexpectedResponseRetrySource;
 use crate::error::RetryLimitReachedError;
 use crate::error::UnexpectedResponseError;
 use crate::error::UsageLimitReachedError;
 use crate::model_provider_info::ModelProviderInfo;
 
 pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
+    map_api_error_with_http_source(err, UnexpectedResponseRetrySource::Turn)
+}
+
+pub(crate) fn map_responses_request_api_error(err: ApiError) -> CodexErr {
+    map_api_error_with_http_source(err, UnexpectedResponseRetrySource::RequestLayer)
+}
+
+pub(crate) fn map_responses_stream_api_error(err: ApiError) -> CodexErr {
+    if let ApiError::Transport(TransportError::Http {
+        status,
+        url,
+        headers,
+        body,
+    }) = err
+    {
+        return CodexErr::UnexpectedStatus(UnexpectedResponseError {
+            status,
+            body: body.unwrap_or_default(),
+            url,
+            cf_ray: extract_header(headers.as_ref(), CF_RAY_HEADER),
+            request_id: extract_request_id(headers.as_ref()),
+            identity_authorization_error: extract_header(
+                headers.as_ref(),
+                X_OPENAI_AUTHORIZATION_ERROR_HEADER,
+            ),
+            identity_error_code: extract_x_error_json_code(headers.as_ref()),
+            retry_source: UnexpectedResponseRetrySource::Turn,
+        });
+    }
+
+    map_api_error_with_http_source(err, UnexpectedResponseRetrySource::Turn)
+}
+
+fn map_api_error_with_http_source(
+    err: ApiError,
+    http_retry_source: UnexpectedResponseRetrySource,
+) -> CodexErr {
     match err {
         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
@@ -34,6 +72,7 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
             request_id: None,
             identity_authorization_error: None,
             identity_error_code: None,
+            retry_source: UnexpectedResponseRetrySource::Turn,
         }),
         ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
         ApiError::Transport(transport) => match transport {
@@ -105,7 +144,9 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
                         });
                     }
 
-                    if status == http::StatusCode::TOO_MANY_REQUESTS {
+                    if status == http::StatusCode::TOO_MANY_REQUESTS
+                        && http_retry_source == UnexpectedResponseRetrySource::RequestLayer
+                    {
                         CodexErr::RetryLimit(RetryLimitReachedError {
                             status,
                             request_id: extract_request_tracking_id(headers.as_ref()),
@@ -122,6 +163,7 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
                                 X_OPENAI_AUTHORIZATION_ERROR_HEADER,
                             ),
                             identity_error_code: extract_x_error_json_code(headers.as_ref()),
+                            retry_source: http_retry_source,
                         })
                     }
                 } else {
@@ -136,6 +178,7 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
                             X_OPENAI_AUTHORIZATION_ERROR_HEADER,
                         ),
                         identity_error_code: extract_x_error_json_code(headers.as_ref()),
+                        retry_source: http_retry_source,
                     })
                 }
             }

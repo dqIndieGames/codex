@@ -10,6 +10,7 @@ pub trait RequestTelemetry: Send + Sync {
         status: Option<StatusCode>,
         error: Option<&TransportError>,
         duration: Duration,
+        emit_log_trace: bool,
     );
 
     fn on_request_retry(
@@ -19,5 +20,13 @@ pub trait RequestTelemetry: Send + Sync {
         _status: Option<StatusCode>,
         _error: &TransportError,
     ) {
+    }
+
+    fn retry_after_unauthorized(&self) -> bool {
+        false
+    }
+
+    fn can_retry_after_unauthorized(&self) -> bool {
+        false
     }
 }

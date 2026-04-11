@@ -12901,6 +12901,7 @@ async fn stream_error_429_retry_updates_status_indicator() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.bottom_pane.set_task_running(/*running*/ true);
     let msg = "429 retry 1";
+    let details = "unexpected status 429 Too Many Requests: rate limit reached, url: https://chatgpt.com/backend-api/codex/responses, request id: req-429";
     chat.handle_codex_event(Event {
         id: "sub-429".into(),
         msg: EventMsg::StreamError(StreamErrorEvent {
@@ -12908,7 +12909,7 @@ async fn stream_error_429_retry_updates_status_indicator() {
             codex_error_info: Some(CodexErrorInfo::ResponseTooManyFailedAttempts {
                 http_status_code: Some(429),
             }),
-            additional_details: None,
+            additional_details: Some(details.to_string()),
         }),
     });
 
@@ -12922,7 +12923,7 @@ async fn stream_error_429_retry_updates_status_indicator() {
         .status_widget()
         .expect("status indicator should be visible");
     assert_eq!(status.header(), msg);
-    assert_eq!(status.details(), None);
+    assert_eq!(status.details(), Some(details));
     assert!(chat.bottom_pane.is_task_running());
 }
 
@@ -12931,12 +12932,13 @@ async fn stream_error_402_retry_updates_status_indicator() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.bottom_pane.set_task_running(/*running*/ true);
     let msg = "402 retry 1";
+    let details = "You've hit your usage limit. Upgrade to Pro, or try again later.";
     chat.handle_codex_event(Event {
         id: "sub-402".into(),
         msg: EventMsg::StreamError(StreamErrorEvent {
             message: msg.to_string(),
             codex_error_info: Some(CodexErrorInfo::UsageLimitExceeded),
-            additional_details: None,
+            additional_details: Some(details.to_string()),
         }),
     });
 
@@ -12950,7 +12952,7 @@ async fn stream_error_402_retry_updates_status_indicator() {
         .status_widget()
         .expect("status indicator should be visible");
     assert_eq!(status.header(), msg);
-    assert_eq!(status.details(), None);
+    assert_eq!(status.details(), Some(details));
     assert!(chat.bottom_pane.is_task_running());
 }
 

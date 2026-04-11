@@ -71,6 +71,9 @@ use tracing_subscriber::prelude::*;
 use url::Url;
 use uuid::Uuid;
 
+const RUST_LOG_ENV_VAR: &str = "RUST_LOG";
+const DEFAULT_TUI_LOG_FILTER: &str = "warn";
+
 mod additional_dirs;
 mod app;
 mod app_backtrack;
@@ -594,6 +597,14 @@ fn latest_session_lookup_params(
     }
 }
 
+fn tui_env_filter() -> EnvFilter {
+    if std::env::var_os(RUST_LOG_ENV_VAR).is_some() {
+        EnvFilter::from_default_env()
+    } else {
+        EnvFilter::new(DEFAULT_TUI_LOG_FILTER)
+    }
+}
+
 pub async fn run_main(
     mut cli: Cli,
     arg0_paths: Arg0DispatchPaths,
@@ -829,11 +840,9 @@ pub async fn run_main(
     // Wrap file in non‑blocking writer.
     let (non_blocking, _guard) = non_blocking(log_file);
 
-    // use RUST_LOG env var, default to info for codex crates.
+    // Honor RUST_LOG when set; otherwise keep the default log file quiet.
     let env_filter = || {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("codex_core=info,codex_tui=info,codex_rmcp_client=info")
-        })
+        tui_env_filter()
     };
 
     let file_layer = tracing_subscriber::fmt::layer()

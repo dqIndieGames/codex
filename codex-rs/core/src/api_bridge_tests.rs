@@ -147,6 +147,73 @@ fn map_api_error_extracts_identity_auth_details_from_headers() {
         Some("missing_authorization_header")
     );
     assert_eq!(err.identity_error_code.as_deref(), Some("token_expired"));
+    assert_eq!(err.retry_source, UnexpectedResponseRetrySource::Turn);
+}
+
+#[test]
+fn map_responses_request_api_error_marks_http_errors_as_request_layer_retry_source() {
+    let err = map_responses_request_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::FORBIDDEN,
+        url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
+        headers: None,
+        body: Some(r#"{"detail":"forbidden"}"#.to_string()),
+    }));
+
+    let CodexErr::UnexpectedStatus(err) = err else {
+        panic!("expected CodexErr::UnexpectedStatus, got {err:?}");
+    };
+    assert_eq!(err.retry_source, UnexpectedResponseRetrySource::RequestLayer);
+}
+
+#[test]
+fn map_responses_stream_api_error_marks_http_errors_as_turn_retry_source() {
+    let err = map_responses_stream_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::FORBIDDEN,
+        url: Some("wss://chatgpt.com/backend-api/codex/responses".to_string()),
+        headers: None,
+        body: Some(r#"{"detail":"forbidden"}"#.to_string()),
+    }));
+
+    let CodexErr::UnexpectedStatus(err) = err else {
+        panic!("expected CodexErr::UnexpectedStatus, got {err:?}");
+    };
+    assert_eq!(err.retry_source, UnexpectedResponseRetrySource::Turn);
+}
+
+#[test]
+fn map_responses_stream_api_error_keeps_wrapped_429_usage_limit_as_turn_level_unexpected_status() {
+    let err = map_responses_stream_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::TOO_MANY_REQUESTS,
+        url: Some("wss://chatgpt.com/backend-api/codex/responses".to_string()),
+        headers: None,
+        body: Some(
+            r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}"#
+                .to_string(),
+        ),
+    }));
+
+    let CodexErr::UnexpectedStatus(err) = err else {
+        panic!("expected CodexErr::UnexpectedStatus for turn-level 429, got {err:?}");
+    };
+    assert_eq!(err.retry_source, UnexpectedResponseRetrySource::Turn);
+}
+
+#[test]
+fn map_responses_stream_api_error_keeps_wrapped_400_invalid_request_as_turn_level_unexpected_status() {
+    let err = map_responses_stream_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::BAD_REQUEST,
+        url: Some("wss://chatgpt.com/backend-api/codex/responses".to_string()),
+        headers: None,
+        body: Some(
+            r#"{"error":{"type":"invalid_request_error","message":"Model does not support image inputs"}}"#
+                .to_string(),
+        ),
+    }));
+
+    let CodexErr::UnexpectedStatus(err) = err else {
+        panic!("expected CodexErr::UnexpectedStatus for turn-level 400, got {err:?}");
+    };
+    assert_eq!(err.retry_source, UnexpectedResponseRetrySource::Turn);
 }
 
 #[test]

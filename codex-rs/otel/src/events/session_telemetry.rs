@@ -372,6 +372,7 @@ impl SessionTelemetry {
             status,
             error.as_deref(),
             duration,
+            /*emit_log_trace*/ true,
             /*auth_header_attached*/ false,
             /*auth_header_name*/ None,
             /*retry_after_unauthorized*/ false,
@@ -394,6 +395,7 @@ impl SessionTelemetry {
         status: Option<u16>,
         error: Option<&str>,
         duration: Duration,
+        emit_log_trace: bool,
         auth_header_attached: bool,
         auth_header_name: Option<&str>,
         retry_after_unauthorized: bool,
@@ -420,34 +422,36 @@ impl SessionTelemetry {
             duration,
             &[("status", status_str.as_str()), ("success", success_str)],
         );
-        log_and_trace_event!(
-            self,
-            common: {
-                event.name = "codex.api_request",
-                duration_ms = %duration.as_millis(),
-                http.response.status_code = status,
-                error.message = error,
-                attempt = attempt,
-                auth.header_attached = auth_header_attached,
-                auth.header_name = auth_header_name,
-                auth.retry_after_unauthorized = retry_after_unauthorized,
-                auth.recovery_mode = recovery_mode,
-                auth.recovery_phase = recovery_phase,
-                endpoint = endpoint,
-                auth.env_openai_api_key_present = self.metadata.auth_env.openai_api_key_env_present,
-                auth.env_codex_api_key_present = self.metadata.auth_env.codex_api_key_env_present,
-                auth.env_codex_api_key_enabled = self.metadata.auth_env.codex_api_key_env_enabled,
-                auth.env_provider_key_name = self.metadata.auth_env.provider_env_key_name.as_deref(),
-                auth.env_provider_key_present = self.metadata.auth_env.provider_env_key_present,
-                auth.env_refresh_token_url_override_present = self.metadata.auth_env.refresh_token_url_override_present,
-                auth.request_id = request_id,
-                auth.cf_ray = cf_ray,
-                auth.error = auth_error,
-                auth.error_code = auth_error_code,
-            },
-            log: {},
-            trace: {},
-        );
+        if emit_log_trace {
+            log_and_trace_event!(
+                self,
+                common: {
+                    event.name = "codex.api_request",
+                    duration_ms = %duration.as_millis(),
+                    http.response.status_code = status,
+                    error.message = error,
+                    attempt = attempt,
+                    auth.header_attached = auth_header_attached,
+                    auth.header_name = auth_header_name,
+                    auth.retry_after_unauthorized = retry_after_unauthorized,
+                    auth.recovery_mode = recovery_mode,
+                    auth.recovery_phase = recovery_phase,
+                    endpoint = endpoint,
+                    auth.env_openai_api_key_present = self.metadata.auth_env.openai_api_key_env_present,
+                    auth.env_codex_api_key_present = self.metadata.auth_env.codex_api_key_env_present,
+                    auth.env_codex_api_key_enabled = self.metadata.auth_env.codex_api_key_env_enabled,
+                    auth.env_provider_key_name = self.metadata.auth_env.provider_env_key_name.as_deref(),
+                    auth.env_provider_key_present = self.metadata.auth_env.provider_env_key_present,
+                    auth.env_refresh_token_url_override_present = self.metadata.auth_env.refresh_token_url_override_present,
+                    auth.request_id = request_id,
+                    auth.cf_ray = cf_ray,
+                    auth.error = auth_error,
+                    auth.error_code = auth_error_code,
+                },
+                log: {},
+                trace: {},
+            );
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -456,6 +460,7 @@ impl SessionTelemetry {
         duration: Duration,
         status: Option<u16>,
         error: Option<&str>,
+        emit_log_trace: bool,
         auth_header_attached: bool,
         auth_header_name: Option<&str>,
         retry_after_unauthorized: bool,
@@ -473,35 +478,37 @@ impl SessionTelemetry {
                 .map(|code| (200..=299).contains(&code))
                 .unwrap_or(true);
         let success_str = if success { "true" } else { "false" };
-        log_and_trace_event!(
-            self,
-            common: {
-                event.name = "codex.websocket_connect",
-                duration_ms = %duration.as_millis(),
-                http.response.status_code = status,
-                success = success_str,
-                error.message = error,
-                auth.header_attached = auth_header_attached,
-                auth.header_name = auth_header_name,
-                auth.retry_after_unauthorized = retry_after_unauthorized,
-                auth.recovery_mode = recovery_mode,
-                auth.recovery_phase = recovery_phase,
-                endpoint = endpoint,
-                auth.env_openai_api_key_present = self.metadata.auth_env.openai_api_key_env_present,
-                auth.env_codex_api_key_present = self.metadata.auth_env.codex_api_key_env_present,
-                auth.env_codex_api_key_enabled = self.metadata.auth_env.codex_api_key_env_enabled,
-                auth.env_provider_key_name = self.metadata.auth_env.provider_env_key_name.as_deref(),
-                auth.env_provider_key_present = self.metadata.auth_env.provider_env_key_present,
-                auth.env_refresh_token_url_override_present = self.metadata.auth_env.refresh_token_url_override_present,
-                auth.connection_reused = connection_reused,
-                auth.request_id = request_id,
-                auth.cf_ray = cf_ray,
-                auth.error = auth_error,
-                auth.error_code = auth_error_code,
-            },
-            log: {},
-            trace: {},
-        );
+        if emit_log_trace {
+            log_and_trace_event!(
+                self,
+                common: {
+                    event.name = "codex.websocket_connect",
+                    duration_ms = %duration.as_millis(),
+                    http.response.status_code = status,
+                    success = success_str,
+                    error.message = error,
+                    auth.header_attached = auth_header_attached,
+                    auth.header_name = auth_header_name,
+                    auth.retry_after_unauthorized = retry_after_unauthorized,
+                    auth.recovery_mode = recovery_mode,
+                    auth.recovery_phase = recovery_phase,
+                    endpoint = endpoint,
+                    auth.env_openai_api_key_present = self.metadata.auth_env.openai_api_key_env_present,
+                    auth.env_codex_api_key_present = self.metadata.auth_env.codex_api_key_env_present,
+                    auth.env_codex_api_key_enabled = self.metadata.auth_env.codex_api_key_env_enabled,
+                    auth.env_provider_key_name = self.metadata.auth_env.provider_env_key_name.as_deref(),
+                    auth.env_provider_key_present = self.metadata.auth_env.provider_env_key_present,
+                    auth.env_refresh_token_url_override_present = self.metadata.auth_env.refresh_token_url_override_present,
+                    auth.connection_reused = connection_reused,
+                    auth.request_id = request_id,
+                    auth.cf_ray = cf_ray,
+                    auth.error = auth_error,
+                    auth.error_code = auth_error_code,
+                },
+                log: {},
+                trace: {},
+            );
+        }
     }
 
     pub fn record_websocket_request(
@@ -509,6 +516,7 @@ impl SessionTelemetry {
         duration: Duration,
         error: Option<&str>,
         connection_reused: bool,
+        emit_log_trace: bool,
     ) {
         let success_str = if error.is_none() { "true" } else { "false" };
         self.counter(
@@ -521,24 +529,26 @@ impl SessionTelemetry {
             duration,
             &[("success", success_str)],
         );
-        log_and_trace_event!(
-            self,
-            common: {
-                event.name = "codex.websocket_request",
-                duration_ms = %duration.as_millis(),
-                success = success_str,
-                error.message = error,
-                auth.env_openai_api_key_present = self.metadata.auth_env.openai_api_key_env_present,
-                auth.env_codex_api_key_present = self.metadata.auth_env.codex_api_key_env_present,
-                auth.env_codex_api_key_enabled = self.metadata.auth_env.codex_api_key_env_enabled,
-                auth.env_provider_key_name = self.metadata.auth_env.provider_env_key_name.as_deref(),
-                auth.env_provider_key_present = self.metadata.auth_env.provider_env_key_present,
-                auth.env_refresh_token_url_override_present = self.metadata.auth_env.refresh_token_url_override_present,
-                auth.connection_reused = connection_reused,
-            },
-            log: {},
-            trace: {},
-        );
+        if emit_log_trace {
+            log_and_trace_event!(
+                self,
+                common: {
+                    event.name = "codex.websocket_request",
+                    duration_ms = %duration.as_millis(),
+                    success = success_str,
+                    error.message = error,
+                    auth.env_openai_api_key_present = self.metadata.auth_env.openai_api_key_env_present,
+                    auth.env_codex_api_key_present = self.metadata.auth_env.codex_api_key_env_present,
+                    auth.env_codex_api_key_enabled = self.metadata.auth_env.codex_api_key_env_enabled,
+                    auth.env_provider_key_name = self.metadata.auth_env.provider_env_key_name.as_deref(),
+                    auth.env_provider_key_present = self.metadata.auth_env.provider_env_key_present,
+                    auth.env_refresh_token_url_override_present = self.metadata.auth_env.refresh_token_url_override_present,
+                    auth.connection_reused = connection_reused,
+                },
+                log: {},
+                trace: {},
+            );
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -585,6 +595,7 @@ impl SessionTelemetry {
             ApiError,
         >,
         duration: Duration,
+        emit_log_trace: bool,
     ) {
         let mut kind = None;
         let mut error_message = None;
@@ -655,18 +666,20 @@ impl SessionTelemetry {
         let tags = [("kind", kind_str), ("success", success_str)];
         self.counter(WEBSOCKET_EVENT_COUNT_METRIC, /*inc*/ 1, &tags);
         self.record_duration(WEBSOCKET_EVENT_DURATION_METRIC, duration, &tags);
-        log_and_trace_event!(
-            self,
-            common: {
-                event.name = "codex.websocket_event",
-                event.kind = %kind_str,
-                duration_ms = %duration.as_millis(),
-                success = success_str,
-                error.message = error_message.as_deref(),
-            },
-            log: {},
-            trace: {},
-        );
+        if emit_log_trace {
+            log_and_trace_event!(
+                self,
+                common: {
+                    event.name = "codex.websocket_event",
+                    event.kind = %kind_str,
+                    duration_ms = %duration.as_millis(),
+                    success = success_str,
+                    error.message = error_message.as_deref(),
+                },
+                log: {},
+                trace: {},
+            );
+        }
     }
 
     pub fn log_sse_event<E>(

@@ -2206,6 +2206,22 @@ fn write_provider_refresh_test_config(
     experimental_bearer_token: Option<&str>,
     include_provider: bool,
 ) {
+    write_provider_refresh_test_config_with_agent_config(
+        codex_home,
+        base_url,
+        experimental_bearer_token,
+        include_provider,
+        /*relative_agent_config_file*/ None,
+    );
+}
+
+fn write_provider_refresh_test_config_with_agent_config(
+    codex_home: &Path,
+    base_url: Option<&str>,
+    experimental_bearer_token: Option<&str>,
+    include_provider: bool,
+    relative_agent_config_file: Option<&str>,
+) {
     let mut config_toml = String::from(
         r#"model = "mock-model"
 approval_policy = "never"
@@ -2233,6 +2249,25 @@ stream_max_retries = 9
                 "experimental_bearer_token = \"{token}\"\n"
             ));
         }
+    }
+
+    if let Some(relative_agent_config_file) = relative_agent_config_file {
+        let role_config_path = codex_home.join(relative_agent_config_file);
+        if let Some(parent) = role_config_path.parent() {
+            std::fs::create_dir_all(parent).expect("create agent config directory");
+        }
+        std::fs::write(
+            &role_config_path,
+            "model = \"mock-model\"\ndeveloper_instructions = \"Review carefully\"\n",
+        )
+        .expect("write agent config file");
+        config_toml.push_str(&format!(
+            r#"
+[agents.reviewer]
+description = "Reviewer role"
+config_file = "{relative_agent_config_file}"
+"#
+        ));
     }
 
     std::fs::write(codex_home.join("config.toml"), config_toml)
@@ -3939,6 +3974,51 @@ async fn refresh_provider_runtime_applies_immediately_for_idle_thread() {
 }
 
 #[tokio::test]
+async fn refresh_provider_runtime_applies_with_relative_agent_config_file() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    write_provider_refresh_test_config_with_agent_config(
+        codex_home.path(),
+        Some("https://old.example.com/v1"),
+        Some("old-token"),
+        /*include_provider*/ true,
+        Some("agents/reviewer.toml"),
+    );
+    let config = Arc::new(build_test_config(codex_home.path()).await);
+    let (session, _) = make_session_and_context_from_config(config).await;
+
+    write_provider_refresh_test_config_with_agent_config(
+        codex_home.path(),
+        Some("https://new.example.com/v1"),
+        Some("new-token"),
+        /*include_provider*/ true,
+        Some("agents/reviewer.toml"),
+    );
+
+    let status = session
+        .refresh_provider_runtime()
+        .await
+        .expect("relative agent config should not block refresh");
+    assert_eq!(status, ProviderRuntimeRefreshStatus::Applied);
+
+    let provider = session.provider().await;
+    assert_eq!(provider.base_url.as_deref(), Some("https://new.example.com/v1"));
+    assert_eq!(
+        provider.experimental_bearer_token.as_deref(),
+        Some("new-token")
+    );
+
+    let next_turn = session.new_default_turn_with_sub_id("next-turn".to_string()).await;
+    assert_eq!(
+        next_turn.provider.base_url.as_deref(),
+        Some("https://new.example.com/v1")
+    );
+    assert_eq!(
+        next_turn.provider.experimental_bearer_token.as_deref(),
+        Some("new-token")
+    );
+}
+
+#[tokio::test]
 async fn refresh_provider_runtime_queues_for_active_thread_until_next_turn() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     write_provider_refresh_test_config(
@@ -4060,20 +4140,22 @@ async fn refresh_provider_runtime_clears_deleted_fields() {
 #[tokio::test]
 async fn refresh_provider_runtime_fails_when_provider_is_missing() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
-    write_provider_refresh_test_config(
+    write_provider_refresh_test_config_with_agent_config(
         codex_home.path(),
         Some("https://old.example.com/v1"),
         Some("old-token"),
         /*include_provider*/ true,
+        Some("agents/reviewer.toml"),
     );
     let config = Arc::new(build_test_config(codex_home.path()).await);
     let (session, _) = make_session_and_context_from_config(config).await;
 
-    write_provider_refresh_test_config(
+    write_provider_refresh_test_config_with_agent_config(
         codex_home.path(),
         /*base_url*/ None,
         /*experimental_bearer_token*/ None,
         /*include_provider*/ false,
+        Some("agents/reviewer.toml"),
     );
 
     let err = session

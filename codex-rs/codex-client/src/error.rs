@@ -2,7 +2,7 @@ use http::HeaderMap;
 use http::StatusCode;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum TransportError {
     #[error("http {status}: {body:?}")]
     Http {

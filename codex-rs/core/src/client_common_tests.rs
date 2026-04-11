@@ -138,6 +138,31 @@ fn serializes_flex_service_tier_when_set() {
 }
 
 #[test]
+fn serializes_priority_service_tier_when_set_for_gpt_5_4_request() {
+    let req = ResponsesApiRequest {
+        model: "gpt-5.4".to_string(),
+        instructions: "i".to_string(),
+        input: vec![],
+        tools: vec![],
+        tool_choice: "auto".to_string(),
+        parallel_tool_calls: true,
+        reasoning: None,
+        store: false,
+        stream: true,
+        include: vec![],
+        prompt_cache_key: None,
+        service_tier: Some("priority".to_string()),
+        text: None,
+    };
+
+    let v = serde_json::to_value(&req).expect("json");
+    assert_eq!(
+        v.get("service_tier").and_then(|tier| tier.as_str()),
+        Some("priority")
+    );
+}
+
+#[test]
 fn reserializes_shell_outputs_for_function_and_custom_tool_calls() {
     let raw_output = r#"{"output":"hello","metadata":{"exit_code":0,"duration_seconds":0.5}}"#;
     let expected_output = "Exit code: 0\nWall time: 0.5 seconds\nOutput:\nhello";

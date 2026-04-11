@@ -4,6 +4,7 @@ use chrono::DateTime;
 use chrono::Datelike;
 use chrono::Local;
 use chrono::Utc;
+use codex_api::provider::responses_http_status_is_retryable;
 use codex_async_utils::CancelErr;
 pub use codex_login::auth::RefreshTokenFailedError;
 pub use codex_login::auth::RefreshTokenFailedReason;
@@ -225,10 +226,10 @@ impl CodexErr {
             | CodexErr::Json(_)
             | CodexErr::TokioJoin(_) => true,
             CodexErr::UsageLimitReached(_) => false,
-            CodexErr::UnexpectedStatus(err) => !matches!(
-                err.status,
-                StatusCode::UNAUTHORIZED | StatusCode::PAYMENT_REQUIRED
-            ),
+            CodexErr::UnexpectedStatus(err) => {
+                err.retry_source == UnexpectedResponseRetrySource::Turn
+                    && responses_http_status_is_retryable(err.status)
+            }
             #[cfg(target_os = "linux")]
             CodexErr::LandlockRuleset(_) | CodexErr::LandlockPathFd(_) => false,
         }
@@ -266,6 +267,12 @@ impl std::fmt::Display for ResponseStreamFailed {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnexpectedResponseRetrySource {
+    RequestLayer,
+    Turn,
+}
+
 #[derive(Debug)]
 pub struct UnexpectedResponseError {
     pub status: StatusCode,
@@ -275,6 +282,7 @@ pub struct UnexpectedResponseError {
     pub request_id: Option<String>,
     pub identity_authorization_error: Option<String>,
     pub identity_error_code: Option<String>,
+    pub retry_source: UnexpectedResponseRetrySource,
 }
 
 const CLOUDFLARE_BLOCKED_MESSAGE: &str =

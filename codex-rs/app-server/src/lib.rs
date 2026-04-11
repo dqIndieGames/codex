@@ -49,13 +49,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use toml::Value as TomlValue;
-use tracing::Level;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
-use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::Registry;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -90,6 +88,8 @@ pub use crate::transport::auth::AppServerWebsocketAuthSettings;
 pub use crate::transport::auth::WebsocketAuthCliMode;
 
 const LOG_FORMAT_ENV_VAR: &str = "LOG_FORMAT";
+const RUST_LOG_ENV_VAR: &str = "RUST_LOG";
+const DEFAULT_APP_SERVER_LOG_FILTER: &str = "warn";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LogFormat {
@@ -331,6 +331,14 @@ fn log_format_from_env() -> LogFormat {
     LogFormat::from_env_value(value.as_deref())
 }
 
+fn app_server_env_filter() -> EnvFilter {
+    if std::env::var_os(RUST_LOG_ENV_VAR).is_some() {
+        EnvFilter::from_default_env()
+    } else {
+        EnvFilter::new(DEFAULT_APP_SERVER_LOG_FILTER)
+    }
+}
+
 pub async fn run_main(
     arg0_paths: Arg0DispatchPaths,
     cli_config_overrides: CliConfigOverrides,
@@ -490,12 +498,12 @@ pub async fn run_main_with_transport(
             .json()
             .with_writer(std::io::stderr)
             .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL)
-            .with_filter(EnvFilter::from_default_env())
+            .with_filter(app_server_env_filter())
             .boxed(),
         LogFormat::Default => tracing_subscriber::fmt::layer()
             .with_writer(std::io::stderr)
             .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL)
-            .with_filter(EnvFilter::from_default_env())
+            .with_filter(app_server_env_filter())
             .boxed(),
     };
 
@@ -510,7 +518,7 @@ pub async fn run_main_with_transport(
     .map(log_db::start);
     let log_db_layer = log_db
         .clone()
-        .map(|layer| layer.with_filter(Targets::new().with_default(Level::TRACE)));
+        .map(|layer| layer.with_filter(app_server_env_filter()));
     let otel_logger_layer = otel.as_ref().and_then(|o| o.logger_layer());
     let otel_tracing_layer = otel.as_ref().and_then(|o| o.tracing_layer());
     let _ = tracing_subscriber::registry()

@@ -1,11 +1,15 @@
 use codex_otel::AuthEnvTelemetryMetadata;
 use codex_otel::OtelProvider;
+use codex_otel::RuntimeMetricTotals;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
+use codex_otel::metrics::MetricsClient;
+use codex_otel::metrics::MetricsConfig;
 use opentelemetry::KeyValue;
 use opentelemetry::logs::AnyValue;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::logs::InMemoryLogExporter;
+use opentelemetry_sdk::metrics::InMemoryMetricExporter;
 use opentelemetry_sdk::logs::SdkLogRecord;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::trace::InMemorySpanExporter;
@@ -80,6 +84,30 @@ fn find_span_event_by_name_attr<'a>(
         .unwrap_or_else(|| panic!("missing span event: {event_name}"))
 }
 
+fn count_logs_by_event_name(
+    logs: &[opentelemetry_sdk::logs::in_memory_exporter::LogDataWithResource],
+    event_name: &str,
+) -> usize {
+    logs.iter()
+        .filter(|log| {
+            log_attributes(&log.record)
+                .get("event.name")
+                .is_some_and(|value| value == event_name)
+        })
+        .count()
+}
+
+fn count_span_events_by_name_attr(events: &[opentelemetry::trace::Event], event_name: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            span_event_attributes(event)
+                .get("event.name")
+                .is_some_and(|value| value == event_name)
+        })
+        .count()
+}
+
 fn auth_env_metadata() -> AuthEnvTelemetryMetadata {
     AuthEnvTelemetryMetadata {
         openai_api_key_env_present: true,
@@ -89,6 +117,19 @@ fn auth_env_metadata() -> AuthEnvTelemetryMetadata {
         provider_env_key_present: Some(true),
         refresh_token_url_override_present: true,
     }
+}
+
+fn runtime_metrics_client() -> MetricsClient {
+    MetricsClient::new(
+        MetricsConfig::in_memory(
+            "test",
+            "codex-cli",
+            env!("CARGO_PKG_VERSION"),
+            InMemoryMetricExporter::default(),
+        )
+        .with_runtime_reader(),
+    )
+    .expect("runtime metrics client")
 }
 
 #[test]
@@ -517,6 +558,7 @@ fn otel_export_routing_policy_routes_api_request_auth_observability() {
             Some(401),
             Some("http 401"),
             std::time::Duration::from_millis(42),
+            /*emit_log_trace*/ true,
             /*auth_header_attached*/ true,
             Some("authorization"),
             /*retry_after_unauthorized*/ true,
@@ -690,6 +732,7 @@ fn otel_export_routing_policy_routes_websocket_connect_auth_observability() {
             std::time::Duration::from_millis(17),
             Some(401),
             Some("http 401"),
+            /*emit_log_trace*/ true,
             /*auth_header_attached*/ true,
             Some("authorization"),
             /*retry_after_unauthorized*/ true,
@@ -807,6 +850,7 @@ fn otel_export_routing_policy_routes_websocket_request_transport_observability()
             std::time::Duration::from_millis(23),
             Some("stream error"),
             /*connection_reused*/ true,
+            /*emit_log_trace*/ true,
         );
     });
 
@@ -848,5 +892,322 @@ fn otel_export_routing_policy_routes_websocket_request_transport_observability()
             .get("auth.env_provider_key_present")
             .map(String::as_str),
         Some("true")
+    );
+}
+
+#[test]
+fn otel_export_routing_policy_suppresses_api_request_log_and_trace_when_disabled_but_keeps_metrics() {
+    let log_exporter = InMemoryLogExporter::default();
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_simple_exporter(log_exporter.clone())
+        .build();
+    let span_exporter = InMemorySpanExporter::default();
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_simple_exporter(span_exporter.clone())
+        .build();
+    let tracer = tracer_provider.tracer("sink-split-test");
+
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                &logger_provider,
+            )
+            .with_filter(filter_fn(OtelProvider::log_export_filter)),
+        )
+        .with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(filter_fn(OtelProvider::trace_export_filter)),
+        );
+
+    let manager = SessionTelemetry::new(
+        ThreadId::new(),
+        "gpt-5.1",
+        "gpt-5.1",
+        Some("account-id".to_string()),
+        Some("engineer@example.com".to_string()),
+        Some(TelemetryAuthMode::Chatgpt),
+        "codex_exec".to_string(),
+        /*log_user_prompts*/ true,
+        "tty".to_string(),
+        SessionSource::Cli,
+    )
+    .with_metrics(runtime_metrics_client());
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        let root_span = tracing::info_span!("root");
+        let _root_guard = root_span.enter();
+        manager.record_api_request(
+            /*attempt*/ 1,
+            Some(503),
+            Some("http 503"),
+            std::time::Duration::from_millis(42),
+            /*emit_log_trace*/ false,
+            /*auth_header_attached*/ true,
+            Some("authorization"),
+            /*retry_after_unauthorized*/ true,
+            Some("managed"),
+            Some("refresh_token"),
+            "/responses",
+            Some("req-503"),
+            Some("ray-503"),
+            Some("server_is_overloaded"),
+            Some("slow_down"),
+        );
+    });
+
+    logger_provider.force_flush().expect("flush logs");
+    tracer_provider.force_flush().expect("flush traces");
+
+    let logs = log_exporter.get_emitted_logs().expect("log export");
+    assert_eq!(count_logs_by_event_name(&logs, "codex.api_request"), 0);
+
+    let spans = span_exporter.get_finished_spans().expect("span export");
+    assert_eq!(
+        count_span_events_by_name_attr(&spans[0].events.events, "codex.api_request"),
+        0
+    );
+
+    let summary = manager
+        .runtime_metrics_summary()
+        .expect("runtime metrics summary");
+    assert_eq!(
+        summary.api_calls,
+        RuntimeMetricTotals {
+            count: 1,
+            duration_ms: 42,
+        }
+    );
+}
+
+#[test]
+fn otel_export_routing_policy_suppresses_websocket_connect_log_and_trace_when_disabled() {
+    let log_exporter = InMemoryLogExporter::default();
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_simple_exporter(log_exporter.clone())
+        .build();
+    let span_exporter = InMemorySpanExporter::default();
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_simple_exporter(span_exporter.clone())
+        .build();
+    let tracer = tracer_provider.tracer("sink-split-test");
+
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                &logger_provider,
+            )
+            .with_filter(filter_fn(OtelProvider::log_export_filter)),
+        )
+        .with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(filter_fn(OtelProvider::trace_export_filter)),
+        );
+
+    let manager = SessionTelemetry::new(
+        ThreadId::new(),
+        "gpt-5.1",
+        "gpt-5.1",
+        Some("account-id".to_string()),
+        Some("engineer@example.com".to_string()),
+        Some(TelemetryAuthMode::Chatgpt),
+        "codex_exec".to_string(),
+        /*log_user_prompts*/ true,
+        "tty".to_string(),
+        SessionSource::Cli,
+    );
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        let root_span = tracing::info_span!("root");
+        let _root_guard = root_span.enter();
+        manager.record_websocket_connect(
+            std::time::Duration::from_millis(17),
+            Some(503),
+            Some("http 503"),
+            /*emit_log_trace*/ false,
+            /*auth_header_attached*/ true,
+            Some("authorization"),
+            /*retry_after_unauthorized*/ false,
+            None,
+            None,
+            "/responses",
+            /*connection_reused*/ false,
+            Some("req-ws-503"),
+            Some("ray-ws-503"),
+            None,
+            None,
+        );
+    });
+
+    logger_provider.force_flush().expect("flush logs");
+    tracer_provider.force_flush().expect("flush traces");
+
+    let logs = log_exporter.get_emitted_logs().expect("log export");
+    assert_eq!(count_logs_by_event_name(&logs, "codex.websocket_connect"), 0);
+
+    let spans = span_exporter.get_finished_spans().expect("span export");
+    assert_eq!(
+        count_span_events_by_name_attr(&spans[0].events.events, "codex.websocket_connect"),
+        0
+    );
+}
+
+#[test]
+fn otel_export_routing_policy_suppresses_websocket_request_log_and_trace_when_disabled_but_keeps_metrics() {
+    let log_exporter = InMemoryLogExporter::default();
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_simple_exporter(log_exporter.clone())
+        .build();
+    let span_exporter = InMemorySpanExporter::default();
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_simple_exporter(span_exporter.clone())
+        .build();
+    let tracer = tracer_provider.tracer("sink-split-test");
+
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                &logger_provider,
+            )
+            .with_filter(filter_fn(OtelProvider::log_export_filter)),
+        )
+        .with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(filter_fn(OtelProvider::trace_export_filter)),
+        );
+
+    let manager = SessionTelemetry::new(
+        ThreadId::new(),
+        "gpt-5.1",
+        "gpt-5.1",
+        Some("account-id".to_string()),
+        Some("engineer@example.com".to_string()),
+        Some(TelemetryAuthMode::Chatgpt),
+        "codex_exec".to_string(),
+        /*log_user_prompts*/ true,
+        "tty".to_string(),
+        SessionSource::Cli,
+    )
+    .with_metrics(runtime_metrics_client())
+    .with_auth_env(auth_env_metadata());
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        let root_span = tracing::info_span!("root");
+        let _root_guard = root_span.enter();
+        manager.record_websocket_request(
+            std::time::Duration::from_millis(23),
+            Some("stream error"),
+            /*connection_reused*/ true,
+            /*emit_log_trace*/ false,
+        );
+    });
+
+    logger_provider.force_flush().expect("flush logs");
+    tracer_provider.force_flush().expect("flush traces");
+
+    let logs = log_exporter.get_emitted_logs().expect("log export");
+    assert_eq!(count_logs_by_event_name(&logs, "codex.websocket_request"), 0);
+
+    let spans = span_exporter.get_finished_spans().expect("span export");
+    assert_eq!(
+        count_span_events_by_name_attr(&spans[0].events.events, "codex.websocket_request"),
+        0
+    );
+
+    let summary = manager
+        .runtime_metrics_summary()
+        .expect("runtime metrics summary");
+    assert_eq!(
+        summary.websocket_calls,
+        RuntimeMetricTotals {
+            count: 1,
+            duration_ms: 23,
+        }
+    );
+}
+
+#[test]
+fn otel_export_routing_policy_suppresses_websocket_event_log_and_trace_when_disabled_but_keeps_metrics() {
+    let log_exporter = InMemoryLogExporter::default();
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_simple_exporter(log_exporter.clone())
+        .build();
+    let span_exporter = InMemorySpanExporter::default();
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_simple_exporter(span_exporter.clone())
+        .build();
+    let tracer = tracer_provider.tracer("sink-split-test");
+
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                &logger_provider,
+            )
+            .with_filter(filter_fn(OtelProvider::log_export_filter)),
+        )
+        .with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(filter_fn(OtelProvider::trace_export_filter)),
+        );
+
+    let manager = SessionTelemetry::new(
+        ThreadId::new(),
+        "gpt-5.1",
+        "gpt-5.1",
+        Some("account-id".to_string()),
+        Some("engineer@example.com".to_string()),
+        Some(TelemetryAuthMode::Chatgpt),
+        "codex_exec".to_string(),
+        /*log_user_prompts*/ true,
+        "tty".to_string(),
+        SessionSource::Cli,
+    )
+    .with_metrics(runtime_metrics_client());
+    let ws_response: std::result::Result<
+        Option<std::result::Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>,
+        codex_api::ApiError,
+    > = Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(
+        r#"{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"try again"}}}"#
+            .into(),
+    ))));
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        let root_span = tracing::info_span!("root");
+        let _root_guard = root_span.enter();
+        manager.record_websocket_event(
+            &ws_response,
+            std::time::Duration::from_millis(80),
+            /*emit_log_trace*/ false,
+        );
+    });
+
+    logger_provider.force_flush().expect("flush logs");
+    tracer_provider.force_flush().expect("flush traces");
+
+    let logs = log_exporter.get_emitted_logs().expect("log export");
+    assert_eq!(count_logs_by_event_name(&logs, "codex.websocket_event"), 0);
+
+    let spans = span_exporter.get_finished_spans().expect("span export");
+    assert_eq!(
+        count_span_events_by_name_attr(&spans[0].events.events, "codex.websocket_event"),
+        0
+    );
+
+    let summary = manager
+        .runtime_metrics_summary()
+        .expect("runtime metrics summary");
+    assert_eq!(
+        summary.websocket_events,
+        RuntimeMetricTotals {
+            count: 1,
+            duration_ms: 80,
+        }
     );
 }

@@ -294,7 +294,8 @@ async fn model_and_personality_change_only_appends_model_instructions() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn service_tier_change_is_applied_on_next_http_turn() -> Result<()> {
+async fn gpt_5_4_forces_priority_on_http_turns_even_when_next_turn_service_tier_is_none() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -304,7 +305,37 @@ async fn service_tier_change_is_applied_on_next_http_turn() -> Result<()> {
     )
     .await;
 
-    let test = test_codex().build(&server).await?;
+    let test = test_codex().with_model("gpt-5.4").build(&server).await?;
+
+    test.submit_turn_with_service_tier("fast turn", Some(ServiceTier::Fast))
+        .await?;
+    test.submit_turn_with_service_tier("standard turn", /*service_tier*/ None)
+        .await?;
+
+    let requests = resp_mock.requests();
+    assert_eq!(requests.len(), 2, "expected two model requests");
+
+    let first_body = requests[0].body_json();
+    let second_body = requests[1].body_json();
+
+    assert_eq!(first_body["service_tier"].as_str(), Some("priority"));
+    assert_eq!(second_body["service_tier"].as_str(), Some("priority"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_gpt_5_4_service_tier_none_still_uses_existing_http_semantics() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let resp_mock = mount_sse_sequence(
+        &server,
+        vec![sse_completed("resp-1"), sse_completed("resp-2")],
+    )
+    .await;
+
+    let test = test_codex().with_model("gpt-5.1").build(&server).await?;
 
     test.submit_turn_with_service_tier("fast turn", Some(ServiceTier::Fast))
         .await?;
@@ -324,13 +355,32 @@ async fn service_tier_change_is_applied_on_next_http_turn() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flex_service_tier_is_applied_to_http_turn() -> Result<()> {
+async fn gpt_5_4_flex_service_tier_is_forced_to_priority_on_http_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
     let resp_mock = mount_sse_once(&server, sse_completed("resp-1")).await;
 
-    let test = test_codex().build(&server).await?;
+    let test = test_codex().with_model("gpt-5.4").build(&server).await?;
+
+    test.submit_turn_with_service_tier("flex turn", Some(ServiceTier::Flex))
+        .await?;
+
+    let request = resp_mock.single_request();
+    let body = request.body_json();
+    assert_eq!(body["service_tier"].as_str(), Some("priority"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_gpt_5_4_flex_service_tier_is_applied_to_http_turn() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let resp_mock = mount_sse_once(&server, sse_completed("resp-1")).await;
+
+    let test = test_codex().with_model("gpt-5.1").build(&server).await?;
 
     test.submit_turn_with_service_tier("flex turn", Some(ServiceTier::Flex))
         .await?;

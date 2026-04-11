@@ -31,10 +31,35 @@ fn write_provider_refresh_config(
     base_url: &str,
     token: &str,
 ) -> std::io::Result<()> {
-    std::fs::write(
-        codex_home.join("config.toml"),
-        format!(
-            r#"
+    write_provider_refresh_config_with_agent_config(
+        codex_home,
+        server_uri,
+        base_url,
+        token,
+        /*relative_agent_config_file*/ None,
+    )
+}
+
+fn write_provider_refresh_config_with_agent_config(
+    codex_home: &Path,
+    server_uri: &str,
+    base_url: &str,
+    token: &str,
+    relative_agent_config_file: Option<&str>,
+) -> std::io::Result<()> {
+    if let Some(relative_agent_config_file) = relative_agent_config_file {
+        let role_config_path = codex_home.join(relative_agent_config_file);
+        if let Some(parent) = role_config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(
+            &role_config_path,
+            "model = \"mock-model\"\ndeveloper_instructions = \"Review carefully\"\n",
+        )?;
+    }
+
+    let mut config_toml = format!(
+        r#"
 model = "mock-model"
 approval_policy = "never"
 sandbox_mode = "read-only"
@@ -50,7 +75,20 @@ supports_websockets = true
 request_max_retries = 0
 stream_max_retries = 0
 "#
-        ),
+    );
+    if let Some(relative_agent_config_file) = relative_agent_config_file {
+        config_toml.push_str(&format!(
+            r#"
+[agents.reviewer]
+description = "Reviewer role"
+config_file = "{relative_agent_config_file}"
+"#
+        ));
+    }
+
+    std::fs::write(
+        codex_home.join("config.toml"),
+        config_toml,
     )
 }
 
@@ -305,6 +343,60 @@ async fn thread_provider_runtime_refresh_all_loaded_reports_mixed_statuses() -> 
         &server.uri(),
         "https://refreshed.example.com/v1",
         "new-token",
+    )?;
+
+    let response = refresh_all_loaded(&mut mcp).await?;
+    assert_eq!(response.total_threads, 2);
+    assert!(response.applied_thread_ids.contains(&idle_thread_id));
+    assert!(response.queued_thread_ids.contains(&active_thread_id));
+    assert!(response.failed_threads.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_provider_runtime_refresh_all_loaded_keeps_failed_threads_empty_for_relative_agent_config_file() -> Result<()>
+{
+    let responses = vec![create_request_user_input_sse_response("call-1")?];
+    let server = create_mock_responses_server_sequence(responses).await;
+    let codex_home = TempDir::new()?;
+    write_provider_refresh_config_with_agent_config(
+        codex_home.path(),
+        &server.uri(),
+        &format!("{}/v1", server.uri()),
+        "old-token",
+        Some("./agents/reviewer.toml"),
+    )?;
+
+    let mut mcp = init_mcp(codex_home.path()).await?;
+    let idle_thread_id = start_thread(&mut mcp).await?;
+    let active_thread_id = start_thread(&mut mcp).await?;
+
+    let turn_request_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: active_thread_id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "ask for confirmation".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let _: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_request_id)),
+    )
+    .await??;
+    let request = timeout(DEFAULT_READ_TIMEOUT, mcp.read_stream_until_request_message()).await??;
+    let ServerRequest::ToolRequestUserInput { .. } = request else {
+        panic!("expected ToolRequestUserInput request");
+    };
+
+    write_provider_refresh_config_with_agent_config(
+        codex_home.path(),
+        &server.uri(),
+        "https://refreshed.example.com/v1",
+        "new-token",
+        Some("./agents/reviewer.toml"),
     )?;
 
     let response = refresh_all_loaded(&mut mcp).await?;

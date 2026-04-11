@@ -252,7 +252,7 @@ async fn websocket_v2_test_codex_shell_chain() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn websocket_v2_first_turn_uses_updated_fast_tier_after_startup_prewarm() -> Result<()> {
+async fn websocket_v2_gpt_5_4_first_turn_uses_priority_after_startup_prewarm() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_websocket_server(vec![vec![
@@ -265,12 +265,14 @@ async fn websocket_v2_first_turn_uses_updated_fast_tier_after_startup_prewarm() 
     ]])
     .await;
 
-    let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::ResponsesWebsocketsV2)
-            .expect("test config should allow feature update");
-    });
+    let mut builder = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::ResponsesWebsocketsV2)
+                .expect("test config should allow feature update");
+        });
     let test = builder.build_with_websocket_server(&server).await?;
 
     let warmup = server
@@ -279,7 +281,7 @@ async fn websocket_v2_first_turn_uses_updated_fast_tier_after_startup_prewarm() 
         .body_json();
     assert_eq!(warmup["type"].as_str(), Some("response.create"));
     assert_eq!(warmup["generate"].as_bool(), Some(false));
-    assert_eq!(warmup.get("service_tier"), None);
+    assert_eq!(warmup["service_tier"].as_str(), Some("priority"));
 
     test.submit_turn_with_service_tier("hello", Some(ServiceTier::Fast))
         .await?;
@@ -307,7 +309,8 @@ async fn websocket_v2_first_turn_uses_updated_fast_tier_after_startup_prewarm() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn websocket_v2_first_turn_drops_fast_tier_after_startup_prewarm() -> Result<()> {
+async fn websocket_v2_gpt_5_4_first_turn_keeps_priority_when_live_session_tier_is_none() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let server = start_websocket_server(vec![vec![
@@ -320,13 +323,15 @@ async fn websocket_v2_first_turn_drops_fast_tier_after_startup_prewarm() -> Resu
     ]])
     .await;
 
-    let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::ResponsesWebsocketsV2)
-            .expect("test config should allow feature update");
-        config.service_tier = Some(ServiceTier::Fast);
-    });
+    let mut builder = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::ResponsesWebsocketsV2)
+                .expect("test config should allow feature update");
+            config.service_tier = Some(ServiceTier::Fast);
+        });
     let test = builder.build_with_websocket_server(&server).await?;
 
     let warmup = server
@@ -349,7 +354,7 @@ async fn websocket_v2_first_turn_drops_fast_tier_after_startup_prewarm() -> Resu
         .body_json();
 
     assert_eq!(first_turn["type"].as_str(), Some("response.create"));
-    assert_eq!(first_turn.get("service_tier"), None);
+    assert_eq!(first_turn["service_tier"].as_str(), Some("priority"));
     assert_eq!(first_turn.get("previous_response_id"), None);
     assert!(
         first_turn
@@ -381,12 +386,14 @@ async fn websocket_v2_next_turn_uses_updated_service_tier() -> Result<()> {
     ]])
     .await;
 
-    let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::ResponsesWebsocketsV2)
-            .expect("test config should allow feature update");
-    });
+    let mut builder = test_codex()
+        .with_model("gpt-5.1")
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::ResponsesWebsocketsV2)
+                .expect("test config should allow feature update");
+        });
     let test = builder.build_with_websocket_server(&server).await?;
 
     let warmup = server
@@ -427,6 +434,85 @@ async fn websocket_v2_next_turn_uses_updated_service_tier() -> Result<()> {
 
     assert_eq!(second_turn["type"].as_str(), Some("response.create"));
     assert_eq!(second_turn.get("service_tier"), None);
+    assert_eq!(second_turn.get("previous_response_id"), None);
+    assert!(
+        second_turn
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_v2_gpt_5_4_next_turn_keeps_priority_when_service_tier_is_none() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_websocket_server(vec![vec![
+        vec![ev_response_created("warm-1"), ev_completed("warm-1")],
+        vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "fast"),
+            ev_completed("resp-1"),
+        ],
+        vec![
+            ev_response_created("resp-2"),
+            ev_assistant_message("msg-2", "priority"),
+            ev_completed("resp-2"),
+        ],
+    ]])
+    .await;
+
+    let mut builder = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::ResponsesWebsocketsV2)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build_with_websocket_server(&server).await?;
+
+    let warmup = server
+        .wait_for_request(/*connection_index*/ 0, /*request_index*/ 0)
+        .await
+        .body_json();
+    assert_eq!(warmup["type"].as_str(), Some("response.create"));
+    assert_eq!(warmup["generate"].as_bool(), Some(false));
+    assert_eq!(warmup["service_tier"].as_str(), Some("priority"));
+
+    test.submit_turn_with_service_tier("first", Some(ServiceTier::Fast))
+        .await?;
+    test.submit_turn_with_service_tier("second", /*service_tier*/ None)
+        .await?;
+
+    assert_eq!(server.handshakes().len(), 1);
+    let connection = server.single_connection();
+    assert_eq!(connection.len(), 3);
+
+    let first_turn = connection
+        .get(1)
+        .expect("missing first turn request")
+        .body_json();
+    let second_turn = connection
+        .get(2)
+        .expect("missing second turn request")
+        .body_json();
+
+    assert_eq!(first_turn["type"].as_str(), Some("response.create"));
+    assert_eq!(first_turn["service_tier"].as_str(), Some("priority"));
+    assert_eq!(first_turn.get("previous_response_id"), None);
+    assert!(
+        first_turn
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    );
+
+    assert_eq!(second_turn["type"].as_str(), Some("response.create"));
+    assert_eq!(second_turn["service_tier"].as_str(), Some("priority"));
     assert_eq!(second_turn.get("previous_response_id"), None);
     assert!(
         second_turn
