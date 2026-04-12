@@ -851,6 +851,9 @@ pub(crate) struct ChatWidget {
     // history has been rendered so resumed/forked prompts keep chronological
     // order.
     suppress_initial_user_message_submit: bool,
+    // Insert the fixed local1 checklist once, immediately before the first
+    // user-submitted message of a brand-new thread.
+    pending_local1_first_turn_checklist: bool,
     // User messages queued while a turn is in progress
     queued_user_messages: VecDeque<UserMessage>,
     // User messages that tried to steer a non-regular turn and must be retried first.
@@ -1999,6 +2002,9 @@ impl ChatWidget {
         self.sync_personality_command_enabled();
         self.sync_plugins_command_enabled();
         self.refresh_plugin_mentions();
+        let should_insert_local1_first_turn_checklist =
+            event.history_entry_count == 0 && event.initial_messages.is_none();
+        self.pending_local1_first_turn_checklist = should_insert_local1_first_turn_checklist;
         let startup_tooltip_override = self.startup_tooltip_override.take();
         let show_fast_status = self.should_show_fast_status(&model_for_header, event.service_tier);
         #[cfg(test)]
@@ -2007,7 +2013,7 @@ impl ChatWidget {
             &self.config,
             &model_for_header,
             event,
-            self.show_welcome_banner,
+            self.show_welcome_banner || should_insert_local1_first_turn_checklist,
             startup_tooltip_override,
             self.plan_type,
             show_fast_status,
@@ -4772,6 +4778,7 @@ impl ChatWidget {
             startup_tooltip_override,
             suppress_session_configured_redraw: false,
             suppress_initial_user_message_submit: false,
+            pending_local1_first_turn_checklist: false,
             pending_notification: None,
             quit_shortcut_expires_at: None,
             quit_shortcut_key: None,
@@ -5645,6 +5652,14 @@ impl ChatWidget {
         }
     }
 
+    fn maybe_insert_local1_first_turn_checklist(&mut self) {
+        if !self.pending_local1_first_turn_checklist {
+            return;
+        }
+        self.pending_local1_first_turn_checklist = false;
+        self.add_to_history(history_cell::new_local1_first_turn_checklist());
+    }
+
     fn submit_user_message(&mut self, user_message: UserMessage) {
         if !self.is_session_configured() {
             tracing::warn!("cannot submit user message before session is configured; queueing");
@@ -5674,6 +5689,7 @@ impl ChatWidget {
             );
             return;
         }
+        self.maybe_insert_local1_first_turn_checklist();
 
         let render_in_history = !self.agent_turn_running;
         let mut items: Vec<UserInput> = Vec::new();

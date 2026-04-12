@@ -228,6 +228,10 @@ pub struct Config {
     /// Effective service tier preference for new turns (`fast` or `flex`).
     pub service_tier: Option<ServiceTier>,
 
+    /// Whether `gpt-5.4` requests should force the priority fallback at the
+    /// request-construction hook. Defaults to `true`.
+    pub force_gpt54_priority_fallback: bool,
+
     /// Model used specifically for review sessions.
     pub review_model: Option<String>,
 
@@ -1269,6 +1273,10 @@ pub struct ConfigToml {
 
     /// Optional explicit service tier preference for new turns (`fast` or `flex`).
     pub service_tier: Option<ServiceTier>,
+
+    /// Whether `gpt-5.4` should keep forcing the priority fallback at the
+    /// request-construction hook. Defaults to `true` when omitted.
+    pub force_gpt54_priority_fallback: Option<bool>,
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
@@ -2390,6 +2398,7 @@ impl Config {
             Some(ServiceTier::Flex) => Some(ServiceTier::Flex),
             _ => None,
         };
+        let force_gpt54_priority_fallback = cfg.force_gpt54_priority_fallback.unwrap_or(true);
 
         let compact_prompt = compact_prompt.or(cfg.compact_prompt).and_then(|value| {
             let trimmed = value.trim();
@@ -2552,6 +2561,7 @@ impl Config {
         let config = Self {
             model,
             service_tier,
+            force_gpt54_priority_fallback,
             review_model,
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,

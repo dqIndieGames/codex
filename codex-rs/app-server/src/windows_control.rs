@@ -1,6 +1,17 @@
+use crate::config_api::ConfigApi;
+use codex_app_server_protocol::ConfigBatchWriteParams;
+use codex_app_server_protocol::ConfigEdit;
+use codex_app_server_protocol::ConfigLayer;
+use codex_app_server_protocol::ConfigLayerSource;
+use codex_app_server_protocol::ConfigReadParams;
+use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::MergeStrategy;
+use codex_core::ProviderRuntimeRefreshAllLoadedReport;
 use codex_core::ThreadManager;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -40,6 +51,8 @@ struct AppServerInstanceRegistration {
 #[derive(Debug, Deserialize)]
 struct ControlRequest {
     op: String,
+    #[serde(default)]
+    source_provider_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +76,35 @@ struct RefreshFailure {
 }
 
 #[derive(Debug, Serialize)]
+struct EffectiveProvidersResponse {
+    ok: bool,
+    current_model_provider_id: String,
+    current_model_provider_writable: bool,
+    providers: Vec<EffectiveProviderEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct EffectiveProviderEntry {
+    provider_id: String,
+    display_name: String,
+    has_base_url: bool,
+    has_experimental_bearer_token: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ApplySelectedProviderRuntimeResponse {
+    ok: bool,
+    outcome: &'static str,
+    source_provider_id: Option<String>,
+    current_model_provider_id: Option<String>,
+    message: Option<String>,
+    total_threads: usize,
+    applied_thread_ids: Vec<String>,
+    queued_thread_ids: Vec<String>,
+    failed_threads: Vec<RefreshFailure>,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorResponse {
     ok: bool,
     error: String,
@@ -73,6 +115,7 @@ impl WindowsAppServerControlPlane {
     pub(crate) async fn start(
         _codex_home: PathBuf,
         _thread_manager: Arc<ThreadManager>,
+        _config_api: ConfigApi,
     ) -> io::Result<Self> {
         Ok(Self {})
     }
@@ -81,6 +124,7 @@ impl WindowsAppServerControlPlane {
     pub(crate) async fn start(
         codex_home: PathBuf,
         thread_manager: Arc<ThreadManager>,
+        config_api: ConfigApi,
     ) -> io::Result<Self> {
         use tokio::net::windows::named_pipe::NamedPipeServer;
 
@@ -111,6 +155,7 @@ impl WindowsAppServerControlPlane {
             initial_pipe_server,
             control_endpoint,
             thread_manager,
+            config_api,
             shutdown.clone(),
         ));
 
@@ -169,6 +214,7 @@ async fn run_named_pipe_server(
     mut server: tokio::net::windows::named_pipe::NamedPipeServer,
     control_endpoint: String,
     thread_manager: Arc<ThreadManager>,
+    config_api: ConfigApi,
     shutdown: CancellationToken,
 ) {
     loop {
@@ -197,8 +243,11 @@ async fn run_named_pipe_server(
                 };
 
                 let thread_manager = Arc::clone(&thread_manager);
+                let config_api = config_api.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_named_pipe_client(connected, thread_manager).await {
+                    if let Err(err) =
+                        handle_named_pipe_client(connected, thread_manager, config_api).await
+                    {
                         warn!("named pipe control request failed: {err}");
                     }
                 });
@@ -220,6 +269,7 @@ fn create_named_pipe_server(
 async fn handle_named_pipe_client(
     pipe: tokio::net::windows::named_pipe::NamedPipeServer,
     thread_manager: Arc<ThreadManager>,
+    config_api: ConfigApi,
 ) -> io::Result<()> {
     use tokio::io::AsyncBufReadExt;
     use tokio::io::AsyncWriteExt;
@@ -243,30 +293,28 @@ async fn handle_named_pipe_client(
         "ping" => serde_json::to_vec(&PingResponse { ok: true }).map_err(io::Error::other)?,
         "refresh_all_loaded_threads" => {
             let report = thread_manager.refresh_all_loaded_provider_runtime().await;
-            serde_json::to_vec(&RefreshAllLoadedThreadsResponse {
-                ok: true,
-                total_threads: report.total_threads,
-                applied_thread_ids: report
-                    .applied_thread_ids
-                    .into_iter()
-                    .map(|thread_id| thread_id.to_string())
-                    .collect(),
-                queued_thread_ids: report
-                    .queued_thread_ids
-                    .into_iter()
-                    .map(|thread_id| thread_id.to_string())
-                    .collect(),
-                failed_threads: report
-                    .failed_threads
-                    .into_iter()
-                    .map(|failure| RefreshFailure {
-                        thread_id: failure.thread_id.to_string(),
-                        message: failure.message,
-                    })
-                    .collect(),
-            })
-            .map_err(io::Error::other)?
+            serde_json::to_vec(&refresh_response_from_report(report)).map_err(io::Error::other)?
         }
+        "list_effective_providers" => {
+            let response = match list_effective_providers(&config_api).await {
+                Ok(response) => serde_json::to_value(response).map_err(io::Error::other)?,
+                Err(err) => serde_json::to_value(ErrorResponse {
+                    ok: false,
+                    error: err.message,
+                })
+                .map_err(io::Error::other)?,
+            };
+            serde_json::to_vec(&response).map_err(io::Error::other)?
+        }
+        "apply_provider_runtime_from_effective_provider" => serde_json::to_vec(
+            &apply_provider_runtime_from_effective_provider(
+                &config_api,
+                &thread_manager,
+                request.source_provider_id.as_deref(),
+            )
+            .await,
+        )
+        .map_err(io::Error::other)?,
         other => serde_json::to_vec(&ErrorResponse {
             ok: false,
             error: format!("unsupported control operation: {other}"),
@@ -278,6 +326,282 @@ async fn handle_named_pipe_client(
     write_half.write_all(b"\n").await?;
     write_half.flush().await?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn refresh_response_from_report(
+    report: ProviderRuntimeRefreshAllLoadedReport,
+) -> RefreshAllLoadedThreadsResponse {
+    RefreshAllLoadedThreadsResponse {
+        ok: true,
+        total_threads: report.total_threads,
+        applied_thread_ids: report
+            .applied_thread_ids
+            .into_iter()
+            .map(|thread_id| thread_id.to_string())
+            .collect(),
+        queued_thread_ids: report
+            .queued_thread_ids
+            .into_iter()
+            .map(|thread_id| thread_id.to_string())
+            .collect(),
+        failed_threads: report
+            .failed_threads
+            .into_iter()
+            .map(|failure| RefreshFailure {
+                thread_id: failure.thread_id.to_string(),
+                message: failure.message,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(windows)]
+async fn list_effective_providers(
+    config_api: &ConfigApi,
+) -> Result<EffectiveProvidersResponse, JSONRPCErrorError> {
+    let effective_config = config_api.load_latest_config(/*fallback_cwd*/ None).await?;
+    let current_model_provider_id = effective_config.model_provider_id.clone();
+    let read_response = config_api
+        .read(ConfigReadParams {
+            include_layers: true,
+            cwd: None,
+        })
+        .await?;
+    let current_model_provider_writable = read_response
+        .layers
+        .as_ref()
+        .and_then(|layers| find_user_layer(layers))
+        .map(|user_layer| {
+            json_path_exists(
+                &user_layer.config,
+                &["model_providers", current_model_provider_id.as_str()],
+            )
+        })
+        .unwrap_or(false);
+
+    let mut providers = effective_config
+        .model_providers
+        .iter()
+        .map(|(provider_id, provider)| EffectiveProviderEntry {
+            provider_id: provider_id.clone(),
+            display_name: provider.name.clone(),
+            has_base_url: provider.base_url.is_some(),
+            has_experimental_bearer_token: provider.experimental_bearer_token.is_some(),
+        })
+        .collect::<Vec<_>>();
+    providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+
+    Ok(EffectiveProvidersResponse {
+        ok: true,
+        current_model_provider_id,
+        current_model_provider_writable,
+        providers,
+    })
+}
+
+#[cfg(windows)]
+async fn apply_provider_runtime_from_effective_provider(
+    config_api: &ConfigApi,
+    thread_manager: &ThreadManager,
+    source_provider_id: Option<&str>,
+) -> ApplySelectedProviderRuntimeResponse {
+    let Some(source_provider_id) = source_provider_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return apply_failure_response(
+            "provider_parse_failed",
+            None,
+            None,
+            "missing source_provider_id".to_string(),
+        );
+    };
+
+    let effective_config = match config_api.load_latest_config(/*fallback_cwd*/ None).await {
+        Ok(config) => config,
+        Err(err) => {
+            return apply_failure_response(
+                "provider_parse_failed",
+                Some(source_provider_id.to_string()),
+                None,
+                err.message,
+            );
+        }
+    };
+    let current_model_provider_id = effective_config.model_provider_id.clone();
+    let Some(source_provider) = effective_config.model_providers.get(source_provider_id) else {
+        return apply_failure_response(
+            "provider_parse_failed",
+            Some(source_provider_id.to_string()),
+            Some(current_model_provider_id),
+            format!(
+                "source provider `{source_provider_id}` was not found in the current effective config"
+            ),
+        );
+    };
+    let mut missing_fields = Vec::new();
+    if source_provider
+        .base_url
+        .as_ref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        missing_fields.push("base_url");
+    }
+    if source_provider
+        .experimental_bearer_token
+        .as_ref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        missing_fields.push("experimental_bearer_token");
+    }
+    if !missing_fields.is_empty() {
+        return apply_failure_response(
+            "provider_field_missing",
+            Some(source_provider_id.to_string()),
+            Some(current_model_provider_id),
+            format!(
+                "source provider `{source_provider_id}` is missing required fields: {}",
+                missing_fields.join(", ")
+            ),
+        );
+    }
+
+    let read_response = match config_api
+        .read(ConfigReadParams {
+            include_layers: true,
+            cwd: None,
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            return apply_failure_response(
+                "provider_parse_failed",
+                Some(source_provider_id.to_string()),
+                Some(current_model_provider_id),
+                err.message,
+            );
+        }
+    };
+    let Some(user_layer) = read_response
+        .layers
+        .as_ref()
+        .and_then(|layers| find_user_layer(layers))
+    else {
+        return apply_failure_response(
+            "config_write_failed",
+            Some(source_provider_id.to_string()),
+            Some(current_model_provider_id),
+            "user config layer is missing; current model_provider entry is not writable"
+                .to_string(),
+        );
+    };
+    if !json_path_exists(
+        &user_layer.config,
+        &["model_providers", current_model_provider_id.as_str()],
+    ) {
+        return apply_failure_response(
+            "config_write_failed",
+            Some(source_provider_id.to_string()),
+            Some(current_model_provider_id),
+            "current model_provider is not backed by a writable user config entry".to_string(),
+        );
+    }
+
+    let write_result = config_api
+        .batch_write(ConfigBatchWriteParams {
+            edits: vec![
+                ConfigEdit {
+                    key_path: format!("model_providers.{current_model_provider_id}.base_url"),
+                    value: json!(source_provider.base_url),
+                    merge_strategy: MergeStrategy::Replace,
+                },
+                ConfigEdit {
+                    key_path: format!(
+                        "model_providers.{current_model_provider_id}.experimental_bearer_token"
+                    ),
+                    value: json!(source_provider.experimental_bearer_token),
+                    merge_strategy: MergeStrategy::Replace,
+                },
+            ],
+            file_path: None,
+            expected_version: Some(user_layer.version.clone()),
+            reload_user_config: true,
+        })
+        .await;
+    if let Err(err) = write_result {
+        return apply_failure_response(
+            "config_write_failed",
+            Some(source_provider_id.to_string()),
+            Some(current_model_provider_id),
+            err.message,
+        );
+    }
+
+    let refresh_response =
+        refresh_response_from_report(thread_manager.refresh_all_loaded_provider_runtime().await);
+    let outcome = if refresh_response.failed_threads.is_empty() {
+        "success"
+    } else {
+        "partial_failure"
+    };
+
+    ApplySelectedProviderRuntimeResponse {
+        ok: refresh_response.failed_threads.is_empty(),
+        outcome,
+        source_provider_id: Some(source_provider_id.to_string()),
+        current_model_provider_id: Some(current_model_provider_id),
+        message: None,
+        total_threads: refresh_response.total_threads,
+        applied_thread_ids: refresh_response.applied_thread_ids,
+        queued_thread_ids: refresh_response.queued_thread_ids,
+        failed_threads: refresh_response.failed_threads,
+    }
+}
+
+#[cfg(windows)]
+fn apply_failure_response(
+    outcome: &'static str,
+    source_provider_id: Option<String>,
+    current_model_provider_id: Option<String>,
+    message: String,
+) -> ApplySelectedProviderRuntimeResponse {
+    ApplySelectedProviderRuntimeResponse {
+        ok: false,
+        outcome,
+        source_provider_id,
+        current_model_provider_id,
+        message: Some(message),
+        total_threads: 0,
+        applied_thread_ids: Vec::new(),
+        queued_thread_ids: Vec::new(),
+        failed_threads: Vec::new(),
+    }
+}
+
+#[cfg(windows)]
+fn find_user_layer(layers: &[ConfigLayer]) -> Option<&ConfigLayer> {
+    layers
+        .iter()
+        .find(|layer| matches!(layer.name, ConfigLayerSource::User { .. }))
+}
+
+#[cfg(windows)]
+fn json_path_exists(root: &Value, segments: &[&str]) -> bool {
+    let mut current = root;
+    for segment in segments {
+        let Some(object) = current.as_object() else {
+            return false;
+        };
+        let Some(next) = object.get(*segment) else {
+            return false;
+        };
+        current = next;
+    }
+    true
 }
 
 fn timestamp_now() -> String {
@@ -321,8 +645,6 @@ fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> 
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
 
-    // SAFETY: Both paths are encoded as null-terminated UTF-16 strings and remain valid for the
-    // duration of the call.
     let moved = unsafe {
         MoveFileExW(
             source_wide.as_ptr(),

@@ -1898,16 +1898,22 @@ impl Session {
             network_proxy,
             network_approval: Arc::clone(&network_approval),
             state_db: state_db_ctx.clone(),
-            model_client: ModelClient::new(
-                Some(Arc::clone(&auth_manager)),
-                conversation_id,
-                session_configuration.provider.clone(),
-                session_configuration.session_source.clone(),
-                config.model_verbosity,
-                config.features.enabled(Feature::EnableRequestCompression),
-                config.features.enabled(Feature::RuntimeMetrics),
-                Self::build_model_client_beta_features_header(config.as_ref()),
-            ),
+            model_client: {
+                let model_client = ModelClient::new(
+                    Some(Arc::clone(&auth_manager)),
+                    conversation_id,
+                    session_configuration.provider.clone(),
+                    session_configuration.session_source.clone(),
+                    config.model_verbosity,
+                    config.features.enabled(Feature::EnableRequestCompression),
+                    config.features.enabled(Feature::RuntimeMetrics),
+                    Self::build_model_client_beta_features_header(config.as_ref()),
+                );
+                model_client.set_force_gpt54_priority_fallback(
+                    config.force_gpt54_priority_fallback,
+                );
+                model_client
+            },
             code_mode_service: crate::tools::code_mode::CodeModeService::new(
                 config.js_repl_node_path.clone(),
             ),
@@ -4376,12 +4382,6 @@ impl Session {
             Self::read_latest_provider_runtime_refresh(config.as_ref())?
         };
 
-        if self.active_turn.lock().await.is_some() {
-            let mut guard = self.pending_provider_runtime_refresh.lock().await;
-            *guard = Some(refresh);
-            return Ok(ProviderRuntimeRefreshStatus::Queued);
-        }
-
         {
             let mut guard = self.pending_provider_runtime_refresh.lock().await;
             *guard = None;
@@ -6585,13 +6585,6 @@ async fn run_sampling_request(
             }
             Err(err) => err,
         };
-
-        if client_session
-            .recover_stream_unauthorized(&err, &turn_context.session_telemetry)
-            .await?
-        {
-            continue;
-        }
 
         if !err.is_retryable() {
             return Err(err);

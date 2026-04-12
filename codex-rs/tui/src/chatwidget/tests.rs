@@ -216,6 +216,30 @@ fn test_project_path() -> PathBuf {
     PathBuf::from(test_path_display("/tmp/project"))
 }
 
+fn test_session_configured_event(
+    history_entry_count: usize,
+    initial_messages: Option<Vec<EventMsg>>,
+) -> SessionConfiguredEvent {
+    SessionConfiguredEvent {
+        session_id: ThreadId::new(),
+        forked_from_id: None,
+        thread_name: None,
+        model: "test-model".to_string(),
+        model_provider_id: "test-provider".to_string(),
+        service_tier: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: ApprovalsReviewer::User,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        cwd: test_project_path(),
+        reasoning_effort: Some(ReasoningEffortConfig::default()),
+        history_log_id: 0,
+        history_entry_count,
+        initial_messages,
+        network_proxy: None,
+        rollout_path: None,
+    }
+}
+
 fn truncated_path_variants(path: &str) -> Vec<String> {
     let chars: Vec<char> = path.chars().collect();
     (1..chars.len())
@@ -358,6 +382,108 @@ async fn resumed_initial_messages_render_history() {
         text_blob.contains("assistant reply"),
         "expected replayed agent message",
     );
+}
+
+#[tokio::test]
+async fn new_thread_first_user_message_inserts_local1_checklist_once() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_codex_event(Event {
+        id: "cfg".into(),
+        msg: EventMsg::SessionConfigured(test_session_configured_event(
+            /*history_entry_count*/ 0,
+            /*initial_messages*/ None,
+        )),
+    });
+
+    let session_rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!session_rendered.contains("To get started"));
+    assert!(!session_rendered.contains(
+        history_cell::LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW
+    ));
+    assert!(!session_rendered.contains(history_cell::LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
+
+    chat.queue_user_message("hello local1".into());
+    let _submit = next_submit_op(&mut op_rx);
+
+    let first_turn_rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(first_turn_rendered.contains("local1 定制功能已启用"));
+    assert!(first_turn_rendered.contains(
+        history_cell::LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW
+    ));
+    assert!(first_turn_rendered.contains("统一自动重试，包含 `401`"));
+    assert_eq!(first_turn_rendered.matches("统一自动重试，包含 `401`").count(), 1);
+    assert!(!first_turn_rendered.contains("非 `401`"));
+    assert!(!first_turn_rendered.contains("401 follow-up"));
+    assert!(!first_turn_rendered.contains("unauthorized recovery"));
+    assert!(first_turn_rendered.contains(history_cell::LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
+    assert!(first_turn_rendered.contains("hello local1"));
+
+    chat.queue_user_message("second turn".into());
+    let _submit = next_submit_op(&mut op_rx);
+
+    let second_turn_rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!second_turn_rendered.contains("local1 定制功能已启用"));
+    assert!(!second_turn_rendered.contains(
+        history_cell::LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW
+    ));
+    assert!(!second_turn_rendered.contains(history_cell::LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
+    assert!(second_turn_rendered.contains("second turn"));
+}
+
+#[tokio::test]
+async fn resumed_session_does_not_insert_local1_checklist_again() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_codex_event(Event {
+        id: "cfg".into(),
+        msg: EventMsg::SessionConfigured(test_session_configured_event(
+            /*history_entry_count*/ 1,
+            Some(vec![EventMsg::UserMessage(UserMessageEvent {
+                message: "earlier turn".to_string(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })]),
+        )),
+    });
+
+    let resumed_rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!resumed_rendered.contains(
+        history_cell::LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW
+    ));
+    assert!(!resumed_rendered.contains(history_cell::LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
+
+    chat.queue_user_message("follow up".into());
+    let _submit = next_submit_op(&mut op_rx);
+
+    let follow_up_rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!follow_up_rendered.contains("local1 定制功能已启用"));
+    assert!(!follow_up_rendered.contains(
+        history_cell::LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW
+    ));
+    assert!(!follow_up_rendered.contains(history_cell::LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
+    assert!(follow_up_rendered.contains("follow up"));
 }
 
 #[tokio::test]
@@ -2169,6 +2295,7 @@ async fn make_chatwidget_manual(
         queued_message_edit_binding: crate::key_hint::alt(KeyCode::Up),
         suppress_session_configured_redraw: false,
         suppress_initial_user_message_submit: false,
+        pending_local1_first_turn_checklist: false,
         pending_notification: None,
         quit_shortcut_expires_at: None,
         quit_shortcut_key: None,

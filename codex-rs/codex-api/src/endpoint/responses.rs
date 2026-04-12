@@ -4,6 +4,7 @@ use crate::common::ResponsesApiRequest;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
 use crate::provider::Provider;
+use crate::provider::ProviderSource;
 use crate::requests::headers::build_conversation_headers;
 use crate::requests::headers::insert_header;
 use crate::requests::headers::subagent_header;
@@ -39,8 +40,16 @@ pub struct ResponsesOptions {
 
 impl<T: HttpTransport, A: AuthProvider> ResponsesClient<T, A> {
     pub fn new(transport: T, provider: Provider, auth: A) -> Self {
+        Self::new_with_provider_source(transport, Arc::new(provider), auth)
+    }
+
+    pub fn new_with_provider_source(
+        transport: T,
+        provider_source: Arc<dyn ProviderSource>,
+        auth: A,
+    ) -> Self {
         Self {
-            session: EndpointSession::new(transport, provider, auth),
+            session: EndpointSession::new_with_provider_source(transport, provider_source, auth),
             sse_telemetry: None,
         }
     }
@@ -81,7 +90,8 @@ impl<T: HttpTransport, A: AuthProvider> ResponsesClient<T, A> {
 
         let mut body = serde_json::to_value(&request)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
-        if request.store && self.session.provider().is_azure_responses_endpoint() {
+        let provider = self.session.provider_snapshot();
+        if request.store && provider.is_azure_responses_endpoint() {
             attach_item_ids(&mut body, &request.input);
         }
 
@@ -141,9 +151,10 @@ impl<T: HttpTransport, A: AuthProvider> ResponsesClient<T, A> {
             )
             .await?;
 
+        let provider = self.session.provider_snapshot();
         Ok(spawn_response_stream(
             stream_response,
-            self.session.provider().stream_idle_timeout,
+            provider.stream_idle_timeout,
             self.sse_telemetry.clone(),
             turn_state,
         ))

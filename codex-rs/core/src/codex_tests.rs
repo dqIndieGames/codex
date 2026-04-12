@@ -4019,7 +4019,7 @@ async fn refresh_provider_runtime_applies_with_relative_agent_config_file() {
 }
 
 #[tokio::test]
-async fn refresh_provider_runtime_queues_for_active_thread_until_next_turn() {
+async fn refresh_provider_runtime_applies_immediately_for_active_thread_and_next_turn() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     write_provider_refresh_test_config(
         codex_home.path(),
@@ -4041,14 +4041,14 @@ async fn refresh_provider_runtime_queues_for_active_thread_until_next_turn() {
     let status = session
         .refresh_provider_runtime()
         .await
-        .expect("active refresh should queue");
-    assert_eq!(status, ProviderRuntimeRefreshStatus::Queued);
+        .expect("active refresh should apply");
+    assert_eq!(status, ProviderRuntimeRefreshStatus::Applied);
 
     let provider = session.provider().await;
-    assert_eq!(provider.base_url.as_deref(), Some("https://old.example.com/v1"));
+    assert_eq!(provider.base_url.as_deref(), Some("https://new.example.com/v1"));
     assert_eq!(
         provider.experimental_bearer_token.as_deref(),
-        Some("old-token")
+        Some("new-token")
     );
     let original_config = {
         let state = session.state.lock().await;
@@ -4056,32 +4056,13 @@ async fn refresh_provider_runtime_queues_for_active_thread_until_next_turn() {
     };
     assert_eq!(
         original_config.model_provider.base_url.as_deref(),
-        Some("https://old.example.com/v1")
+        Some("https://new.example.com/v1")
     );
     assert_eq!(
         original_config
             .model_provider
             .experimental_bearer_token
             .as_deref(),
-        Some("old-token")
-    );
-    assert!(
-        session
-            .pending_provider_runtime_refresh
-            .lock()
-            .await
-            .is_some()
-    );
-
-    *session.active_turn.lock().await = None;
-    session
-        .apply_pending_provider_runtime_refresh_if_requested()
-        .await;
-
-    let provider = session.provider().await;
-    assert_eq!(provider.base_url.as_deref(), Some("https://new.example.com/v1"));
-    assert_eq!(
-        provider.experimental_bearer_token.as_deref(),
         Some("new-token")
     );
     assert!(
@@ -4253,7 +4234,7 @@ async fn refresh_provider_runtime_fails_without_mutating_state_for_invalid_user_
 }
 
 #[tokio::test]
-async fn ensure_task_for_pending_inputs_applies_pending_provider_runtime_refresh_before_waking_regular_turn()
+async fn ensure_task_for_pending_inputs_uses_latest_provider_runtime_after_active_refresh()
 {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     write_provider_refresh_test_config(
@@ -4276,8 +4257,15 @@ async fn ensure_task_for_pending_inputs_applies_pending_provider_runtime_refresh
     let status = session
         .refresh_provider_runtime()
         .await
-        .expect("active refresh should queue");
-    assert_eq!(status, ProviderRuntimeRefreshStatus::Queued);
+        .expect("active refresh should apply");
+    assert_eq!(status, ProviderRuntimeRefreshStatus::Applied);
+    assert!(
+        session
+            .pending_provider_runtime_refresh
+            .lock()
+            .await
+            .is_none()
+    );
     *session.active_turn.lock().await = None;
 
     session

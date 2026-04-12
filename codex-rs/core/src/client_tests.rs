@@ -101,6 +101,21 @@ fn build_test_responses_request(
     service_tier: Option<ServiceTier>,
 ) -> codex_api::ResponsesApiRequest {
     let client = test_model_client(SessionSource::Cli);
+    build_test_responses_request_with_priority_fallback(
+        client,
+        model_slug,
+        service_tier,
+        /*force_gpt54_priority_fallback*/ true,
+    )
+}
+
+fn build_test_responses_request_with_priority_fallback(
+    client: ModelClient,
+    model_slug: &str,
+    service_tier: Option<ServiceTier>,
+    force_gpt54_priority_fallback: bool,
+) -> codex_api::ResponsesApiRequest {
+    client.set_force_gpt54_priority_fallback(force_gpt54_priority_fallback);
     let session = client.new_session();
     let provider = client
         .provider_snapshot()
@@ -146,9 +161,53 @@ fn build_responses_request_forces_priority_for_gpt_5_4_flex_tier() {
 }
 
 #[test]
+fn build_responses_request_disables_gpt_5_4_priority_when_fallback_is_false() {
+    let request = build_test_responses_request_with_priority_fallback(
+        test_model_client(SessionSource::Cli),
+        "gpt-5.4",
+        /*service_tier*/ None,
+        /*force_gpt54_priority_fallback*/ false,
+    );
+    assert_eq!(request.service_tier, None);
+}
+
+#[test]
+fn build_responses_request_disables_fast_passthrough_for_gpt_5_4_when_fallback_is_false() {
+    let request = build_test_responses_request_with_priority_fallback(
+        test_model_client(SessionSource::Cli),
+        "gpt-5.4",
+        Some(ServiceTier::Fast),
+        /*force_gpt54_priority_fallback*/ false,
+    );
+    assert_eq!(request.service_tier, None);
+}
+
+#[test]
+fn build_responses_request_preserves_flex_for_gpt_5_4_when_fallback_is_false() {
+    let request = build_test_responses_request_with_priority_fallback(
+        test_model_client(SessionSource::Cli),
+        "gpt-5.4",
+        Some(ServiceTier::Flex),
+        /*force_gpt54_priority_fallback*/ false,
+    );
+    assert_eq!(request.service_tier.as_deref(), Some("flex"));
+}
+
+#[test]
 fn build_responses_request_preserves_flex_for_non_gpt_5_4() {
     let request = build_test_responses_request("gpt-5.1", Some(ServiceTier::Flex));
     assert_eq!(request.service_tier.as_deref(), Some("flex"));
+}
+
+#[test]
+fn build_responses_request_keeps_non_gpt_5_4_fast_mapping_when_fallback_is_false() {
+    let request = build_test_responses_request_with_priority_fallback(
+        test_model_client(SessionSource::Cli),
+        "gpt-5.1",
+        Some(ServiceTier::Fast),
+        /*force_gpt54_priority_fallback*/ false,
+    );
+    assert_eq!(request.service_tier.as_deref(), Some("priority"));
 }
 
 #[tokio::test]
@@ -317,6 +376,7 @@ fn websocket_connect_log_trace_is_suppressed_for_responses_retry_chain() {
         RequestRouteTelemetry::for_endpoint("/responses"),
         /*retry_chain_active*/ true,
         /*error*/ None,
+        /*can_retry_after_unauthorized*/ false,
     ));
 }
 
@@ -333,6 +393,7 @@ fn websocket_request_log_trace_is_retained_for_non_responses_endpoint() {
         RequestRouteTelemetry::for_endpoint("/responses/compact"),
         /*retry_chain_active*/ false,
         Some(&error),
+        /*can_retry_after_unauthorized*/ false,
     ));
 }
 
@@ -349,6 +410,24 @@ fn websocket_request_log_trace_is_suppressed_for_retryable_responses_failure() {
         RequestRouteTelemetry::for_endpoint("/responses"),
         /*retry_chain_active*/ false,
         Some(&error),
+        /*can_retry_after_unauthorized*/ false,
+    ));
+}
+
+#[test]
+fn websocket_request_log_trace_is_suppressed_for_retryable_responses_unauthorized() {
+    let error = codex_api::ApiError::Transport(TransportError::Http {
+        status: StatusCode::UNAUTHORIZED,
+        url: Some("https://example.com/v1/responses".to_string()),
+        headers: None,
+        body: Some(r#"{"detail":"unauthorized"}"#.to_string()),
+    });
+
+    assert!(!should_emit_websocket_connect_or_request_log_trace(
+        RequestRouteTelemetry::for_endpoint("/responses"),
+        /*retry_chain_active*/ false,
+        Some(&error),
+        /*can_retry_after_unauthorized*/ false,
     ));
 }
 
@@ -370,6 +449,7 @@ fn websocket_event_log_trace_is_suppressed_for_retryable_response_failed() {
     assert!(!should_emit_websocket_event_log_trace(
         RequestRouteTelemetry::for_endpoint("/responses"),
         &result,
+        /*can_retry_after_unauthorized*/ false,
     ));
 }
 
@@ -391,5 +471,30 @@ fn websocket_event_log_trace_is_retained_for_terminal_response_failed() {
     assert!(should_emit_websocket_event_log_trace(
         RequestRouteTelemetry::for_endpoint("/responses"),
         &result,
+        /*can_retry_after_unauthorized*/ false,
+    ));
+}
+
+#[test]
+fn websocket_event_log_trace_is_suppressed_for_retryable_responses_unauthorized() {
+    let result: std::result::Result<
+        Option<
+            std::result::Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        >,
+        codex_api::ApiError,
+    > = Err(codex_api::ApiError::Transport(TransportError::Http {
+        status: StatusCode::UNAUTHORIZED,
+        url: Some("https://example.com/v1/responses".to_string()),
+        headers: None,
+        body: Some(r#"{"detail":"unauthorized"}"#.to_string()),
+    }));
+
+    assert!(!should_emit_websocket_event_log_trace(
+        RequestRouteTelemetry::for_endpoint("/responses"),
+        &result,
+        /*can_retry_after_unauthorized*/ false,
     ));
 }

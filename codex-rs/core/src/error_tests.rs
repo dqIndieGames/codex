@@ -515,13 +515,14 @@ fn request_layer_http_statuses_are_not_turn_retryable_after_request_retries() {
 }
 
 #[test]
-fn turn_level_unexpected_status_retries_except_401() {
+fn turn_level_unexpected_status_retries_including_401() {
     for status in [
         StatusCode::BAD_REQUEST,
         StatusCode::FORBIDDEN,
         StatusCode::PAYMENT_REQUIRED,
         StatusCode::TOO_MANY_REQUESTS,
         StatusCode::NOT_FOUND,
+        StatusCode::UNAUTHORIZED,
     ] {
         let err = CodexErr::UnexpectedStatus(UnexpectedResponseError {
             status,
@@ -536,18 +537,6 @@ fn turn_level_unexpected_status_retries_except_401() {
 
         assert!(err.is_retryable(), "turn-level status {status} should retry");
     }
-
-    let unauthorized = CodexErr::UnexpectedStatus(UnexpectedResponseError {
-        status: StatusCode::UNAUTHORIZED,
-        body: "plain text error".to_string(),
-        url: None,
-        cf_ray: None,
-        request_id: None,
-        identity_authorization_error: None,
-        identity_error_code: None,
-        retry_source: UnexpectedResponseRetrySource::Turn,
-    });
-    assert!(!unauthorized.is_retryable());
 }
 
 #[test]

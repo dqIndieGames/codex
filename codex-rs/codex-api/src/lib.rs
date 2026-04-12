@@ -41,6 +41,7 @@ pub use crate::endpoint::responses_websocket::ResponsesWebsocketClient;
 pub use crate::endpoint::responses_websocket::ResponsesWebsocketConnection;
 pub use crate::error::ApiError;
 pub use crate::provider::Provider;
+pub use crate::provider::ProviderSource;
 pub use crate::provider::is_azure_responses_wire_base_url;
 pub use crate::sse::stream_from_fixture;
 pub use crate::telemetry::SseTelemetry;

@@ -632,6 +632,7 @@ pub async fn run_main_with_transport(
     let app_server_control_plane = WindowsAppServerControlPlane::start(
         processor.codex_home(),
         processor.thread_manager(),
+        processor.config_api(),
     )
     .await?;
     let mut thread_created_rx = processor.thread_created_receiver();

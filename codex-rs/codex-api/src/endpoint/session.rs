@@ -2,6 +2,7 @@ use crate::auth::AuthProvider;
 use crate::auth::add_auth_headers;
 use crate::error::ApiError;
 use crate::provider::Provider;
+use crate::provider::ProviderSource;
 use crate::telemetry::run_with_request_telemetry;
 use codex_client::HttpTransport;
 use codex_client::Request;
@@ -16,16 +17,24 @@ use tracing::instrument;
 
 pub(crate) struct EndpointSession<T: HttpTransport, A: AuthProvider> {
     transport: T,
-    provider: Provider,
+    provider_source: Arc<dyn ProviderSource>,
     auth: A,
     request_telemetry: Option<Arc<dyn RequestTelemetry>>,
 }
 
 impl<T: HttpTransport, A: AuthProvider> EndpointSession<T, A> {
     pub(crate) fn new(transport: T, provider: Provider, auth: A) -> Self {
+        Self::new_with_provider_source(transport, Arc::new(provider), auth)
+    }
+
+    pub(crate) fn new_with_provider_source(
+        transport: T,
+        provider_source: Arc<dyn ProviderSource>,
+        auth: A,
+    ) -> Self {
         Self {
             transport,
-            provider,
+            provider_source,
             auth,
             request_telemetry: None,
         }
@@ -39,8 +48,8 @@ impl<T: HttpTransport, A: AuthProvider> EndpointSession<T, A> {
         self
     }
 
-    pub(crate) fn provider(&self) -> &Provider {
-        &self.provider
+    pub(crate) fn provider_snapshot(&self) -> Provider {
+        self.provider_source.snapshot()
     }
 
     fn make_request(
@@ -50,7 +59,8 @@ impl<T: HttpTransport, A: AuthProvider> EndpointSession<T, A> {
         extra_headers: &HeaderMap,
         body: Option<&Value>,
     ) -> Request {
-        let mut req = self.provider.build_request(method.clone(), path);
+        let provider = self.provider_source.snapshot();
+        let mut req = provider.build_request(method.clone(), path);
         req.headers.extend(extra_headers.clone());
         if let Some(body) = body {
             req.body = Some(body.clone());
@@ -93,7 +103,7 @@ impl<T: HttpTransport, A: AuthProvider> EndpointSession<T, A> {
         };
 
         let response = run_with_request_telemetry(
-            self.provider.retry.to_policy(),
+            self.provider_source.snapshot().retry.to_policy(),
             path,
             self.request_telemetry.clone(),
             make_request,
@@ -128,7 +138,7 @@ impl<T: HttpTransport, A: AuthProvider> EndpointSession<T, A> {
         };
 
         let stream = run_with_request_telemetry(
-            self.provider.retry.to_policy(),
+            self.provider_source.snapshot().retry.to_policy(),
             path,
             self.request_telemetry.clone(),
             make_request,

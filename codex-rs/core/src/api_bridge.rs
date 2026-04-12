@@ -10,6 +10,8 @@ use codex_login::token_data::PlanType;
 use http::HeaderMap;
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 
 use crate::auth::CodexAuth;
 use crate::error::CodexErr;
@@ -248,10 +250,19 @@ pub(crate) fn auth_provider_from_auth(
     auth: Option<CodexAuth>,
     provider: &ModelProviderInfo,
 ) -> crate::error::Result<CoreAuthProvider> {
+    auth_provider_from_auth_with_live_provider(auth, provider, /*live_provider*/ None)
+}
+
+pub(crate) fn auth_provider_from_auth_with_live_provider(
+    auth: Option<CodexAuth>,
+    provider: &ModelProviderInfo,
+    live_provider: Option<Arc<StdRwLock<ModelProviderInfo>>>,
+) -> crate::error::Result<CoreAuthProvider> {
     if let Some(api_key) = provider.api_key()? {
         return Ok(CoreAuthProvider {
             token: Some(api_key),
             account_id: None,
+            live_provider: None,
         });
     }
 
@@ -259,6 +270,7 @@ pub(crate) fn auth_provider_from_auth(
         return Ok(CoreAuthProvider {
             token: Some(token),
             account_id: None,
+            live_provider,
         });
     }
 
@@ -267,11 +279,13 @@ pub(crate) fn auth_provider_from_auth(
         Ok(CoreAuthProvider {
             token: Some(token),
             account_id: auth.get_account_id(),
+            live_provider,
         })
     } else {
         Ok(CoreAuthProvider {
             token: None,
             account_id: None,
+            live_provider,
         })
     }
 }
@@ -293,6 +307,7 @@ struct UsageErrorBody {
 pub(crate) struct CoreAuthProvider {
     token: Option<String>,
     account_id: Option<String>,
+    live_provider: Option<Arc<StdRwLock<ModelProviderInfo>>>,
 }
 
 impl CoreAuthProvider {
@@ -311,12 +326,24 @@ impl CoreAuthProvider {
         Self {
             token: token.map(str::to_string),
             account_id: account_id.map(str::to_string),
+            live_provider: None,
         }
     }
 }
 
 impl ApiAuthProvider for CoreAuthProvider {
     fn bearer_token(&self) -> Option<String> {
+        if let Some(live_provider) = &self.live_provider {
+            let provider = live_provider
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Ok(Some(api_key)) = provider.api_key() {
+                return Some(api_key);
+            }
+            if let Some(token) = provider.experimental_bearer_token.clone() {
+                return Some(token);
+            }
+        }
         self.token.clone()
     }
 

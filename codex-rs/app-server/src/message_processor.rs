@@ -290,6 +290,10 @@ impl MessageProcessor {
         self.codex_message_processor.thread_manager()
     }
 
+    pub(crate) fn config_api(&self) -> ConfigApi {
+        self.config_api.clone()
+    }
+
     pub(crate) fn codex_home(&self) -> PathBuf {
         self.config.codex_home.clone()
     }

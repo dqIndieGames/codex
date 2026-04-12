@@ -10,6 +10,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 use url::Url;
 
+pub trait ProviderSource: Send + Sync {
+    fn snapshot(&self) -> Provider;
+}
+
 /// High-level retry configuration for a provider.
 ///
 /// This is converted into a `RetryPolicy` used by `codex-client` to drive
@@ -40,7 +44,8 @@ impl RetryConfig {
 }
 
 pub fn responses_http_status_is_retryable(status: StatusCode) -> bool {
-    status != StatusCode::UNAUTHORIZED
+    let _ = status;
+    true
 }
 
 pub fn should_retry_request_error(
@@ -229,12 +234,12 @@ mod tests {
     }
 
     #[test]
-    fn responses_http_status_retry_only_excludes_401() {
+    fn responses_http_status_retry_includes_401() {
         assert!(responses_http_status_is_retryable(StatusCode::BAD_REQUEST));
         assert!(responses_http_status_is_retryable(StatusCode::FORBIDDEN));
         assert!(responses_http_status_is_retryable(StatusCode::PAYMENT_REQUIRED));
         assert!(responses_http_status_is_retryable(StatusCode::TOO_MANY_REQUESTS));
-        assert!(!responses_http_status_is_retryable(StatusCode::UNAUTHORIZED));
+        assert!(responses_http_status_is_retryable(StatusCode::UNAUTHORIZED));
     }
 
     #[test]
@@ -264,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_requests_do_not_retry_401() {
+    fn responses_requests_retry_401() {
         let policy = RetryPolicy {
             max_attempts: 4,
             base_delay: Duration::from_millis(200),
@@ -286,7 +291,7 @@ mod tests {
             body: Some(r#"{"detail":"Unauthorized"}"#.to_string()),
         };
 
-        assert!(!should_retry_request_error(&policy, &request, &err, 0));
+        assert!(should_retry_request_error(&policy, &request, &err, 0));
     }
 
     #[test]
@@ -327,5 +332,11 @@ mod tests {
             &non_usage_limit_err,
             0
         ));
+    }
+}
+
+impl ProviderSource for Provider {
+    fn snapshot(&self) -> Provider {
+        self.clone()
     }
 }
