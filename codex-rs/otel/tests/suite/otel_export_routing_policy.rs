@@ -9,9 +9,9 @@ use opentelemetry::KeyValue;
 use opentelemetry::logs::AnyValue;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::logs::InMemoryLogExporter;
-use opentelemetry_sdk::metrics::InMemoryMetricExporter;
 use opentelemetry_sdk::logs::SdkLogRecord;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
+use opentelemetry_sdk::metrics::InMemoryMetricExporter;
 use opentelemetry_sdk::trace::InMemorySpanExporter;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use pretty_assertions::assert_eq;
@@ -97,7 +97,10 @@ fn count_logs_by_event_name(
         .count()
 }
 
-fn count_span_events_by_name_attr(events: &[opentelemetry::trace::Event], event_name: &str) -> usize {
+fn count_span_events_by_name_attr(
+    events: &[opentelemetry::trace::Event],
+    event_name: &str,
+) -> usize {
     events
         .iter()
         .filter(|event| {
@@ -896,7 +899,8 @@ fn otel_export_routing_policy_routes_websocket_request_transport_observability()
 }
 
 #[test]
-fn otel_export_routing_policy_suppresses_api_request_log_and_trace_when_disabled_but_keeps_metrics() {
+fn otel_export_routing_policy_suppresses_api_request_log_and_trace_when_disabled_but_keeps_metrics()
+{
     let log_exporter = InMemoryLogExporter::default();
     let logger_provider = SdkLoggerProvider::builder()
         .with_simple_exporter(log_exporter.clone())
@@ -1046,7 +1050,10 @@ fn otel_export_routing_policy_suppresses_websocket_connect_log_and_trace_when_di
     tracer_provider.force_flush().expect("flush traces");
 
     let logs = log_exporter.get_emitted_logs().expect("log export");
-    assert_eq!(count_logs_by_event_name(&logs, "codex.websocket_connect"), 0);
+    assert_eq!(
+        count_logs_by_event_name(&logs, "codex.websocket_connect"),
+        0
+    );
 
     let spans = span_exporter.get_finished_spans().expect("span export");
     assert_eq!(
@@ -1056,7 +1063,8 @@ fn otel_export_routing_policy_suppresses_websocket_connect_log_and_trace_when_di
 }
 
 #[test]
-fn otel_export_routing_policy_suppresses_websocket_request_log_and_trace_when_disabled_but_keeps_metrics() {
+fn otel_export_routing_policy_suppresses_websocket_request_log_and_trace_when_disabled_but_keeps_metrics()
+ {
     let log_exporter = InMemoryLogExporter::default();
     let logger_provider = SdkLoggerProvider::builder()
         .with_simple_exporter(log_exporter.clone())
@@ -1111,7 +1119,10 @@ fn otel_export_routing_policy_suppresses_websocket_request_log_and_trace_when_di
     tracer_provider.force_flush().expect("flush traces");
 
     let logs = log_exporter.get_emitted_logs().expect("log export");
-    assert_eq!(count_logs_by_event_name(&logs, "codex.websocket_request"), 0);
+    assert_eq!(
+        count_logs_by_event_name(&logs, "codex.websocket_request"),
+        0
+    );
 
     let spans = span_exporter.get_finished_spans().expect("span export");
     assert_eq!(
@@ -1132,7 +1143,8 @@ fn otel_export_routing_policy_suppresses_websocket_request_log_and_trace_when_di
 }
 
 #[test]
-fn otel_export_routing_policy_suppresses_websocket_event_log_and_trace_when_disabled_but_keeps_metrics() {
+fn otel_export_routing_policy_suppresses_websocket_event_log_and_trace_when_disabled_but_keeps_metrics()
+ {
     let log_exporter = InMemoryLogExporter::default();
     let logger_provider = SdkLoggerProvider::builder()
         .with_simple_exporter(log_exporter.clone())

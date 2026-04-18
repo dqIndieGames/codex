@@ -36,6 +36,24 @@ use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+fn user_shell_command(line: &str) -> String {
+    if cfg!(windows) {
+        format!("Write-Output '{line}'")
+    } else {
+        format!("printf '{line}'")
+    }
+}
+
+fn normalize_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+fn normalize_shell_output(text: &str) -> String {
+    normalize_line_endings(text)
+        .trim_end_matches('\n')
+        .to_string()
+}
+
 #[tokio::test]
 async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> Result<()> {
     let tmp = TempDir::new()?;
@@ -71,7 +89,7 @@ async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> 
     let shell_id = mcp
         .send_thread_shell_command_request(ThreadShellCommandParams {
             thread_id: thread.id.clone(),
-            command: "printf 'hello from bang\\n'".to_string(),
+            command: user_shell_command("hello from bang"),
         })
         .await?;
     let shell_resp: JSONRPCResponse = timeout(
@@ -93,7 +111,7 @@ async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> 
     assert_eq!(status, &CommandExecutionStatus::InProgress);
 
     let delta = wait_for_command_execution_output_delta(&mut mcp, &command_id).await?;
-    assert_eq!(delta.delta, "hello from bang\n");
+    assert_eq!(normalize_shell_output(&delta.delta), "hello from bang");
 
     let completed = wait_for_command_execution_completed(&mut mcp, Some(&command_id)).await?;
     let ThreadItem::CommandExecution {
@@ -110,7 +128,10 @@ async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> 
     assert_eq!(id, &command_id);
     assert_eq!(source, &CommandExecutionSource::UserShell);
     assert_eq!(status, &CommandExecutionStatus::Completed);
-    assert_eq!(aggregated_output.as_deref(), Some("hello from bang\n"));
+    assert_eq!(
+        aggregated_output.as_deref().map(normalize_shell_output),
+        Some("hello from bang".to_string())
+    );
     assert_eq!(*exit_code, Some(0));
 
     timeout(
@@ -147,7 +168,10 @@ async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> 
     };
     assert_eq!(source, &CommandExecutionSource::UserShell);
     assert_eq!(status, &CommandExecutionStatus::Completed);
-    assert_eq!(aggregated_output.as_deref(), Some("hello from bang\n"));
+    assert_eq!(
+        aggregated_output.as_deref().map(normalize_shell_output),
+        Some("hello from bang".to_string())
+    );
 
     Ok(())
 }
@@ -240,7 +264,7 @@ async fn thread_shell_command_uses_existing_active_turn() -> Result<()> {
     let shell_id = mcp
         .send_thread_shell_command_request(ThreadShellCommandParams {
             thread_id: thread.id.clone(),
-            command: "printf 'active turn bang\\n'".to_string(),
+            command: user_shell_command("active turn bang"),
         })
         .await?;
     let shell_resp: JSONRPCResponse = timeout(
@@ -269,7 +293,10 @@ async fn thread_shell_command_uses_existing_active_turn() -> Result<()> {
         unreachable!("helper returns command execution item");
     };
     assert_eq!(source, &CommandExecutionSource::UserShell);
-    assert_eq!(aggregated_output.as_deref(), Some("active turn bang\n"));
+    assert_eq!(
+        aggregated_output.as_deref().map(normalize_shell_output),
+        Some("active turn bang".to_string())
+    );
 
     mcp.send_response(
         request_id,
@@ -309,7 +336,10 @@ async fn thread_shell_command_uses_existing_active_turn() -> Result<()> {
                     source: CommandExecutionSource::UserShell,
                     aggregated_output,
                     ..
-                } if aggregated_output.as_deref() == Some("active turn bang\n")
+                } if aggregated_output
+                    .as_deref()
+                    .map(normalize_shell_output)
+                    == Some("active turn bang".to_string())
             )
         }),
         "expected active-turn shell command to be persisted on the existing turn"

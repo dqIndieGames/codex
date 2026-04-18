@@ -121,6 +121,9 @@ mod tests {
 
     #[test]
     fn request_backoff_is_capped_to_ten_seconds() {
-        assert_eq!(backoff(Duration::from_millis(200), 32), Duration::from_secs(10));
+        assert_eq!(
+            backoff(Duration::from_millis(200), 32),
+            Duration::from_secs(10)
+        );
     }
 }

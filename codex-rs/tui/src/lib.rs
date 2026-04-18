@@ -841,9 +841,7 @@ pub async fn run_main(
     let (non_blocking, _guard) = non_blocking(log_file);
 
     // Honor RUST_LOG when set; otherwise keep the default log file quiet.
-    let env_filter = || {
-        tui_env_filter()
-    };
+    let env_filter = || tui_env_filter();
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
@@ -1148,7 +1146,9 @@ async fn run_ratatui_app(
                 unreachable!("session lookup app server should be initialized for --fork --last");
             };
             match lookup_latest_session_target_with_app_server(
-                app_server, &config, /*cwd_filter*/ None,
+                app_server,
+                &config,
+                /*cwd_filter*/ None,
                 /*include_non_interactive*/ false,
                 LatestSessionProviderFilter::MatchCurrent,
             )

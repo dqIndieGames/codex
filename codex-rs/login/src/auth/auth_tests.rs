@@ -364,10 +364,11 @@ mv tokens.next tokens.txt
             let script_path = tempdir.path().join("print-token.ps1");
             std::fs::write(
                 &script_path,
-                r#"$lines = Get-Content -Path tokens.txt
+                r#"$lines = @(Get-Content -Path tokens.txt)
 if ($lines.Count -eq 0) { exit 1 }
 Write-Output $lines[0]
-$lines | Select-Object -Skip 1 | Set-Content -Path tokens.txt
+$remaining = @($lines | Select-Object -Skip 1)
+$remaining | Set-Content -Path tokens.txt
 "#,
             )?;
             (

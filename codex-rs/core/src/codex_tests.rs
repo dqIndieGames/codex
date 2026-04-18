@@ -41,6 +41,8 @@ use crate::protocol::RateLimitSnapshot;
 use crate::protocol::RateLimitWindow;
 use crate::protocol::ResumedHistory;
 use crate::protocol::RolloutItem;
+use crate::protocol::SessionSource;
+use crate::protocol::SubAgentSource;
 use crate::protocol::TokenCountEvent;
 use crate::protocol::TokenUsage;
 use crate::protocol::TokenUsageInfo;
@@ -2245,9 +2247,7 @@ stream_max_retries = 9
             config_toml.push_str(&format!("base_url = \"{base_url}\"\n"));
         }
         if let Some(token) = experimental_bearer_token {
-            config_toml.push_str(&format!(
-                "experimental_bearer_token = \"{token}\"\n"
-            ));
+            config_toml.push_str(&format!("experimental_bearer_token = \"{token}\"\n"));
         }
     }
 
@@ -2533,6 +2533,267 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         inherited_shell_snapshot: None,
         user_shell_override: None,
     }
+}
+
+#[test]
+fn first_turn_checklist_candidate_source_allows_new_and_cleared_main_sessions() {
+    assert_eq!(
+        Session::first_turn_checklist_candidate_source(
+            &InitialHistory::New,
+            &SessionSource::VSCode,
+        ),
+        Some(codex_hooks::SessionStartSource::Startup)
+    );
+    assert_eq!(
+        Session::first_turn_checklist_candidate_source(
+            &InitialHistory::Cleared,
+            &SessionSource::Cli,
+        ),
+        Some(codex_hooks::SessionStartSource::Clear)
+    );
+    assert_eq!(
+        Session::first_turn_checklist_candidate_source(&InitialHistory::New, &SessionSource::Mcp),
+        Some(codex_hooks::SessionStartSource::Startup)
+    );
+    assert_eq!(
+        Session::first_turn_checklist_candidate_source(
+            &InitialHistory::Cleared,
+            &SessionSource::Mcp,
+        ),
+        Some(codex_hooks::SessionStartSource::Clear)
+    );
+}
+
+#[test]
+fn first_turn_checklist_candidate_source_skips_resumed_forked_and_subagent_sessions() {
+    assert_eq!(
+        Session::first_turn_checklist_candidate_source(
+            &InitialHistory::Resumed(ResumedHistory {
+                conversation_id: ThreadId::new(),
+                history: Vec::new(),
+                rollout_path: PathBuf::from("resume.rollout"),
+                last_modified_ms: 0,
+            }),
+            &SessionSource::VSCode,
+        ),
+        None
+    );
+    assert_eq!(
+        Session::first_turn_checklist_candidate_source(
+            &InitialHistory::Forked(Vec::new()),
+            &SessionSource::Exec,
+        ),
+        None
+    );
+    assert_eq!(
+        Session::first_turn_checklist_candidate_source(
+            &InitialHistory::New,
+            &SessionSource::SubAgent(SubAgentSource::Review),
+        ),
+        None
+    );
+    assert_eq!(
+        Session::first_turn_checklist_candidate_source(
+            &InitialHistory::Cleared,
+            &SessionSource::SubAgent(SubAgentSource::Other("guardian".to_string())),
+        ),
+        None
+    );
+}
+
+#[test]
+fn first_turn_checklist_regular_input_matches_only_single_trimmed_nihao_text() {
+    let text_input = |text: &str| UserInput::Text {
+        text: text.to_string(),
+        text_elements: Vec::new(),
+    };
+
+    assert!(Session::first_turn_checklist_regular_input_matches_trigger(&[
+        text_input(" 你好 ")
+    ]));
+    assert!(!Session::first_turn_checklist_regular_input_matches_trigger(&[
+        text_input("hello")
+    ]));
+    assert!(!Session::first_turn_checklist_regular_input_matches_trigger(&[
+        text_input("你好啊")
+    ]));
+    assert!(!Session::first_turn_checklist_regular_input_matches_trigger(&[
+        text_input("你好。")
+    ]));
+    assert!(!Session::first_turn_checklist_regular_input_matches_trigger(&[
+        text_input("你好\n别的字")
+    ]));
+    assert!(!Session::first_turn_checklist_regular_input_matches_trigger(&[
+        text_input("你好"),
+        text_input("第二条")
+    ]));
+    assert!(!Session::first_turn_checklist_regular_input_matches_trigger(&[
+        text_input("你好"),
+        UserInput::Image {
+            image_url: "data:image/png;base64,AA==".to_string(),
+        }
+    ]));
+    assert!(!Session::first_turn_checklist_regular_input_matches_trigger(&[
+        UserInput::Text {
+            text: "你好".to_string(),
+            text_elements: vec![codex_protocol::user_input::TextElement::new(
+                (0..6).into(),
+                Some("embedded".to_string()),
+            )],
+        }
+    ]));
+}
+
+#[tokio::test]
+async fn maybe_arm_first_turn_checklist_for_regular_input_promotes_matching_candidate() {
+    let (session, _turn_context) = make_session_and_context().await;
+    {
+        let mut state = session.state.lock().await;
+        state.set_pending_first_turn_checklist_candidate_source(Some(
+            codex_hooks::SessionStartSource::Startup,
+        ));
+    }
+
+    let input = vec![UserInput::Text {
+        text: " 你好 ".to_string(),
+        text_elements: Vec::new(),
+    }];
+    session
+        .maybe_arm_first_turn_checklist_for_regular_input(&input)
+        .await;
+
+    let mut state = session.state.lock().await;
+    assert_eq!(
+        state.take_pending_first_turn_checklist_candidate_source(),
+        None
+    );
+    assert_eq!(
+        state.take_pending_first_turn_checklist_source(),
+        Some(codex_hooks::SessionStartSource::Startup)
+    );
+}
+
+#[tokio::test]
+async fn maybe_arm_first_turn_checklist_for_regular_input_consumes_non_matching_candidate() {
+    let (session, _turn_context) = make_session_and_context().await;
+    {
+        let mut state = session.state.lock().await;
+        state.set_pending_first_turn_checklist_candidate_source(Some(
+            codex_hooks::SessionStartSource::Clear,
+        ));
+    }
+
+    let input = vec![UserInput::Text {
+        text: "hello".to_string(),
+        text_elements: Vec::new(),
+    }];
+    session
+        .maybe_arm_first_turn_checklist_for_regular_input(&input)
+        .await;
+
+    let mut state = session.state.lock().await;
+    assert_eq!(
+        state.take_pending_first_turn_checklist_candidate_source(),
+        None
+    );
+    assert_eq!(state.take_pending_first_turn_checklist_source(), None);
+}
+
+#[tokio::test]
+async fn maybe_arm_first_turn_checklist_for_regular_input_ignores_empty_input() {
+    let (session, _turn_context) = make_session_and_context().await;
+    {
+        let mut state = session.state.lock().await;
+        state.set_pending_first_turn_checklist_candidate_source(Some(
+            codex_hooks::SessionStartSource::Startup,
+        ));
+    }
+
+    session
+        .maybe_arm_first_turn_checklist_for_regular_input(&[])
+        .await;
+
+    let mut state = session.state.lock().await;
+    assert_eq!(
+        state.take_pending_first_turn_checklist_candidate_source(),
+        Some(codex_hooks::SessionStartSource::Startup)
+    );
+    assert_eq!(state.take_pending_first_turn_checklist_source(), None);
+}
+
+#[tokio::test]
+async fn user_input_or_turn_keeps_first_turn_checklist_candidate_for_empty_input() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    {
+        let mut state = session.state.lock().await;
+        state.session_configuration.session_source = SessionSource::Mcp;
+        state.set_pending_first_turn_checklist_candidate_source(Some(
+            codex_hooks::SessionStartSource::Startup,
+        ));
+    }
+
+    handlers::user_input_or_turn(
+        &session,
+        "sub-empty".to_string(),
+        Op::UserInput {
+            items: Vec::new(),
+            final_output_json_schema: None,
+        },
+    )
+    .await;
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+
+    let mut state = session.state.lock().await;
+    assert_eq!(
+        state.take_pending_first_turn_checklist_candidate_source(),
+        Some(codex_hooks::SessionStartSource::Startup)
+    );
+    assert_eq!(state.take_pending_first_turn_checklist_source(), None);
+}
+
+#[tokio::test]
+async fn user_input_or_turn_consumes_first_turn_checklist_candidate_for_first_non_matching_input() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    {
+        let mut state = session.state.lock().await;
+        state.session_configuration.session_source = SessionSource::Mcp;
+        state.set_pending_first_turn_checklist_candidate_source(Some(
+            codex_hooks::SessionStartSource::Startup,
+        ));
+    }
+
+    handlers::user_input_or_turn(
+        &session,
+        "sub-hello".to_string(),
+        Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        },
+    )
+    .await;
+    handlers::user_input_or_turn(
+        &session,
+        "sub-nihao".to_string(),
+        Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "你好".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        },
+    )
+    .await;
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+
+    let mut state = session.state.lock().await;
+    assert_eq!(
+        state.take_pending_first_turn_checklist_candidate_source(),
+        None
+    );
+    assert_eq!(state.take_pending_first_turn_checklist_source(), None);
 }
 
 #[tokio::test]
@@ -3949,7 +4210,10 @@ async fn refresh_provider_runtime_applies_immediately_for_idle_thread() {
     assert_eq!(status, ProviderRuntimeRefreshStatus::Applied);
 
     let provider = session.provider().await;
-    assert_eq!(provider.base_url.as_deref(), Some("https://new.example.com/v1"));
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://new.example.com/v1")
+    );
     assert_eq!(
         provider.experimental_bearer_token.as_deref(),
         Some("new-token")
@@ -3962,7 +4226,9 @@ async fn refresh_provider_runtime_applies_immediately_for_idle_thread() {
             .is_none()
     );
 
-    let next_turn = session.new_default_turn_with_sub_id("next-turn".to_string()).await;
+    let next_turn = session
+        .new_default_turn_with_sub_id("next-turn".to_string())
+        .await;
     assert_eq!(
         next_turn.provider.base_url.as_deref(),
         Some("https://new.example.com/v1")
@@ -4001,13 +4267,18 @@ async fn refresh_provider_runtime_applies_with_relative_agent_config_file() {
     assert_eq!(status, ProviderRuntimeRefreshStatus::Applied);
 
     let provider = session.provider().await;
-    assert_eq!(provider.base_url.as_deref(), Some("https://new.example.com/v1"));
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://new.example.com/v1")
+    );
     assert_eq!(
         provider.experimental_bearer_token.as_deref(),
         Some("new-token")
     );
 
-    let next_turn = session.new_default_turn_with_sub_id("next-turn".to_string()).await;
+    let next_turn = session
+        .new_default_turn_with_sub_id("next-turn".to_string())
+        .await;
     assert_eq!(
         next_turn.provider.base_url.as_deref(),
         Some("https://new.example.com/v1")
@@ -4045,7 +4316,10 @@ async fn refresh_provider_runtime_applies_immediately_for_active_thread_and_next
     assert_eq!(status, ProviderRuntimeRefreshStatus::Applied);
 
     let provider = session.provider().await;
-    assert_eq!(provider.base_url.as_deref(), Some("https://new.example.com/v1"));
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://new.example.com/v1")
+    );
     assert_eq!(
         provider.experimental_bearer_token.as_deref(),
         Some("new-token")
@@ -4073,7 +4347,9 @@ async fn refresh_provider_runtime_applies_immediately_for_active_thread_and_next
             .is_none()
     );
 
-    let next_turn = session.new_default_turn_with_sub_id("next-turn".to_string()).await;
+    let next_turn = session
+        .new_default_turn_with_sub_id("next-turn".to_string())
+        .await;
     assert_eq!(
         next_turn.provider.base_url.as_deref(),
         Some("https://new.example.com/v1")
@@ -4113,7 +4389,9 @@ async fn refresh_provider_runtime_clears_deleted_fields() {
     assert_eq!(provider.base_url, None);
     assert_eq!(provider.experimental_bearer_token, None);
 
-    let next_turn = session.new_default_turn_with_sub_id("next-turn".to_string()).await;
+    let next_turn = session
+        .new_default_turn_with_sub_id("next-turn".to_string())
+        .await;
     assert_eq!(next_turn.provider.base_url, None);
     assert_eq!(next_turn.provider.experimental_bearer_token, None);
 }
@@ -4150,7 +4428,10 @@ async fn refresh_provider_runtime_fails_when_provider_is_missing() {
     );
 
     let provider = session.provider().await;
-    assert_eq!(provider.base_url.as_deref(), Some("https://old.example.com/v1"));
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://old.example.com/v1")
+    );
     assert_eq!(
         provider.experimental_bearer_token.as_deref(),
         Some("old-token")
@@ -4204,7 +4485,10 @@ async fn refresh_provider_runtime_fails_without_mutating_state_for_invalid_user_
     );
 
     let provider = session.provider().await;
-    assert_eq!(provider.base_url.as_deref(), Some("https://old.example.com/v1"));
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://old.example.com/v1")
+    );
     assert_eq!(
         provider.experimental_bearer_token.as_deref(),
         Some("old-token")
@@ -4234,8 +4518,7 @@ async fn refresh_provider_runtime_fails_without_mutating_state_for_invalid_user_
 }
 
 #[tokio::test]
-async fn ensure_task_for_pending_inputs_uses_latest_provider_runtime_after_active_refresh()
-{
+async fn ensure_task_for_pending_inputs_uses_latest_provider_runtime_after_active_refresh() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     write_provider_refresh_test_config(
         codex_home.path(),

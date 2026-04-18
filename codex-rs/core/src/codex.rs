@@ -41,9 +41,14 @@ use crate::render_skills_section;
 use crate::rollout::session_index;
 use crate::skills_load_input_from_config;
 use crate::stream_events_utils::HandleOutputCtx;
+use crate::stream_events_utils::assistant_message_phase;
+use crate::stream_events_utils::assistant_message_should_receive_first_turn_checklist;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
 use crate::stream_events_utils::last_assistant_message_from_item;
+use crate::stream_events_utils::local1_first_turn_checklist_prefix;
+use crate::stream_events_utils::prepend_local1_first_turn_checklist;
+use crate::stream_events_utils::prepend_text_to_assistant_response_item;
 use crate::stream_events_utils::raw_assistant_output_text_from_item;
 use crate::stream_events_utils::record_completed_response_item;
 use crate::turn_metadata::TurnMetadataState;
@@ -92,6 +97,7 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::items::build_hook_prompt_message;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::format_allow_prefixes;
 use codex_protocol::openai_models::ModelInfo;
@@ -170,12 +176,12 @@ use crate::codex_thread::ProviderRuntimeRefreshStatus;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::compact::collect_user_messages;
 use crate::config::Config;
-use crate::config::deserialize_config_toml_with_base;
 use crate::config::ConfigToml;
 use crate::config::Constrained;
 use crate::config::ConstraintResult;
 use crate::config::GhostSnapshotConfig;
 use crate::config::StartedNetworkProxy;
+use crate::config::deserialize_config_toml_with_base;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::config::types::McpServerConfig;
 use crate::config::types::ShellEnvironmentPolicy;
@@ -584,7 +590,7 @@ impl Codex {
             let thread_id = match &conversation_history {
                 InitialHistory::Resumed(resumed) => Some(resumed.conversation_id),
                 InitialHistory::Forked(_) => conversation_history.forked_from_id(),
-                InitialHistory::New => None,
+                InitialHistory::New | InitialHistory::Cleared => None,
             };
             match thread_id {
                 Some(thread_id) => {
@@ -1492,7 +1498,7 @@ impl Session {
         let forked_from_id = initial_history.forked_from_id();
 
         let (conversation_id, rollout_params) = match &initial_history {
-            InitialHistory::New | InitialHistory::Forked(_) => {
+            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
                 let conversation_id = ThreadId::default();
                 (
                     conversation_id,
@@ -1529,7 +1535,7 @@ impl Session {
                 resumed.history.as_slice(),
                 resumed.rollout_path.as_path(),
             ),
-            InitialHistory::New | InitialHistory::Forked(_) => None,
+            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
         };
 
         // Kick off independent async setup tasks in parallel to reduce startup latency.
@@ -1909,9 +1915,8 @@ impl Session {
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),
                 );
-                model_client.set_force_gpt54_priority_fallback(
-                    config.force_gpt54_priority_fallback,
-                );
+                model_client
+                    .set_force_gpt54_priority_fallback(config.force_gpt54_priority_fallback);
                 model_client
             },
             code_mode_service: crate::tools::code_mode::CodeModeService::new(
@@ -2063,13 +2068,22 @@ impl Session {
             InitialHistory::New | InitialHistory::Forked(_) => {
                 codex_hooks::SessionStartSource::Startup
             }
+            InitialHistory::Cleared => codex_hooks::SessionStartSource::Clear,
         };
+        let pending_first_turn_checklist_candidate_source =
+            Self::first_turn_checklist_candidate_source(
+                &initial_history,
+                &session_configuration.session_source,
+            );
 
         // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
         sess.record_initial_history(initial_history).await;
         {
             let mut state = sess.state.lock().await;
             state.set_pending_session_start_source(Some(session_start_source));
+            state.set_pending_first_turn_checklist_candidate_source(
+                pending_first_turn_checklist_candidate_source,
+            );
         }
 
         memories::start_memories_startup_task(
@@ -2197,7 +2211,7 @@ impl Session {
             )
         };
         match conversation_history {
-            InitialHistory::New => {
+            InitialHistory::New | InitialHistory::Cleared => {
                 // Defer initial context insertion until the first real turn starts so
                 // turn/start overrides can be merged before we write model-visible context.
                 self.set_previous_turn_settings(/*previous_turn_settings*/ None)
@@ -2338,6 +2352,31 @@ impl Session {
             self.services.shell_snapshot_tx.clone(),
             self.services.session_telemetry.clone(),
         );
+    }
+
+    fn first_turn_checklist_candidate_source(
+        initial_history: &InitialHistory,
+        session_source: &SessionSource,
+    ) -> Option<codex_hooks::SessionStartSource> {
+        if matches!(session_source, SessionSource::SubAgent(_)) {
+            return None;
+        }
+
+        match initial_history {
+            InitialHistory::New => Some(codex_hooks::SessionStartSource::Startup),
+            InitialHistory::Cleared => Some(codex_hooks::SessionStartSource::Clear),
+            InitialHistory::Resumed(_) | InitialHistory::Forked(_) => None,
+        }
+    }
+
+    fn first_turn_checklist_regular_input_matches_trigger(input: &[UserInput]) -> bool {
+        matches!(
+            input,
+            [UserInput::Text {
+                text,
+                text_elements,
+            }] if text_elements.is_empty() && text.trim() == "你好"
+        )
     }
 
     pub(crate) async fn update_settings(
@@ -4186,6 +4225,29 @@ impl Session {
         state.take_pending_session_start_source()
     }
 
+    pub(crate) async fn take_pending_first_turn_checklist_source(
+        &self,
+    ) -> Option<codex_hooks::SessionStartSource> {
+        let mut state = self.state.lock().await;
+        state.take_pending_first_turn_checklist_source()
+    }
+
+    async fn maybe_arm_first_turn_checklist_for_regular_input(&self, input: &[UserInput]) {
+        if input.is_empty() {
+            return;
+        }
+
+        let should_arm = Self::first_turn_checklist_regular_input_matches_trigger(input);
+        let mut state = self.state.lock().await;
+        let Some(source) = state.take_pending_first_turn_checklist_candidate_source() else {
+            return;
+        };
+
+        if should_arm {
+            state.set_pending_first_turn_checklist_source(Some(source));
+        }
+    }
+
     async fn refresh_mcp_servers_inner(
         &self,
         turn_context: &TurnContext,
@@ -4291,8 +4353,10 @@ impl Session {
                 .clone();
 
             state.session_configuration.provider.base_url = base_url.clone();
-            state.session_configuration.provider.experimental_bearer_token =
-                experimental_bearer_token.clone();
+            state
+                .session_configuration
+                .provider
+                .experimental_bearer_token = experimental_bearer_token.clone();
 
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
             config.model_provider.base_url = base_url.clone();
@@ -4314,7 +4378,10 @@ impl Session {
         cfg: ConfigToml,
         provider_id: &str,
     ) -> CodexResult<PendingProviderRuntimeRefresh> {
-        let openai_base_url = cfg.openai_base_url.clone().filter(|value| !value.is_empty());
+        let openai_base_url = cfg
+            .openai_base_url
+            .clone()
+            .filter(|value| !value.is_empty());
         let openai_base_url_from_env = std::env::var("OPENAI_BASE_URL")
             .ok()
             .filter(|value| !value.is_empty());
@@ -4335,7 +4402,9 @@ impl Session {
         })
     }
 
-    fn read_latest_provider_runtime_refresh(config: &Config) -> CodexResult<PendingProviderRuntimeRefresh> {
+    fn read_latest_provider_runtime_refresh(
+        config: &Config,
+    ) -> CodexResult<PendingProviderRuntimeRefresh> {
         let config_toml_path = Self::resolve_user_config_toml_path(config)?;
         let user_config = Self::read_user_config_toml_value(&config_toml_path)?;
         let config_base_dir = config_toml_path.parent().ok_or_else(|| {
@@ -4375,7 +4444,9 @@ impl Session {
         }
     }
 
-    pub(crate) async fn refresh_provider_runtime(&self) -> CodexResult<ProviderRuntimeRefreshStatus> {
+    pub(crate) async fn refresh_provider_runtime(
+        &self,
+    ) -> CodexResult<ProviderRuntimeRefreshStatus> {
         let refresh = {
             let state = self.state.lock().await;
             let config = Arc::clone(&state.session_configuration.original_config_do_not_use);
@@ -4805,6 +4876,9 @@ mod handlers {
             _ => unreachable!(),
         };
 
+        sess.maybe_arm_first_turn_checklist_for_regular_input(&items)
+            .await;
+
         let Ok(current_context) = sess
             .new_turn_with_sub_id(sub_id.clone(), updates.clone())
             .await
@@ -4820,7 +4894,8 @@ mod handlers {
         {
             Ok(_) => current_context.session_telemetry.user_prompt(&items),
             Err(SteerInputError::NoActiveTurn(items)) => {
-                sess.apply_pending_provider_runtime_refresh_if_requested().await;
+                sess.apply_pending_provider_runtime_refresh_if_requested()
+                    .await;
                 let Ok(current_context) = sess.new_turn_with_sub_id(sub_id.clone(), updates).await
                 else {
                     return;
@@ -5478,7 +5553,8 @@ mod handlers {
         sub_id: String,
         review_request: ReviewRequest,
     ) {
-        sess.apply_pending_provider_runtime_refresh_if_requested().await;
+        sess.apply_pending_provider_runtime_refresh_if_requested()
+            .await;
         let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
         sess.maybe_emit_unknown_model_warning_for_turn(turn_context.as_ref())
             .await;
@@ -6614,7 +6690,15 @@ async fn run_sampling_request(
 
         retries += 1;
         let delay = retry_delay_for_error(&err, retries);
-        emit_retryable_stream_error(sess.as_ref(), &turn_context, retries, err).await;
+        emit_retryable_stream_error(
+            sess.as_ref(),
+            &turn_context,
+            retries,
+            fallback_retry_threshold,
+            client_session.responses_websocket_enabled(),
+            err,
+        )
+        .await;
         tokio::time::sleep(delay).await;
     }
 }
@@ -6798,6 +6882,37 @@ impl PlanModeStreamState {
 struct AssistantMessageStreamParsers {
     plan_mode: bool,
     parsers_by_item: HashMap<String, AssistantTextStreamParser>,
+}
+
+#[derive(Debug, Default)]
+struct FirstTurnChecklistStreamState {
+    prefixed_item_id: Option<String>,
+    message_phase_by_item: HashMap<String, Option<MessagePhase>>,
+}
+
+impl FirstTurnChecklistStreamState {
+    fn record_item_phase(&mut self, item_id: &str, phase: Option<MessagePhase>) {
+        self.message_phase_by_item
+            .insert(item_id.to_string(), phase);
+    }
+
+    fn phase_for_item(&self, item_id: &str) -> Option<MessagePhase> {
+        self.message_phase_by_item.get(item_id).cloned().flatten()
+    }
+
+    fn remove_item_phase(&mut self, item_id: &str) -> Option<MessagePhase> {
+        self.message_phase_by_item.remove(item_id).flatten()
+    }
+
+    fn note_prefixed_item(&mut self, item_id: &str) {
+        if self.prefixed_item_id.is_none() {
+            self.prefixed_item_id = Some(item_id.to_string());
+        }
+    }
+
+    fn prefixed_item_id(&self) -> Option<&str> {
+        self.prefixed_item_id.as_deref()
+    }
 }
 
 type ParsedAssistantTextDelta = AssistantTextChunk;
@@ -7082,12 +7197,36 @@ async fn handle_plan_segments(
     }
 }
 
+async fn maybe_prefix_first_turn_checklist_visible_text(
+    sess: &Session,
+    checklist_state: &mut FirstTurnChecklistStreamState,
+    item_id: &str,
+    phase: Option<&MessagePhase>,
+    visible_text: &mut String,
+) {
+    if visible_text.is_empty()
+        || checklist_state.prefixed_item_id().is_some()
+        || !assistant_message_should_receive_first_turn_checklist(phase)
+    {
+        return;
+    }
+
+    if sess.take_pending_first_turn_checklist_source().await.is_none() {
+        return;
+    }
+
+    *visible_text = prepend_local1_first_turn_checklist(visible_text);
+    checklist_state.note_prefixed_item(item_id);
+}
+
 async fn emit_streamed_assistant_text_delta(
     sess: &Session,
     turn_context: &TurnContext,
     plan_mode_state: Option<&mut PlanModeStreamState>,
+    checklist_state: &mut FirstTurnChecklistStreamState,
     item_id: &str,
-    parsed: ParsedAssistantTextDelta,
+    message_phase: Option<MessagePhase>,
+    mut parsed: ParsedAssistantTextDelta,
 ) {
     if parsed.is_empty() {
         return;
@@ -7106,6 +7245,14 @@ async fn emit_streamed_assistant_text_delta(
     if parsed.visible_text.is_empty() {
         return;
     }
+    maybe_prefix_first_turn_checklist_visible_text(
+        sess,
+        checklist_state,
+        item_id,
+        message_phase.as_ref(),
+        &mut parsed.visible_text,
+    )
+    .await;
     let event = AgentMessageContentDeltaEvent {
         thread_id: sess.conversation_id.to_string(),
         turn_id: turn_context.sub_id.clone(),
@@ -7121,11 +7268,22 @@ async fn flush_assistant_text_segments_for_item(
     sess: &Session,
     turn_context: &TurnContext,
     plan_mode_state: Option<&mut PlanModeStreamState>,
+    checklist_state: &mut FirstTurnChecklistStreamState,
     parsers: &mut AssistantMessageStreamParsers,
     item_id: &str,
+    message_phase: Option<MessagePhase>,
 ) {
     let parsed = parsers.finish_item(item_id);
-    emit_streamed_assistant_text_delta(sess, turn_context, plan_mode_state, item_id, parsed).await;
+    emit_streamed_assistant_text_delta(
+        sess,
+        turn_context,
+        plan_mode_state,
+        checklist_state,
+        item_id,
+        message_phase,
+        parsed,
+    )
+    .await;
 }
 
 /// Flush any remaining buffered assistant text parser state at response completion.
@@ -7133,14 +7291,18 @@ async fn flush_assistant_text_segments_all(
     sess: &Session,
     turn_context: &TurnContext,
     mut plan_mode_state: Option<&mut PlanModeStreamState>,
+    checklist_state: &mut FirstTurnChecklistStreamState,
     parsers: &mut AssistantMessageStreamParsers,
 ) {
     for (item_id, parsed) in parsers.drain_finished() {
+        let message_phase = checklist_state.phase_for_item(&item_id);
         emit_streamed_assistant_text_delta(
             sess,
             turn_context,
             plan_mode_state.as_deref_mut(),
+            checklist_state,
             &item_id,
+            message_phase,
             parsed,
         )
         .await;
@@ -7352,22 +7514,37 @@ async fn emit_retryable_stream_error(
     sess: &Session,
     turn_context: &TurnContext,
     retry_number: u64,
+    fallback_retry_threshold: u64,
+    websocket_retry_chain_active: bool,
     err: CodexErr,
 ) {
+    // Keep intermediate websocket reconnect churn internal until the retry that
+    // is about to trigger fallback. Surfacing every step regresses the
+    // websocket fallback UX and pollutes retry history.
+    if websocket_retry_chain_active && retry_number < fallback_retry_threshold {
+        return;
+    }
+
     let details = err.to_string();
+    let websocket_handshake_status = matches!(
+        &err,
+        CodexErr::UnexpectedStatus(err)
+            if err
+                .url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("ws://") || url.starts_with("wss://"))
+    );
+    if websocket_handshake_status {
+        emit_transport_retry_status_event(sess, turn_context, retry_number, details).await;
+        return;
+    }
     if let Some(status) = err
         .http_status_code_value()
         .and_then(|value| http::StatusCode::from_u16(value).ok())
     {
         emit_retry_status_event(sess, turn_context, status, retry_number, details).await;
     } else {
-        emit_transport_retry_status_event(
-            sess,
-            turn_context,
-            retry_number,
-            details,
-        )
-        .await;
+        emit_transport_retry_status_event(sess, turn_context, retry_number, details).await;
     }
 }
 
@@ -7448,6 +7625,7 @@ async fn try_run_sampling_request(
     let mut should_emit_turn_diff = false;
     let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
     let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
+    let mut first_turn_checklist_state = FirstTurnChecklistStreamState::default();
     let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
     let receiving_span = trace_span!("receiving_stream");
     let outcome: CodexResult<SamplingRequestResult> = loop {
@@ -7492,12 +7670,17 @@ async fn try_run_sampling_request(
                     && matches!(previous, TurnItem::AgentMessage(_))
                 {
                     let item_id = previous.id();
+                    let message_phase = first_turn_checklist_state
+                        .remove_item_phase(&item_id)
+                        .or_else(|| assistant_message_phase(&item));
                     flush_assistant_text_segments_for_item(
                         &sess,
                         &turn_context,
                         plan_mode_state.as_mut(),
+                        &mut first_turn_checklist_state,
                         &mut assistant_message_stream_parsers,
                         &item_id,
+                        message_phase,
                     )
                     .await;
                 }
@@ -7521,6 +7704,37 @@ async fn try_run_sampling_request(
                     tool_runtime: tool_runtime.clone(),
                     cancellation_token: cancellation_token.child_token(),
                 };
+
+                let active_agent_message_id = previously_active_item.as_ref().and_then(|previous| {
+                    if matches!(previous, TurnItem::AgentMessage(_)) {
+                        Some(previous.id())
+                    } else {
+                        None
+                    }
+                });
+                let mut item = item;
+                let item_phase = assistant_message_phase(&item);
+                let completed_item_already_prefixed = active_agent_message_id
+                    .as_deref()
+                    .is_some_and(|item_id| {
+                        first_turn_checklist_state.prefixed_item_id() == Some(item_id)
+                    });
+                let completed_item_has_visible_text =
+                    last_assistant_message_from_item(&item, plan_mode).is_some();
+                if completed_item_already_prefixed {
+                    let prefix = local1_first_turn_checklist_prefix();
+                    let _ = prepend_text_to_assistant_response_item(&mut item, &prefix);
+                } else if completed_item_has_visible_text
+                    && first_turn_checklist_state.prefixed_item_id().is_none()
+                    && assistant_message_should_receive_first_turn_checklist(item_phase.as_ref())
+                    && sess.take_pending_first_turn_checklist_source().await.is_some()
+                {
+                    let prefix = local1_first_turn_checklist_prefix();
+                    let _ = prepend_text_to_assistant_response_item(&mut item, &prefix);
+                    if let Some(item_id) = active_agent_message_id.as_deref() {
+                        first_turn_checklist_state.note_prefixed_item(item_id);
+                    }
+                }
 
                 let output_result = handle_output_item_done(&mut ctx, item, previously_active_item)
                     .instrument(handle_responses)
@@ -7549,6 +7763,8 @@ async fn try_run_sampling_request(
                         && let Some(raw_text) = raw_assistant_output_text_from_item(&item)
                     {
                         let item_id = turn_item.id();
+                        first_turn_checklist_state
+                            .record_item_phase(&item_id, assistant_message_phase(&item));
                         let mut seeded =
                             assistant_message_stream_parsers.seed_item_text(&item_id, &raw_text);
                         if let TurnItem::AgentMessage(agent_message) = &mut turn_item {
@@ -7560,6 +7776,20 @@ async fn try_run_sampling_request(
                                         std::mem::take(&mut seeded.visible_text)
                                     },
                                 }];
+                            if !plan_mode
+                                && let Some(codex_protocol::items::AgentMessageContent::Text {
+                                    text,
+                                }) = agent_message.content.first_mut()
+                            {
+                                maybe_prefix_first_turn_checklist_visible_text(
+                                    &sess,
+                                    &mut first_turn_checklist_state,
+                                    &item_id,
+                                    agent_message.phase.as_ref(),
+                                    text,
+                                )
+                                .await;
+                            }
                         }
                         seeded_parsed = plan_mode.then_some(seeded);
                         seeded_item_id = Some(item_id);
@@ -7579,11 +7809,14 @@ async fn try_run_sampling_request(
                         seeded_item_id.as_deref(),
                         seeded_parsed,
                     ) {
+                        let message_phase = first_turn_checklist_state.phase_for_item(item_id);
                         emit_streamed_assistant_text_delta(
                             &sess,
                             &turn_context,
                             Some(state),
+                            &mut first_turn_checklist_state,
                             item_id,
+                            message_phase,
                             parsed,
                         )
                         .await;
@@ -7620,6 +7853,7 @@ async fn try_run_sampling_request(
                     &sess,
                     &turn_context,
                     plan_mode_state.as_mut(),
+                    &mut first_turn_checklist_state,
                     &mut assistant_message_stream_parsers,
                 )
                 .await;
@@ -7641,11 +7875,14 @@ async fn try_run_sampling_request(
                     let item_id = active.id();
                     if matches!(active, TurnItem::AgentMessage(_)) {
                         let parsed = assistant_message_stream_parsers.parse_delta(&item_id, &delta);
+                        let message_phase = first_turn_checklist_state.phase_for_item(&item_id);
                         emit_streamed_assistant_text_delta(
                             &sess,
                             &turn_context,
                             plan_mode_state.as_mut(),
+                            &mut first_turn_checklist_state,
                             &item_id,
+                            message_phase,
                             parsed,
                         )
                         .await;
@@ -7718,6 +7955,7 @@ async fn try_run_sampling_request(
         &sess,
         &turn_context,
         plan_mode_state.as_mut(),
+        &mut first_turn_checklist_state,
         &mut assistant_message_stream_parsers,
     )
     .await;

@@ -86,7 +86,11 @@ fn runtime_metrics_summary_collects_tool_api_and_streaming_metrics() -> Result<(
     > = Ok(Some(Ok(Message::Text(
         r#"{"type":"response.created"}"#.into(),
     ))));
-    manager.record_websocket_event(&ws_response, Duration::from_millis(80), /*emit_log_trace*/ true);
+    manager.record_websocket_event(
+        &ws_response,
+        Duration::from_millis(80),
+        /*emit_log_trace*/ true,
+    );
     let ws_timing_response: std::result::Result<
         Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>,
         codex_api::ApiError,

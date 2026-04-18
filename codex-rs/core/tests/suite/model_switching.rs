@@ -294,8 +294,8 @@ async fn model_and_personality_change_only_appends_model_instructions() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gpt_5_4_forces_priority_on_http_turns_even_when_next_turn_service_tier_is_none() -> Result<()>
-{
+async fn gpt_5_4_forces_priority_on_http_turns_even_when_next_turn_service_tier_is_none()
+-> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;

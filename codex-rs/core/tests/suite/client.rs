@@ -190,10 +190,11 @@ mv tokens.next tokens.txt
             let script_path = tempdir.path().join("print-token.ps1");
             std::fs::write(
                 &script_path,
-                r#"$lines = Get-Content -Path tokens.txt
+                r#"$lines = @(Get-Content -Path tokens.txt)
 if ($lines.Count -eq 0) { exit 1 }
 Write-Output $lines[0]
-$lines | Select-Object -Skip 1 | Set-Content -Path tokens.txt
+$remaining = @($lines | Select-Object -Skip 1)
+$remaining | Set-Content -Path tokens.txt
 "#,
             )?;
             (
@@ -219,7 +220,7 @@ $lines | Select-Object -Skip 1 | Set-Content -Path tokens.txt
         ModelProviderAuthInfo {
             command: self.command.clone(),
             args: self.args.clone(),
-            timeout_ms: non_zero_u64(/*value*/ 1_000),
+            timeout_ms: non_zero_u64(/*value*/ 10_000),
             refresh_interval_ms: non_zero_u64(/*value*/ 60_000),
             cwd: match codex_utils_absolute_path::AbsolutePathBuf::try_from(self.tempdir.path()) {
                 Ok(cwd) => cwd,
@@ -2374,7 +2375,11 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         .mount(&server)
         .await;
 
-    let mut builder = test_codex();
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.supports_websockets = false;
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(0);
+    });
     let codex_fixture = builder.build(&server).await?;
     let codex = codex_fixture.codex.clone();
 

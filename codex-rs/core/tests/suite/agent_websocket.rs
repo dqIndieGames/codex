@@ -265,14 +265,12 @@ async fn websocket_v2_gpt_5_4_first_turn_uses_priority_after_startup_prewarm() -
     ]])
     .await;
 
-    let mut builder = test_codex()
-        .with_model("gpt-5.4")
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::ResponsesWebsocketsV2)
-                .expect("test config should allow feature update");
-        });
+    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
+        config
+            .features
+            .enable(Feature::ResponsesWebsocketsV2)
+            .expect("test config should allow feature update");
+    });
     let test = builder.build_with_websocket_server(&server).await?;
 
     let warmup = server
@@ -309,8 +307,8 @@ async fn websocket_v2_gpt_5_4_first_turn_uses_priority_after_startup_prewarm() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn websocket_v2_gpt_5_4_first_turn_keeps_priority_when_live_session_tier_is_none() -> Result<()>
-{
+async fn websocket_v2_gpt_5_4_first_turn_keeps_priority_when_live_session_tier_is_none()
+-> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_websocket_server(vec![vec![
@@ -323,15 +321,13 @@ async fn websocket_v2_gpt_5_4_first_turn_keeps_priority_when_live_session_tier_i
     ]])
     .await;
 
-    let mut builder = test_codex()
-        .with_model("gpt-5.4")
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::ResponsesWebsocketsV2)
-                .expect("test config should allow feature update");
-            config.service_tier = Some(ServiceTier::Fast);
-        });
+    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
+        config
+            .features
+            .enable(Feature::ResponsesWebsocketsV2)
+            .expect("test config should allow feature update");
+        config.service_tier = Some(ServiceTier::Fast);
+    });
     let test = builder.build_with_websocket_server(&server).await?;
 
     let warmup = server
@@ -386,14 +382,12 @@ async fn websocket_v2_next_turn_uses_updated_service_tier() -> Result<()> {
     ]])
     .await;
 
-    let mut builder = test_codex()
-        .with_model("gpt-5.1")
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::ResponsesWebsocketsV2)
-                .expect("test config should allow feature update");
-        });
+    let mut builder = test_codex().with_model("gpt-5.1").with_config(|config| {
+        config
+            .features
+            .enable(Feature::ResponsesWebsocketsV2)
+            .expect("test config should allow feature update");
+    });
     let test = builder.build_with_websocket_server(&server).await?;
 
     let warmup = server
@@ -465,14 +459,12 @@ async fn websocket_v2_gpt_5_4_next_turn_keeps_priority_when_service_tier_is_none
     ]])
     .await;
 
-    let mut builder = test_codex()
-        .with_model("gpt-5.4")
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::ResponsesWebsocketsV2)
-                .expect("test config should allow feature update");
-        });
+    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
+        config
+            .features
+            .enable(Feature::ResponsesWebsocketsV2)
+            .expect("test config should allow feature update");
+    });
     let test = builder.build_with_websocket_server(&server).await?;
 
     let warmup = server
@@ -513,7 +505,7 @@ async fn websocket_v2_gpt_5_4_next_turn_keeps_priority_when_service_tier_is_none
 
     assert_eq!(second_turn["type"].as_str(), Some("response.create"));
     assert_eq!(second_turn["service_tier"].as_str(), Some("priority"));
-    assert_eq!(second_turn.get("previous_response_id"), None);
+    assert_eq!(second_turn["previous_response_id"].as_str(), Some("resp-1"));
     assert!(
         second_turn
             .get("input")

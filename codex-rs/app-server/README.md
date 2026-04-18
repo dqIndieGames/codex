@@ -133,7 +133,7 @@ Example with notification opt-out:
 
 ## API Overview
 
-- `thread/start` — create a new thread; emits `thread/started` (including the current `thread.status`) and auto-subscribes you to turn/item events for that thread.
+- `thread/start` — create a new thread; emits `thread/started` (including the current `thread.status`) and auto-subscribes you to turn/item events for that thread. Pass `sessionStartSource: "clear"` when starting a replacement thread after clearing the current session so `SessionStart` hooks receive `source: "clear"` instead of the default `"startup"`.
 - `thread/resume` — reopen an existing thread by id so subsequent `turn/start` calls append to it.
 - `thread/fork` — fork an existing thread into a new thread id by copying the stored history; if the source thread is currently mid-turn, the fork records the same interruption marker as `turn/interrupt` instead of inheriting an unmarked partial turn suffix. Accepts `ephemeral: true` for an in-memory temporary fork, emits `thread/started` (including the current `thread.status`), and auto-subscribes you to turn/item events for the new thread.
 - `thread/list` — page through stored rollouts; supports cursor-based pagination and optional `modelProviders`, `sourceKinds`, `archived`, `cwd`, and `searchTerm` filters. Each returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
@@ -149,7 +149,7 @@ Example with notification opt-out:
 - `thread/shellCommand` — run a user-initiated `!` shell command against a thread; this runs unsandboxed with full access rather than inheriting the thread sandbox policy. Returns `{}` immediately while progress streams through standard turn/item notifications and any active turn receives the formatted output in its message stream.
 - `thread/backgroundTerminals/clean` — terminate all running background terminals for a thread (experimental; requires `capabilities.experimentalApi`); returns `{}` when the cleanup request is accepted.
 - `thread/rollback` — drop the last N turns from the agent’s in-memory context and persist a rollback marker in the rollout so future resumes see the pruned history; returns the updated `thread` (with `turns` populated) on success.
-- `thread/providerRuntime/refresh` — reload the user config layer for one loaded thread, keep the current provider id sticky, and refresh only that provider runtime’s `base_url` plus `experimental_bearer_token`. Returns `{ threadId, status }`, where `status` is `applied` for idle threads and `queued` when the refresh is deferred until the next turn.
+- `thread/providerRuntime/refresh` — reload the user config layer for one loaded thread, keep the current provider id sticky, and refresh only that provider runtime’s `base_url` plus `experimental_bearer_token`. Returns `{ threadId, status }`, where `status` is `applied` after the live runtime has been updated. `queued` remains reserved for any future path that truly defers the refresh until later.
 - `thread/providerRuntime/refreshAllLoaded` — run the same provider-runtime refresh flow across every loaded thread in the current app-server instance. Returns `{ totalThreads, appliedThreadIds, queuedThreadIds, failedThreads }`. An instance-level caller can treat `failedThreads = []` as success, including the degenerate `totalThreads = 0` case.
 - `turn/start` — add user input to a thread and begin Codex generation; responds with the initial `turn` object and streams `turn/started`, `item/*`, and `turn/completed` notifications. For `collaborationMode`, `settings.developer_instructions: null` means "use built-in instructions for the selected mode".
 - `turn/steer` — add user input to an already in-flight regular turn without starting a new turn; returns the active `turnId` that accepted the input. Review and manual compaction turns reject `turn/steer`.
@@ -241,6 +241,7 @@ Start a fresh thread when you need a new Codex conversation.
     "sandbox": "workspaceWrite",
     "personality": "friendly",
     "serviceName": "my_app_server_client", // optional metrics tag (`service_name`)
+    "sessionStartSource": "startup", // optional: "startup" (default) or "clear"
     // Experimental: requires opt-in
     "dynamicTools": [
         {

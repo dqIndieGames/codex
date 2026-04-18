@@ -2,10 +2,10 @@ use super::*;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use pretty_assertions::assert_eq;
-use std::num::NonZeroU64;
+use serial_test::serial;
 use std::env;
 use std::ffi::OsStr;
-use serial_test::serial;
+use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 #[test]
@@ -204,7 +204,10 @@ fn bounded_retry_mode_preserves_configured_retry_limits() {
     let _guard = EnvVarGuard::set(INTERNAL_RETRY_MODE_ENV, OsStr::new("bounded"));
     let provider = ModelProviderInfo::create_openai_provider(None);
 
-    assert_eq!(provider.request_retry_attempts(), provider.request_max_retries());
+    assert_eq!(
+        provider.request_retry_attempts(),
+        provider.request_max_retries()
+    );
     assert_eq!(
         provider.stream_retry_budget(),
         Some(provider.stream_max_retries())

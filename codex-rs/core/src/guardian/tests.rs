@@ -728,7 +728,7 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     let server = start_mock_server().await;
     let error_message =
         "Item 'rs_test' of type 'reasoning' was provided without its required following item.";
-    let _request_log = mount_response_once(
+    let request_log = mount_response_once(
         &server,
         wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
             "error": {
@@ -743,6 +743,7 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     let (mut session, mut turn, rx) = crate::codex::make_session_and_context_with_rx().await;
     let mut config = (*turn.config).clone();
     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.request_max_retries = Some(0);
     config.user_instructions = None;
     let config = Arc::new(config);
     let models_manager = Arc::new(test_support::models_manager_with_provider(
@@ -796,14 +797,15 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
         warnings
             .iter()
             .any(|message| message.contains(error_message)),
-        "warning should include the underlying responses api error"
+        "warning should include the underlying responses api error; warnings: {warnings:#?}; matched responses requests: {}",
+        request_log.requests().len()
     );
     assert!(
         denial_rationales
             .iter()
             .flatten()
             .any(|message| message.contains(error_message)),
-        "denial rationale should include the underlying responses api error"
+        "denial rationale should include the underlying responses api error; rationales: {denial_rationales:#?}"
     );
     assert!(
         denial_rationales.iter().flatten().all(|message| {

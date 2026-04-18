@@ -61,7 +61,10 @@ fn map_api_error_maps_usage_limit_limit_name_header() {
             .and_then(|snapshot| snapshot.limit_name.as_deref()),
         Some("codex_other")
     );
-    assert_eq!(usage_limit.status, Some(http::StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!(
+        usage_limit.status,
+        Some(http::StatusCode::TOO_MANY_REQUESTS)
+    );
 }
 
 #[test]
@@ -95,7 +98,10 @@ fn map_api_error_does_not_fallback_limit_name_to_limit_id() {
             .and_then(|snapshot| snapshot.limit_name.as_deref()),
         None
     );
-    assert_eq!(usage_limit.status, Some(http::StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!(
+        usage_limit.status,
+        Some(http::StatusCode::TOO_MANY_REQUESTS)
+    );
 }
 
 #[test]
@@ -162,7 +168,10 @@ fn map_responses_request_api_error_marks_http_errors_as_request_layer_retry_sour
     let CodexErr::UnexpectedStatus(err) = err else {
         panic!("expected CodexErr::UnexpectedStatus, got {err:?}");
     };
-    assert_eq!(err.retry_source, UnexpectedResponseRetrySource::RequestLayer);
+    assert_eq!(
+        err.retry_source,
+        UnexpectedResponseRetrySource::RequestLayer
+    );
 }
 
 #[test]
@@ -181,25 +190,41 @@ fn map_responses_stream_api_error_marks_http_errors_as_turn_retry_source() {
 }
 
 #[test]
-fn map_responses_stream_api_error_keeps_wrapped_429_usage_limit_as_turn_level_unexpected_status() {
+fn map_responses_stream_api_error_maps_wrapped_429_usage_limit_semantically() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-codex-primary-used-percent",
+        http::HeaderValue::from_static("100.0"),
+    );
+    headers.insert(
+        "x-codex-primary-window-minutes",
+        http::HeaderValue::from_static("15"),
+    );
     let err = map_responses_stream_api_error(ApiError::Transport(TransportError::Http {
         status: http::StatusCode::TOO_MANY_REQUESTS,
         url: Some("wss://chatgpt.com/backend-api/codex/responses".to_string()),
-        headers: None,
+        headers: Some(headers),
         body: Some(
-            r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}"#
+            r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"pro"}}"#
                 .to_string(),
         ),
     }));
 
-    let CodexErr::UnexpectedStatus(err) = err else {
-        panic!("expected CodexErr::UnexpectedStatus for turn-level 429, got {err:?}");
+    let CodexErr::UsageLimitReached(err) = err else {
+        panic!("expected CodexErr::UsageLimitReached for turn-level 429, got {err:?}");
     };
-    assert_eq!(err.retry_source, UnexpectedResponseRetrySource::Turn);
+    assert_eq!(err.status, Some(http::StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!(
+        err.rate_limits
+            .as_ref()
+            .and_then(|snapshot| snapshot.primary.as_ref())
+            .map(|window| window.used_percent),
+        Some(100.0)
+    );
 }
 
 #[test]
-fn map_responses_stream_api_error_keeps_wrapped_400_invalid_request_as_turn_level_unexpected_status() {
+fn map_responses_stream_api_error_maps_wrapped_400_invalid_request_semantically() {
     let err = map_responses_stream_api_error(ApiError::Transport(TransportError::Http {
         status: http::StatusCode::BAD_REQUEST,
         url: Some("wss://chatgpt.com/backend-api/codex/responses".to_string()),
@@ -210,10 +235,21 @@ fn map_responses_stream_api_error_keeps_wrapped_400_invalid_request_as_turn_leve
         ),
     }));
 
-    let CodexErr::UnexpectedStatus(err) = err else {
-        panic!("expected CodexErr::UnexpectedStatus for turn-level 400, got {err:?}");
+    let CodexErr::InvalidRequest(message) = err else {
+        panic!("expected CodexErr::InvalidRequest for turn-level 400, got {err:?}");
     };
-    assert_eq!(err.retry_source, UnexpectedResponseRetrySource::Turn);
+    assert!(message.contains("does not support image inputs"));
+}
+
+#[test]
+fn map_responses_stream_api_error_keeps_stream_level_server_overloaded_retryable() {
+    let err = map_responses_stream_api_error(ApiError::ServerOverloaded);
+
+    let CodexErr::Stream(message, delay) = err else {
+        panic!("expected CodexErr::Stream for stream-level overload, got {err:?}");
+    };
+    assert_eq!(message, CodexErr::ServerOverloaded.to_string());
+    assert_eq!(delay, None);
 }
 
 #[test]
@@ -221,6 +257,7 @@ fn core_auth_provider_reports_when_auth_header_will_attach() {
     let auth = CoreAuthProvider {
         token: Some("access-token".to_string()),
         account_id: None,
+        live_provider: None,
     };
 
     assert!(auth.auth_header_attached());

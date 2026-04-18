@@ -64,12 +64,15 @@ pub fn should_retry_request_error(
         } => {
             let effective_url = url.as_deref().unwrap_or(&request.url);
             if request_targets_responses_endpoint(effective_url) {
+                if status.as_u16() == 429 && body_is_usage_limit(body.as_deref()) {
+                    return false;
+                }
                 return responses_http_status_is_retryable(*status);
             }
 
             (policy.retry_on.retry_402
                 && status.as_u16() == 402
-                && payment_required_body_is_usage_limit(body.as_deref()))
+                && body_is_usage_limit(body.as_deref()))
                 || (policy.retry_on.retry_429 && status.as_u16() == 429)
                 || (policy.retry_on.retry_5xx && status.is_server_error())
         }
@@ -78,7 +81,7 @@ pub fn should_retry_request_error(
     }
 }
 
-fn payment_required_body_is_usage_limit(body: Option<&str>) -> bool {
+fn body_is_usage_limit(body: Option<&str>) -> bool {
     let Some(body) = body.map(str::trim).filter(|body| !body.is_empty()) else {
         return false;
     };
@@ -237,8 +240,12 @@ mod tests {
     fn responses_http_status_retry_includes_401() {
         assert!(responses_http_status_is_retryable(StatusCode::BAD_REQUEST));
         assert!(responses_http_status_is_retryable(StatusCode::FORBIDDEN));
-        assert!(responses_http_status_is_retryable(StatusCode::PAYMENT_REQUIRED));
-        assert!(responses_http_status_is_retryable(StatusCode::TOO_MANY_REQUESTS));
+        assert!(responses_http_status_is_retryable(
+            StatusCode::PAYMENT_REQUIRED
+        ));
+        assert!(responses_http_status_is_retryable(
+            StatusCode::TOO_MANY_REQUESTS
+        ));
         assert!(responses_http_status_is_retryable(StatusCode::UNAUTHORIZED));
     }
 
@@ -295,6 +302,35 @@ mod tests {
     }
 
     #[test]
+    fn responses_requests_do_not_retry_terminal_usage_limit_429() {
+        let policy = RetryPolicy {
+            max_attempts: 4,
+            base_delay: Duration::from_millis(200),
+            retry_on: RetryOn {
+                retry_402: true,
+                retry_429: true,
+                retry_5xx: true,
+                retry_transport: true,
+            },
+        };
+        let request = Request::new(
+            Method::POST,
+            "https://chatgpt.com/backend-api/codex/responses".to_string(),
+        );
+        let err = TransportError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: Some(request.url.clone()),
+            headers: None,
+            body: Some(
+                r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}"#
+                    .to_string(),
+            ),
+        };
+
+        assert!(!should_retry_request_error(&policy, &request, &err, 0));
+    }
+
+    #[test]
     fn non_responses_requests_keep_existing_402_whitelist_behavior() {
         let policy = RetryPolicy {
             max_attempts: 4,
@@ -306,7 +342,10 @@ mod tests {
                 retry_transport: false,
             },
         };
-        let request = Request::new(Method::GET, "https://chatgpt.com/backend-api/codex/models".to_string());
+        let request = Request::new(
+            Method::GET,
+            "https://chatgpt.com/backend-api/codex/models".to_string(),
+        );
         let usage_limit_err = TransportError::Http {
             status: StatusCode::PAYMENT_REQUIRED,
             url: Some(request.url.clone()),

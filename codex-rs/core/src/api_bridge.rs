@@ -15,9 +15,9 @@ use std::sync::RwLock as StdRwLock;
 
 use crate::auth::CodexAuth;
 use crate::error::CodexErr;
-use crate::error::UnexpectedResponseRetrySource;
 use crate::error::RetryLimitReachedError;
 use crate::error::UnexpectedResponseError;
+use crate::error::UnexpectedResponseRetrySource;
 use crate::error::UsageLimitReachedError;
 use crate::model_provider_info::ModelProviderInfo;
 
@@ -37,19 +37,35 @@ pub(crate) fn map_responses_stream_api_error(err: ApiError) -> CodexErr {
         body,
     }) = err
     {
-        return CodexErr::UnexpectedStatus(UnexpectedResponseError {
-            status,
-            body: body.unwrap_or_default(),
-            url,
-            cf_ray: extract_header(headers.as_ref(), CF_RAY_HEADER),
-            request_id: extract_request_id(headers.as_ref()),
-            identity_authorization_error: extract_header(
-                headers.as_ref(),
-                X_OPENAI_AUTHORIZATION_ERROR_HEADER,
-            ),
-            identity_error_code: extract_x_error_json_code(headers.as_ref()),
-            retry_source: UnexpectedResponseRetrySource::Turn,
-        });
+        let mapped = map_api_error_with_http_source(
+            ApiError::Transport(TransportError::Http {
+                status,
+                url: url.clone(),
+                headers: headers.clone(),
+                body: body.clone(),
+            }),
+            UnexpectedResponseRetrySource::Turn,
+        );
+        return match mapped {
+            CodexErr::UnexpectedStatus(_) => CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                status,
+                body: body.unwrap_or_default(),
+                url,
+                cf_ray: extract_header(headers.as_ref(), CF_RAY_HEADER),
+                request_id: extract_request_id(headers.as_ref()),
+                identity_authorization_error: extract_header(
+                    headers.as_ref(),
+                    X_OPENAI_AUTHORIZATION_ERROR_HEADER,
+                ),
+                identity_error_code: extract_x_error_json_code(headers.as_ref()),
+                retry_source: UnexpectedResponseRetrySource::Turn,
+            }),
+            other => other,
+        };
+    }
+
+    if matches!(err, ApiError::ServerOverloaded) {
+        return CodexErr::Stream(CodexErr::ServerOverloaded.to_string(), None);
     }
 
     map_api_error_with_http_source(err, UnexpectedResponseRetrySource::Turn)

@@ -32,6 +32,9 @@ pub(crate) struct SessionState {
     pub(crate) startup_prewarm: Option<SessionStartupPrewarmHandle>,
     pub(crate) active_connector_selection: HashSet<String>,
     pub(crate) pending_session_start_source: Option<codex_hooks::SessionStartSource>,
+    pub(crate) pending_first_turn_checklist_candidate_source:
+        Option<codex_hooks::SessionStartSource>,
+    pub(crate) pending_first_turn_checklist_source: Option<codex_hooks::SessionStartSource>,
     granted_permissions: Option<PermissionProfile>,
 }
 
@@ -50,6 +53,8 @@ impl SessionState {
             startup_prewarm: None,
             active_connector_selection: HashSet::new(),
             pending_session_start_source: None,
+            pending_first_turn_checklist_candidate_source: None,
+            pending_first_turn_checklist_source: None,
             granted_permissions: None,
         }
     }
@@ -204,6 +209,32 @@ impl SessionState {
         &mut self,
     ) -> Option<codex_hooks::SessionStartSource> {
         self.pending_session_start_source.take()
+    }
+
+    pub(crate) fn set_pending_first_turn_checklist_source(
+        &mut self,
+        value: Option<codex_hooks::SessionStartSource>,
+    ) {
+        self.pending_first_turn_checklist_source = value;
+    }
+
+    pub(crate) fn set_pending_first_turn_checklist_candidate_source(
+        &mut self,
+        value: Option<codex_hooks::SessionStartSource>,
+    ) {
+        self.pending_first_turn_checklist_candidate_source = value;
+    }
+
+    pub(crate) fn take_pending_first_turn_checklist_candidate_source(
+        &mut self,
+    ) -> Option<codex_hooks::SessionStartSource> {
+        self.pending_first_turn_checklist_candidate_source.take()
+    }
+
+    pub(crate) fn take_pending_first_turn_checklist_source(
+        &mut self,
+    ) -> Option<codex_hooks::SessionStartSource> {
+        self.pending_first_turn_checklist_source.take()
     }
 
     pub(crate) fn record_granted_permissions(&mut self, permissions: PermissionProfile) {

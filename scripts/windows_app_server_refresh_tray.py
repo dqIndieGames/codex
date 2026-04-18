@@ -4,13 +4,17 @@ import ctypes
 import datetime as dt
 import json
 import os
+import re
+import tempfile
 import threading
+import tomllib
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 from typing import Callable
 
 APP_SERVERS_DIR_NAME = "app_servers"
+CONFIG_TOML_FILE_NAME = "config.toml"
 DEFAULT_PIPE_TIMEOUT_MS = 2000
 HEARTBEAT_STALE_SECONDS = 15
 ERROR_BROKEN_PIPE = 109
@@ -30,6 +34,12 @@ REQUIRED_REGISTRATION_FIELDS = {
     "started_at",
     "heartbeat_at",
 }
+STANDARD_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+TABLE_HEADER_RE = re.compile(r"^\s*\[(?P<name>[^\[\]]+)\]\s*(?:#.*)?$")
+ARRAY_TABLE_HEADER_RE = re.compile(r"^\s*\[\[(?P<name>[^\[\]]+)\]\]\s*(?:#.*)?$")
+ROOT_PROVIDER_KEY_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<key>base_url|experimental_bearer_token)\s*="
+)
 
 
 def configure_win32_prototypes(kernel32_dll: Any, user32_dll: Any) -> None:
@@ -99,7 +109,7 @@ class TrayState:
         self.providers: list[dict[str, Any]] = []
         self.selected_provider_id: str | None = None
         self.current_model_provider_id: str | None = None
-        self.current_model_provider_writable = False
+        self.config_path: str | None = None
         self.catalog_error: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
@@ -108,7 +118,7 @@ class TrayState:
                 "providers": [provider.copy() for provider in self.providers],
                 "selected_provider_id": self.selected_provider_id,
                 "current_model_provider_id": self.current_model_provider_id,
-                "current_model_provider_writable": self.current_model_provider_writable,
+                "config_path": self.config_path,
                 "catalog_error": self.catalog_error,
             }
 
@@ -137,16 +147,22 @@ class TrayState:
             )
 
         current_model_provider_id = response.get("current_model_provider_id")
-        if not isinstance(current_model_provider_id, str):
+        if not isinstance(current_model_provider_id, str) or not current_model_provider_id:
             current_model_provider_id = None
+
+        config_path = response.get("config_path")
+        if not isinstance(config_path, str) or not config_path:
+            config_path = str(config_toml_path())
+
+        error_message = response.get("catalog_error")
+        if not isinstance(error_message, str) or not error_message:
+            error_message = None
 
         with self._lock:
             self.providers = normalized
             self.current_model_provider_id = current_model_provider_id
-            self.current_model_provider_writable = bool(
-                response.get("current_model_provider_writable")
-            )
-            self.catalog_error = None
+            self.config_path = config_path
+            self.catalog_error = error_message
             valid_ids = {provider["provider_id"] for provider in normalized}
             if self.selected_provider_id not in valid_ids:
                 if current_model_provider_id in valid_ids:
@@ -159,7 +175,7 @@ class TrayState:
             self.providers = []
             self.selected_provider_id = None
             self.current_model_provider_id = None
-            self.current_model_provider_writable = False
+            self.config_path = str(config_toml_path())
             self.catalog_error = error_message
 
     def set_selected_provider(self, provider_id: str) -> None:
@@ -174,6 +190,11 @@ def default_codex_home() -> Path:
     if configured:
         return Path(configured)
     return Path.home() / ".codex"
+
+
+def config_toml_path(codex_home: Path | None = None) -> Path:
+    root = codex_home or default_codex_home()
+    return root / CONFIG_TOML_FILE_NAME
 
 
 def app_servers_dir(codex_home: Path | None = None) -> Path:
@@ -378,6 +399,396 @@ def enumerate_live_registrations(
     return registrations
 
 
+def normalize_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def load_user_provider_catalog(codex_home: Path | None = None) -> dict[str, Any]:
+    config_path = config_toml_path(codex_home)
+    response = {
+        "config_path": str(config_path),
+        "providers": [],
+        "current_model_provider_id": None,
+        "catalog_error": None,
+    }
+
+    try:
+        raw_text = config_path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        response["catalog_error"] = "config.toml 不存在"
+        return response
+    except UnicodeDecodeError:
+        response["catalog_error"] = "config.toml 不是有效的 UTF-8"
+        return response
+    except OSError as exc:
+        response["catalog_error"] = f"读取 config.toml 失败: {exc}"
+        return response
+
+    try:
+        payload = tomllib.loads(raw_text)
+    except tomllib.TOMLDecodeError:
+        response["catalog_error"] = "config.toml 语法无效"
+        return response
+
+    model_providers = payload.get("model_providers")
+    if model_providers is None:
+        model_providers = {}
+    if not isinstance(model_providers, dict):
+        response["catalog_error"] = "config.toml 结构不支持自动写回"
+        return response
+
+    providers = []
+    for provider_id, provider in sorted(model_providers.items()):
+        if not isinstance(provider_id, str) or not provider_id:
+            continue
+        if not isinstance(provider, dict):
+            continue
+        display_name = provider.get("name")
+        providers.append(
+            {
+                "provider_id": provider_id,
+                "display_name": display_name
+                if isinstance(display_name, str) and display_name
+                else provider_id,
+                "has_base_url": normalize_string(provider.get("base_url")) is not None,
+                "has_experimental_bearer_token": normalize_string(
+                    provider.get("experimental_bearer_token")
+                )
+                is not None,
+            }
+        )
+    response["providers"] = providers
+
+    errors: list[str] = []
+    current_model_provider_id = normalize_string(payload.get("model_provider"))
+    if current_model_provider_id is None:
+        errors.append("顶层 model_provider 未配置")
+    else:
+        response["current_model_provider_id"] = current_model_provider_id
+        if current_model_provider_id not in model_providers:
+            errors.append("target provider 条目不存在")
+
+    if errors:
+        response["catalog_error"] = "；".join(errors)
+    return response
+
+
+def parse_config_for_apply(
+    codex_home: Path | None = None,
+) -> tuple[Path, str, dict[str, Any]]:
+    config_path = config_toml_path(codex_home)
+    try:
+        raw_text = config_path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError as exc:
+        raise RuntimeError("config.toml 不存在") from exc
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("config.toml 不是有效的 UTF-8") from exc
+    except OSError as exc:
+        raise RuntimeError(f"读取 config.toml 失败: {exc}") from exc
+
+    try:
+        payload = tomllib.loads(raw_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise RuntimeError("config.toml 语法无效") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("config.toml 结构不支持自动写回")
+
+    return config_path, raw_text, payload
+
+
+def toml_quote(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def detect_newline(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def table_header_name(line: str) -> str | None:
+    match = TABLE_HEADER_RE.match(line)
+    if match is None:
+        return None
+    return match.group("name").strip()
+
+
+def array_table_header_name(line: str) -> str | None:
+    match = ARRAY_TABLE_HEADER_RE.match(line)
+    if match is None:
+        return None
+    return match.group("name").strip()
+
+
+def find_provider_table_bounds(lines: list[str], provider_id: str) -> tuple[int, int]:
+    if STANDARD_PROVIDER_ID_RE.fullmatch(provider_id) is None:
+        raise RuntimeError("config.toml 结构不支持自动写回")
+
+    root_table_name = f"model_providers.{provider_id}"
+    root_indices: list[int] = []
+
+    for index, line in enumerate(lines):
+        array_name = array_table_header_name(line)
+        if array_name == root_table_name or (
+            isinstance(array_name, str) and array_name.startswith(f"{root_table_name}.")
+        ):
+            raise RuntimeError("config.toml 结构不支持自动写回")
+
+        header_name = table_header_name(line)
+        if isinstance(header_name, str) and header_name.startswith(f"{root_table_name}."):
+            raise RuntimeError("config.toml 结构不支持自动写回")
+        if header_name == root_table_name:
+            root_indices.append(index)
+
+    if len(root_indices) != 1:
+        raise RuntimeError("config.toml 结构不支持自动写回")
+
+    start_index = root_indices[0]
+    end_index = len(lines)
+    for index in range(start_index + 1, len(lines)):
+        if table_header_name(lines[index]) is not None or array_table_header_name(lines[index]) is not None:
+            end_index = index
+            break
+    return start_index, end_index
+
+
+def rewrite_provider_runtime_section(
+    raw_text: str,
+    provider_id: str,
+    base_url: str,
+    bearer_token: str,
+) -> str:
+    lines = raw_text.splitlines(keepends=True)
+    newline = detect_newline(raw_text)
+    start_index, end_index = find_provider_table_bounds(lines, provider_id)
+
+    prefix_lines = lines[: start_index + 1]
+    if prefix_lines and not prefix_lines[-1].endswith(("\n", "\r")):
+        prefix_lines[-1] = prefix_lines[-1] + newline
+
+    body_lines = lines[start_index + 1 : end_index]
+    indent = ""
+    seen_keys: set[str] = set()
+    updated_body_lines: list[str] = []
+
+    for line in body_lines:
+        match = ROOT_PROVIDER_KEY_RE.match(line)
+        if match is None:
+            updated_body_lines.append(line)
+            if not indent and line.strip() and not line.lstrip().startswith("#"):
+                indent_match = re.match(r"^\s*", line)
+                indent = indent_match.group(0) if indent_match is not None else ""
+            continue
+
+        current_indent = match.group("indent")
+        key = match.group("key")
+        seen_keys.add(key)
+        if not indent:
+            indent = current_indent
+        if key == "base_url":
+            updated_body_lines.append(
+                f"{current_indent}base_url = {toml_quote(base_url)}{newline}"
+            )
+        else:
+            updated_body_lines.append(
+                f"{current_indent}experimental_bearer_token = {toml_quote(bearer_token)}{newline}"
+            )
+
+    if "base_url" not in seen_keys:
+        updated_body_lines.append(f"{indent}base_url = {toml_quote(base_url)}{newline}")
+    if "experimental_bearer_token" not in seen_keys:
+        updated_body_lines.append(
+            f"{indent}experimental_bearer_token = {toml_quote(bearer_token)}{newline}"
+        )
+
+    updated_text = "".join(prefix_lines + updated_body_lines + lines[end_index:])
+    try:
+        tomllib.loads(updated_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise RuntimeError("config.toml 结构不支持自动写回") from exc
+    return updated_text
+
+
+def atomic_write_utf8(path: Path, content: str) -> None:
+    temp_fd, temp_name = tempfile.mkstemp(
+        prefix=f"{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        os.replace(temp_path, path)
+    except Exception:
+        remove_file_if_exists(temp_path)
+        raise
+
+
+def apply_selected_provider_to_config(
+    source_provider_id: str,
+    codex_home: Path | None = None,
+    registry_dir: Path | None = None,
+) -> dict[str, Any]:
+    source_provider_id = source_provider_id.strip()
+    if not source_provider_id:
+        return {
+            "ok": False,
+            "message": "source provider 不存在",
+            "source_provider_id": None,
+            "current_model_provider_id": None,
+            "config_path": str(config_toml_path(codex_home)),
+            "config_changed": False,
+            "refresh_summary": None,
+        }
+
+    try:
+        config_path, raw_text, payload = parse_config_for_apply(codex_home)
+    except RuntimeError as exc:
+        return {
+            "ok": False,
+            "message": str(exc),
+            "source_provider_id": source_provider_id,
+            "current_model_provider_id": None,
+            "config_path": str(config_toml_path(codex_home)),
+            "config_changed": False,
+            "refresh_summary": None,
+        }
+
+    model_providers = payload.get("model_providers")
+    if not isinstance(model_providers, dict):
+        return {
+            "ok": False,
+            "message": "config.toml 结构不支持自动写回",
+            "source_provider_id": source_provider_id,
+            "current_model_provider_id": None,
+            "config_path": str(config_path),
+            "config_changed": False,
+            "refresh_summary": None,
+        }
+
+    current_model_provider_id = normalize_string(payload.get("model_provider"))
+    if current_model_provider_id is None:
+        return {
+            "ok": False,
+            "message": "顶层 model_provider 未配置",
+            "source_provider_id": source_provider_id,
+            "current_model_provider_id": None,
+            "config_path": str(config_path),
+            "config_changed": False,
+            "refresh_summary": None,
+        }
+
+    source_provider = model_providers.get(source_provider_id)
+    if not isinstance(source_provider, dict):
+        return {
+            "ok": False,
+            "message": "source provider 不存在",
+            "source_provider_id": source_provider_id,
+            "current_model_provider_id": current_model_provider_id,
+            "config_path": str(config_path),
+            "config_changed": False,
+            "refresh_summary": None,
+        }
+
+    source_base_url = normalize_string(source_provider.get("base_url"))
+    if source_base_url is None:
+        return {
+            "ok": False,
+            "message": "source provider 缺少 base_url",
+            "source_provider_id": source_provider_id,
+            "current_model_provider_id": current_model_provider_id,
+            "config_path": str(config_path),
+            "config_changed": False,
+            "refresh_summary": None,
+        }
+
+    source_bearer_token = normalize_string(
+        source_provider.get("experimental_bearer_token")
+    )
+    if source_bearer_token is None:
+        return {
+            "ok": False,
+            "message": "source provider 缺少 experimental_bearer_token",
+            "source_provider_id": source_provider_id,
+            "current_model_provider_id": current_model_provider_id,
+            "config_path": str(config_path),
+            "config_changed": False,
+            "refresh_summary": None,
+        }
+
+    target_provider = model_providers.get(current_model_provider_id)
+    if target_provider is None:
+        return {
+            "ok": False,
+            "message": "target provider 条目不存在",
+            "source_provider_id": source_provider_id,
+            "current_model_provider_id": current_model_provider_id,
+            "config_path": str(config_path),
+            "config_changed": False,
+            "refresh_summary": None,
+        }
+    if not isinstance(target_provider, dict):
+        return {
+            "ok": False,
+            "message": "config.toml 结构不支持自动写回",
+            "source_provider_id": source_provider_id,
+            "current_model_provider_id": current_model_provider_id,
+            "config_path": str(config_path),
+            "config_changed": False,
+            "refresh_summary": None,
+        }
+
+    target_base_url = normalize_string(target_provider.get("base_url"))
+    target_bearer_token = normalize_string(target_provider.get("experimental_bearer_token"))
+    config_changed = not (
+        target_base_url == source_base_url and target_bearer_token == source_bearer_token
+    )
+
+    if config_changed:
+        try:
+            updated_text = rewrite_provider_runtime_section(
+                raw_text,
+                current_model_provider_id,
+                source_base_url,
+                source_bearer_token,
+            )
+            atomic_write_utf8(config_path, updated_text)
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "message": str(exc),
+                "source_provider_id": source_provider_id,
+                "current_model_provider_id": current_model_provider_id,
+                "config_path": str(config_path),
+                "config_changed": False,
+                "refresh_summary": None,
+            }
+        except OSError as exc:
+            return {
+                "ok": False,
+                "message": f"写入 config.toml 失败: {exc}",
+                "source_provider_id": source_provider_id,
+                "current_model_provider_id": current_model_provider_id,
+                "config_path": str(config_path),
+                "config_changed": False,
+                "refresh_summary": None,
+            }
+
+    refresh_summary = refresh_all_instances(registry_dir=registry_dir)
+    return {
+        "ok": True,
+        "message": None,
+        "source_provider_id": source_provider_id,
+        "current_model_provider_id": current_model_provider_id,
+        "config_path": str(config_path),
+        "config_changed": config_changed,
+        "refresh_summary": refresh_summary,
+    }
+
+
 def show_message(title: str, message: str, icon_flag: int = MB_ICONINFORMATION) -> None:
     if os.name != "nt":
         print(f"{title}\n{message}")
@@ -449,158 +860,6 @@ def short_error_text(message: str, limit: int = 96) -> str:
     return f"{collapsed[: limit - 3]}..."
 
 
-def normalized_catalog_signature(response: dict[str, Any]) -> tuple[Any, ...]:
-    current_model_provider_id = response.get("current_model_provider_id")
-    if not isinstance(current_model_provider_id, str) or not current_model_provider_id:
-        raise RuntimeError("provider catalog response is missing current_model_provider_id")
-
-    providers = response.get("providers")
-    if not isinstance(providers, list):
-        raise RuntimeError("provider catalog response has invalid providers payload")
-
-    normalized_providers: list[tuple[str, bool, bool]] = []
-    for provider in providers:
-        if not isinstance(provider, dict):
-            raise RuntimeError("provider catalog entry is not an object")
-        provider_id = provider.get("provider_id")
-        if not isinstance(provider_id, str) or not provider_id:
-            raise RuntimeError("provider catalog entry is missing provider_id")
-        normalized_providers.append(
-            (
-                provider_id,
-                bool(provider.get("has_base_url")),
-                bool(provider.get("has_experimental_bearer_token")),
-            )
-        )
-    normalized_providers.sort(key=lambda item: item[0])
-
-    return (
-        current_model_provider_id,
-        bool(response.get("current_model_provider_writable")),
-        tuple(normalized_providers),
-    )
-
-
-def fetch_provider_catalog(registry_dir: Path | None = None) -> dict[str, Any]:
-    registrations = enumerate_live_registrations(registry_dir=registry_dir)
-    if not registrations:
-        raise RuntimeError("no live app-server instances were found")
-
-    baseline_instance_id: str | None = None
-    baseline_response: dict[str, Any] | None = None
-    baseline_signature: tuple[Any, ...] | None = None
-    failed_instances: list[str] = []
-    mismatched_instances: list[str] = []
-
-    for registration in registrations:
-        instance_id = str(registration["instance_id"])
-        endpoint = str(registration["control_endpoint"])
-        try:
-            response = send_control_request(endpoint, {"op": "list_effective_providers"})
-            if response.get("ok") is not True:
-                raise RuntimeError(
-                    str(response.get("error") or "unknown provider catalog error")
-                )
-            signature = normalized_catalog_signature(response)
-        except Exception as exc:
-            failed_instances.append(f"{instance_id}: {exc}")
-            continue
-        if baseline_signature is None:
-            baseline_instance_id = instance_id
-            baseline_response = response
-            baseline_signature = signature
-            continue
-        if signature != baseline_signature:
-            mismatched_instances.append(instance_id)
-
-    if baseline_response is None:
-        raise RuntimeError(
-            "failed to load provider catalog from live app-server instances: "
-            + "; ".join(failed_instances)
-        )
-    if failed_instances:
-        raise RuntimeError(
-            "failed to load provider catalog from one or more live app-server instances: "
-            + "; ".join(failed_instances)
-        )
-    if mismatched_instances:
-        mismatched = ", ".join(mismatched_instances)
-        raise RuntimeError(
-            "provider catalog mismatch across live app-server instances; "
-            f"baseline={baseline_instance_id}, mismatched={mismatched}"
-        )
-    return baseline_response
-
-
-def apply_selected_provider_to_all_instances(
-    source_provider_id: str,
-    registry_dir: Path | None = None,
-) -> dict[str, Any]:
-    registrations = enumerate_live_registrations(registry_dir=registry_dir)
-    summary = {
-        "source_provider_id": source_provider_id,
-        "total_instances": len(registrations),
-        "success": 0,
-        "partial_failure": 0,
-        "config_write_failed": 0,
-        "provider_parse_failed": 0,
-        "provider_field_missing": 0,
-        "request_failed": 0,
-        "applied_threads": 0,
-        "queued_threads": 0,
-        "failed_threads": 0,
-        "details": [],
-    }
-
-    for registration in registrations:
-        instance_id = str(registration["instance_id"])
-        endpoint = str(registration["control_endpoint"])
-        try:
-            response = send_control_request(
-                endpoint,
-                {
-                    "op": "apply_provider_runtime_from_effective_provider",
-                    "source_provider_id": source_provider_id,
-                },
-            )
-            outcome = response.get("outcome")
-            applied_thread_ids = response.get("applied_thread_ids")
-            queued_thread_ids = response.get("queued_thread_ids")
-            failed_threads = response.get("failed_threads")
-            if isinstance(applied_thread_ids, list):
-                summary["applied_threads"] += len(applied_thread_ids)
-            if isinstance(queued_thread_ids, list):
-                summary["queued_threads"] += len(queued_thread_ids)
-            if isinstance(failed_threads, list):
-                summary["failed_threads"] += len(failed_threads)
-            if outcome == "success":
-                summary["success"] += 1
-            elif outcome == "partial_failure":
-                summary["partial_failure"] += 1
-            elif outcome == "config_write_failed":
-                summary["config_write_failed"] += 1
-            elif outcome == "provider_parse_failed":
-                summary["provider_parse_failed"] += 1
-            elif outcome == "provider_field_missing":
-                summary["provider_field_missing"] += 1
-            else:
-                summary["request_failed"] += 1
-            summary["details"].append(
-                {
-                    "instance_id": instance_id,
-                    "response": response,
-                }
-            )
-        except Exception as exc:
-            summary["request_failed"] += 1
-            summary["details"].append(
-                {
-                    "instance_id": instance_id,
-                    "error": str(exc),
-                }
-            )
-
-    return summary
 
 
 def format_refresh_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
@@ -612,59 +871,114 @@ def format_refresh_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
     failed_threads = int(summary.get("failed_threads", 0))
     title = "Codex App Server Refresh"
     icon_flag = MB_ICONINFORMATION if failed_instances == 0 else MB_ICONWARNING
-    message = (
-        "刷新全部 app-server 完成\n\n"
-        f"实例总数：{total_instances}\n"
-        f"成功实例：{success_instances}\n"
-        f"失败实例：{failed_instances}\n"
-        f"Applied 线程：{applied_threads}\n"
-        f"Queued 线程：{queued_threads}\n"
-        f"Failed 线程：{failed_threads}"
-    )
+    if total_instances == 0:
+        message = "未发现 live app-server 实例。\n\n实例总数: 0"
+    else:
+        message = (
+            "刷新全部 app-server 完成\n\n"
+            f"实例总数: {total_instances}\n"
+            f"成功实例: {success_instances}\n"
+            f"失败实例: {failed_instances}\n"
+            f"Applied 线程: {applied_threads}\n"
+            f"Queued 线程: {queued_threads}\n"
+            f"Failed 线程: {failed_threads}"
+        )
     return title, message, icon_flag
 
 
-def format_apply_summary(summary: dict[str, Any], state_snapshot: dict[str, Any]) -> tuple[str, str, int]:
-    total_instances = int(summary.get("total_instances", 0))
-    success = int(summary.get("success", 0))
-    partial_failure = int(summary.get("partial_failure", 0))
-    config_write_failed = int(summary.get("config_write_failed", 0))
-    provider_parse_failed = int(summary.get("provider_parse_failed", 0))
-    provider_field_missing = int(summary.get("provider_field_missing", 0))
-    request_failed = int(summary.get("request_failed", 0))
-    applied_threads = int(summary.get("applied_threads", 0))
-    queued_threads = int(summary.get("queued_threads", 0))
-    failed_threads = int(summary.get("failed_threads", 0))
-    source_provider_id = str(summary.get("source_provider_id") or "unknown")
-    current_model_provider_id = state_snapshot.get("current_model_provider_id") or "unknown"
-    catalog_error = state_snapshot.get("catalog_error")
+def format_apply_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
+    title = "Codex Provider Apply"
+    if not bool(summary.get("ok")):
+        message = str(summary.get("message") or "应用 provider 失败")
+        return title, message, MB_ICONERROR
 
-    if config_write_failed or provider_parse_failed or provider_field_missing or request_failed:
-        icon_flag = MB_ICONERROR
-    elif partial_failure:
-        icon_flag = MB_ICONWARNING
-    else:
+    refresh_summary = summary.get("refresh_summary") or {}
+    total_instances = int(refresh_summary.get("total_instances", 0))
+    success_instances = int(refresh_summary.get("success_instances", 0))
+    failed_instances = int(refresh_summary.get("failed_instances", 0))
+    applied_threads = int(refresh_summary.get("applied_threads", 0))
+    queued_threads = int(refresh_summary.get("queued_threads", 0))
+    failed_threads = int(refresh_summary.get("failed_threads", 0))
+    config_changed = bool(summary.get("config_changed"))
+    source_provider_id = str(summary.get("source_provider_id") or "unknown")
+    current_model_provider_id = str(
+        summary.get("current_model_provider_id") or "unknown"
+    )
+    config_path = str(summary.get("config_path") or config_toml_path())
+
+    if total_instances == 0:
+        headline = (
+            "已写入 target provider，两字段已更新，未刷新任何实例"
+            if config_changed
+            else "target provider 已是所选值，未修改配置，未刷新任何实例"
+        )
         icon_flag = MB_ICONINFORMATION
+    elif failed_instances == 0:
+        headline = (
+            "已写入 target provider，并已刷新实例"
+            if config_changed
+            else "target provider 已是所选值，未修改配置，已刷新实例"
+        )
+        icon_flag = MB_ICONINFORMATION
+    else:
+        headline = (
+            "已写入 target provider，但实例刷新部分失败"
+            if config_changed
+            else "target provider 已是所选值，未修改配置，但实例刷新部分失败"
+        )
+        icon_flag = MB_ICONWARNING
 
     lines = [
-        "应用所选 provider 到当前 model_provider 并刷新",
+        headline,
         "",
-        f"源 provider：{source_provider_id}",
-        f"目标 model_provider：{current_model_provider_id}",
-        f"实例总数：{total_instances}",
-        f"成功：{success}",
-        f"部分失败：{partial_failure}",
-        f"配置写入失败：{config_write_failed}",
-        f"provider 解析失败：{provider_parse_failed}",
-        f"字段缺失失败：{provider_field_missing}",
-        f"请求失败：{request_failed}",
-        f"Applied 线程：{applied_threads}",
-        f"Queued 线程：{queued_threads}",
-        f"Failed 线程：{failed_threads}",
+        f"source provider: {source_provider_id}",
+        f"target model_provider: {current_model_provider_id}",
+        f"配置文件: {config_path}",
     ]
-    if isinstance(catalog_error, str) and catalog_error:
-        lines.extend(["", f"provider 列表状态：{catalog_error}"])
-    return "Codex Provider Apply", "\n".join(lines), icon_flag
+    if total_instances > 0:
+        lines.extend(
+            [
+                "",
+                f"实例总数: {total_instances}",
+                f"成功实例: {success_instances}",
+                f"失败实例: {failed_instances}",
+                f"Applied 线程: {applied_threads}",
+                f"Queued 线程: {queued_threads}",
+                f"Failed 线程: {failed_threads}",
+            ]
+        )
+    if failed_instances > 0:
+        failed_detail_lines: list[str] = []
+        details = refresh_summary.get("details")
+        if isinstance(details, list):
+            for detail in details:
+                if not isinstance(detail, dict) or bool(detail.get("ok")):
+                    continue
+                instance_id = str(detail.get("instance_id") or "unknown")
+                error_text = detail.get("error")
+                if isinstance(error_text, str) and error_text:
+                    failed_detail_lines.append(
+                        f"- {instance_id}: {short_error_text(error_text, 120)}"
+                    )
+                    continue
+
+                response = detail.get("response")
+                if isinstance(response, dict):
+                    failed_threads_value = response.get("failed_threads")
+                    if isinstance(failed_threads_value, list) and failed_threads_value:
+                        failed_detail_lines.append(
+                            f"- {instance_id}: failed_threads={len(failed_threads_value)}"
+                        )
+                        continue
+                failed_detail_lines.append(f"- {instance_id}: refresh 返回失败")
+
+        if failed_detail_lines:
+            lines.extend(["", "刷新失败明细:"])
+            lines.extend(failed_detail_lines[:5])
+            remaining = len(failed_detail_lines) - 5
+            if remaining > 0:
+                lines.append(f"... 另有 {remaining} 个失败实例")
+    return title, "\n".join(lines), icon_flag
 
 
 def create_tray_icon():
@@ -673,10 +987,7 @@ def create_tray_icon():
     from PIL import ImageDraw
 
     state = TrayState()
-    try:
-        state.set_catalog(fetch_provider_catalog())
-    except Exception as exc:
-        state.clear_catalog(str(exc))
+    state.set_catalog(load_user_provider_catalog())
 
     def build_image() -> Image.Image:
         image = Image.new("RGBA", (64, 64), (245, 247, 250, 255))
@@ -692,10 +1003,7 @@ def create_tray_icon():
         icon.update_menu()
 
     def reload_catalog() -> None:
-        try:
-            state.set_catalog(fetch_provider_catalog())
-        except Exception as exc:
-            state.clear_catalog(str(exc))
+        state.set_catalog(load_user_provider_catalog())
 
     def handle_refresh(icon: pystray.Icon, _item: Any) -> None:
         def worker() -> None:
@@ -709,15 +1017,6 @@ def create_tray_icon():
 
     def handle_apply(icon: pystray.Icon, _item: Any) -> None:
         snapshot = state.snapshot()
-        catalog_error = snapshot.get("catalog_error")
-        if isinstance(catalog_error, str) and catalog_error:
-            show_message(
-                "Codex Provider Apply",
-                f"当前 provider 列表不可用：{catalog_error}",
-                MB_ICONERROR,
-            )
-            return
-
         selected_provider_id = snapshot.get("selected_provider_id")
         if not isinstance(selected_provider_id, str) or not selected_provider_id:
             show_message(
@@ -737,30 +1036,16 @@ def create_tray_icon():
         if not isinstance(selected_provider, dict):
             show_message(
                 "Codex Provider Apply",
-                "当前所选 provider 不存在于最新 provider 列表中，请先重新加载。",
-                MB_ICONERROR,
-            )
-            return
-        missing_fields: list[str] = []
-        if not bool(selected_provider.get("has_base_url")):
-            missing_fields.append("base_url")
-        if not bool(selected_provider.get("has_experimental_bearer_token")):
-            missing_fields.append("experimental_bearer_token")
-        if missing_fields:
-            show_message(
-                "Codex Provider Apply",
-                "当前所选 provider 缺少必需字段："
-                + ", ".join(missing_fields),
+                "当前所选 source provider 不存在，请先重新加载配置。",
                 MB_ICONERROR,
             )
             return
 
         def worker() -> None:
-            summary = apply_selected_provider_to_all_instances(selected_provider_id)
+            summary = apply_selected_provider_to_config(selected_provider_id)
             reload_catalog()
-            new_snapshot = state.snapshot()
             rebuild_menu(icon)
-            title, message, icon_flag = format_apply_summary(summary, new_snapshot)
+            title, message, icon_flag = format_apply_summary(summary)
             show_message(title, message, icon_flag)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -769,24 +1054,33 @@ def create_tray_icon():
         state.set_selected_provider(provider_id)
         rebuild_menu(icon)
 
+    def select_provider_action(provider_id: str) -> Callable[[pystray.Icon, Any], None]:
+        def action(tray_icon: pystray.Icon, _item: Any) -> None:
+            handle_select_provider(tray_icon, provider_id)
+
+        return action
+
+    def provider_checked(provider_id: str) -> Callable[[Any], bool]:
+        def checked(_item: Any) -> bool:
+            return state.snapshot()["selected_provider_id"] == provider_id
+
+        return checked
+
     def noop(_icon: pystray.Icon, _item: Any) -> None:
         return
 
     def build_provider_menu(icon: pystray.Icon) -> pystray.Menu:
         snapshot = state.snapshot()
-        catalog_error = snapshot.get("catalog_error")
-        if isinstance(catalog_error, str) and catalog_error:
-            return pystray.Menu(
-                pystray.MenuItem(
-                    f"provider 列表不可用：{short_error_text(catalog_error, 64)}",
-                    noop,
-                    enabled=False,
-                )
-            )
         providers = snapshot["providers"]
         if not providers:
+            catalog_error = snapshot.get("catalog_error")
+            label = (
+                f"config 错误: {short_error_text(catalog_error, 64)}"
+                if isinstance(catalog_error, str) and catalog_error
+                else "无可用 source provider"
+            )
             return pystray.Menu(
-                pystray.MenuItem("无可用 provider", noop, enabled=False)
+                pystray.MenuItem(label, noop, enabled=False)
             )
 
         items = []
@@ -797,13 +1091,17 @@ def create_tray_icon():
                 suffix_parts.append("base_url")
             if provider["has_experimental_bearer_token"]:
                 suffix_parts.append("token")
-            suffix = f" [{' + '.join(suffix_parts)}]" if suffix_parts else " [无两字段值]"
+            suffix = (
+                f" [{' + '.join(suffix_parts)}]"
+                if suffix_parts
+                else " [缺少两字段]"
+            )
             label = f"{provider['display_name']} ({provider_id}){suffix}"
             items.append(
                 pystray.MenuItem(
                     label,
-                    lambda tray_icon, _item, pid=provider_id: handle_select_provider(tray_icon, pid),
-                    checked=lambda item, pid=provider_id: state.snapshot()["selected_provider_id"] == pid,
+                    select_provider_action(provider_id),
+                    checked=provider_checked(provider_id),
                     radio=True,
                 )
             )
@@ -811,30 +1109,33 @@ def create_tray_icon():
 
     def build_menu(icon: pystray.Icon) -> pystray.Menu:
         snapshot = state.snapshot()
-        current_model_provider_id = snapshot.get("current_model_provider_id") or "未知"
-        writable_label = "可写" if snapshot.get("current_model_provider_writable") else "只读"
+        current_model_provider_id = snapshot.get("current_model_provider_id") or "未配置"
+        config_path = snapshot.get("config_path") or str(config_toml_path())
         catalog_error = snapshot.get("catalog_error")
         catalog_status_label = (
-            f"provider 列表错误: {short_error_text(catalog_error, 56)}"
+            f"config 错误: {short_error_text(catalog_error, 56)}"
             if isinstance(catalog_error, str) and catalog_error
-            else "provider 列表状态: 已同步"
+            else "source provider 列表: 已加载"
         )
-        can_apply = (
-            not (isinstance(catalog_error, str) and catalog_error)
-            and bool(snapshot.get("selected_provider_id"))
-            and bool(snapshot.get("providers"))
+        can_apply = bool(snapshot.get("selected_provider_id")) and bool(
+            snapshot.get("providers")
         )
         return pystray.Menu(
             pystray.MenuItem("刷新全部 app-server", handle_refresh),
             pystray.MenuItem(
-                f"当前 model_provider: {current_model_provider_id} ({writable_label})",
+                f"当前 target model_provider: {current_model_provider_id}",
+                noop,
+                enabled=False,
+            ),
+            pystray.MenuItem(
+                f"配置文件: {config_path}",
                 noop,
                 enabled=False,
             ),
             pystray.MenuItem(catalog_status_label, noop, enabled=False),
             pystray.MenuItem("选择 source provider", build_provider_menu(icon)),
             pystray.MenuItem(
-                "应用所选 provider 到当前 model_provider 并刷新",
+                "应用所选 provider 到当前 target 并刷新",
                 handle_apply,
                 enabled=can_apply,
             ),
@@ -847,7 +1148,7 @@ def create_tray_icon():
     icon = pystray.Icon(
         "codex-app-server-refresh",
         build_image(),
-        "Codex App Server Refresh",
+        "Codex Provider Refresh",
     )
     icon.menu = build_menu(icon)
     return icon

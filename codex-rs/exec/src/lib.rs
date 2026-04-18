@@ -1903,8 +1903,7 @@ mod tests {
             .expect("build default config");
         config.model_provider_id = "test-provider".to_string();
 
-        let params =
-            thread_resume_params_from_config(&config, "thread-12345678".to_string());
+        let params = thread_resume_params_from_config(&config, "thread-12345678".to_string());
 
         assert_eq!(params.thread_id, "thread-12345678");
         assert_eq!(params.model_provider, Some("test-provider".to_string()));

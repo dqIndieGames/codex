@@ -398,7 +398,9 @@ impl ThreadManager {
         }
     }
 
-    pub async fn refresh_all_loaded_provider_runtime(&self) -> ProviderRuntimeRefreshAllLoadedReport {
+    pub async fn refresh_all_loaded_provider_runtime(
+        &self,
+    ) -> ProviderRuntimeRefreshAllLoadedReport {
         let threads = self
             .state
             .threads
@@ -460,6 +462,7 @@ impl ThreadManager {
     ) -> CodexResult<NewThread> {
         Box::pin(self.start_thread_with_tools_and_service_name(
             config,
+            InitialHistory::New,
             dynamic_tools,
             persist_extended_history,
             /*metrics_service_name*/ None,
@@ -471,6 +474,7 @@ impl ThreadManager {
     pub async fn start_thread_with_tools_and_service_name(
         &self,
         config: Config,
+        initial_history: InitialHistory,
         dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
         persist_extended_history: bool,
         metrics_service_name: Option<String>,
@@ -478,7 +482,7 @@ impl ThreadManager {
     ) -> CodexResult<NewThread> {
         Box::pin(self.state.spawn_thread(
             config,
-            InitialHistory::New,
+            initial_history,
             Arc::clone(&self.state.auth_manager),
             self.agent_control(),
             dynamic_tools,
@@ -654,6 +658,7 @@ impl ThreadManager {
             ForkSnapshot::Interrupted => {
                 let history = match history {
                     InitialHistory::New => InitialHistory::New,
+                    InitialHistory::Cleared => InitialHistory::Cleared,
                     InitialHistory::Forked(history) => InitialHistory::Forked(history),
                     InitialHistory::Resumed(resumed) => InitialHistory::Forked(resumed.history),
                 };
@@ -1053,7 +1058,7 @@ fn append_interrupted_boundary(history: InitialHistory, turn_id: Option<String>)
     }));
 
     match history {
-        InitialHistory::New => InitialHistory::Forked(vec![
+        InitialHistory::New | InitialHistory::Cleared => InitialHistory::Forked(vec![
             RolloutItem::ResponseItem(interrupted_turn_history_marker()),
             aborted_event,
         ]),

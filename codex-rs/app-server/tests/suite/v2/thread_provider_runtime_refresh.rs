@@ -32,11 +32,7 @@ fn write_provider_refresh_config(
     token: &str,
 ) -> std::io::Result<()> {
     write_provider_refresh_config_with_agent_config(
-        codex_home,
-        server_uri,
-        base_url,
-        token,
-        /*relative_agent_config_file*/ None,
+        codex_home, server_uri, base_url, token, /*relative_agent_config_file*/ None,
     )
 }
 
@@ -66,6 +62,10 @@ sandbox_mode = "read-only"
 model_provider = "mock_provider"
 chatgpt_base_url = "{server_uri}"
 
+[features]
+plugins = false
+default_mode_request_user_input = true
+
 [model_providers.mock_provider]
 name = "Mock provider for test"
 base_url = "{base_url}"
@@ -86,10 +86,7 @@ config_file = "{relative_agent_config_file}"
         ));
     }
 
-    std::fs::write(
-        codex_home.join("config.toml"),
-        config_toml,
-    )
+    std::fs::write(codex_home.join("config.toml"), config_toml)
 }
 
 async fn init_mcp(codex_home: &Path) -> Result<McpProcess> {
@@ -145,7 +142,7 @@ async fn refresh_thread_error(mcp: &mut McpProcess, thread_id: &str) -> Result<J
         .await?;
     let error: JSONRPCError = timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
     )
     .await??;
     Ok(error)
@@ -198,7 +195,7 @@ async fn thread_provider_runtime_refresh_returns_applied_for_idle_thread() -> Re
 }
 
 #[tokio::test]
-async fn thread_provider_runtime_refresh_returns_queued_for_active_thread() -> Result<()> {
+async fn thread_provider_runtime_refresh_returns_applied_for_active_thread() -> Result<()> {
     let responses = vec![create_request_user_input_sse_response("call-1")?];
     let server = create_mock_responses_server_sequence(responses).await;
     let codex_home = TempDir::new()?;
@@ -229,7 +226,11 @@ async fn thread_provider_runtime_refresh_returns_queued_for_active_thread() -> R
     .await??;
     let TurnStartResponse { turn, .. } = to_response(turn_response)?;
 
-    let request = timeout(DEFAULT_READ_TIMEOUT, mcp.read_stream_until_request_message()).await??;
+    let request = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_request_message(),
+    )
+    .await??;
     let ServerRequest::ToolRequestUserInput { params, .. } = request else {
         panic!("expected ToolRequestUserInput request");
     };
@@ -245,13 +246,13 @@ async fn thread_provider_runtime_refresh_returns_queued_for_active_thread() -> R
 
     let response = refresh_thread(&mut mcp, &thread_id).await?;
     assert_eq!(response.thread_id, thread_id);
-    assert_eq!(response.status, ThreadProviderRuntimeRefreshStatus::Queued);
+    assert_eq!(response.status, ThreadProviderRuntimeRefreshStatus::Applied);
     Ok(())
 }
 
 #[tokio::test]
-async fn thread_provider_runtime_refresh_returns_invalid_request_when_provider_is_missing() -> Result<()>
-{
+async fn thread_provider_runtime_refresh_returns_invalid_request_when_provider_is_missing()
+-> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     write_provider_refresh_config(
@@ -275,13 +276,18 @@ model_provider = "mock_provider"
 
     let error = refresh_thread_error(&mut mcp, &thread_id).await?;
     assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(error.error.message.contains("failed to refresh provider runtime"));
+    assert!(
+        error
+            .error
+            .message
+            .contains("failed to refresh provider runtime")
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn thread_provider_runtime_refresh_returns_invalid_request_for_invalid_user_config() -> Result<()>
-{
+async fn thread_provider_runtime_refresh_returns_invalid_request_for_invalid_user_config()
+-> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     write_provider_refresh_config(
@@ -298,12 +304,17 @@ async fn thread_provider_runtime_refresh_returns_invalid_request_for_invalid_use
 
     let error = refresh_thread_error(&mut mcp, &thread_id).await?;
     assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert!(error.error.message.contains("failed to refresh provider runtime"));
+    assert!(
+        error
+            .error
+            .message
+            .contains("failed to refresh provider runtime")
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn thread_provider_runtime_refresh_all_loaded_reports_mixed_statuses() -> Result<()> {
+async fn thread_provider_runtime_refresh_all_loaded_reports_applied_statuses() -> Result<()> {
     let responses = vec![create_request_user_input_sse_response("call-1")?];
     let server = create_mock_responses_server_sequence(responses).await;
     let codex_home = TempDir::new()?;
@@ -333,7 +344,11 @@ async fn thread_provider_runtime_refresh_all_loaded_reports_mixed_statuses() -> 
         mcp.read_stream_until_response_message(RequestId::Integer(turn_request_id)),
     )
     .await??;
-    let request = timeout(DEFAULT_READ_TIMEOUT, mcp.read_stream_until_request_message()).await??;
+    let request = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_request_message(),
+    )
+    .await??;
     let ServerRequest::ToolRequestUserInput { .. } = request else {
         panic!("expected ToolRequestUserInput request");
     };
@@ -348,14 +363,15 @@ async fn thread_provider_runtime_refresh_all_loaded_reports_mixed_statuses() -> 
     let response = refresh_all_loaded(&mut mcp).await?;
     assert_eq!(response.total_threads, 2);
     assert!(response.applied_thread_ids.contains(&idle_thread_id));
-    assert!(response.queued_thread_ids.contains(&active_thread_id));
+    assert!(response.applied_thread_ids.contains(&active_thread_id));
+    assert!(response.queued_thread_ids.is_empty());
     assert!(response.failed_threads.is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn thread_provider_runtime_refresh_all_loaded_keeps_failed_threads_empty_for_relative_agent_config_file() -> Result<()>
-{
+async fn thread_provider_runtime_refresh_all_loaded_keeps_failed_threads_empty_for_relative_agent_config_file()
+-> Result<()> {
     let responses = vec![create_request_user_input_sse_response("call-1")?];
     let server = create_mock_responses_server_sequence(responses).await;
     let codex_home = TempDir::new()?;
@@ -386,7 +402,11 @@ async fn thread_provider_runtime_refresh_all_loaded_keeps_failed_threads_empty_f
         mcp.read_stream_until_response_message(RequestId::Integer(turn_request_id)),
     )
     .await??;
-    let request = timeout(DEFAULT_READ_TIMEOUT, mcp.read_stream_until_request_message()).await??;
+    let request = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_request_message(),
+    )
+    .await??;
     let ServerRequest::ToolRequestUserInput { .. } = request else {
         panic!("expected ToolRequestUserInput request");
     };
@@ -402,14 +422,15 @@ async fn thread_provider_runtime_refresh_all_loaded_keeps_failed_threads_empty_f
     let response = refresh_all_loaded(&mut mcp).await?;
     assert_eq!(response.total_threads, 2);
     assert!(response.applied_thread_ids.contains(&idle_thread_id));
-    assert!(response.queued_thread_ids.contains(&active_thread_id));
+    assert!(response.applied_thread_ids.contains(&active_thread_id));
+    assert!(response.queued_thread_ids.is_empty());
     assert!(response.failed_threads.is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn thread_provider_runtime_refresh_all_loaded_treats_zero_loaded_threads_as_success() -> Result<()>
-{
+async fn thread_provider_runtime_refresh_all_loaded_treats_zero_loaded_threads_as_success()
+-> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     write_provider_refresh_config(

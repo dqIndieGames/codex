@@ -2256,6 +2256,7 @@ pub struct ResumedHistory {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub enum InitialHistory {
     New,
+    Cleared,
     Resumed(ResumedHistory),
     Forked(Vec<RolloutItem>),
 }
@@ -2263,7 +2264,7 @@ pub enum InitialHistory {
 impl InitialHistory {
     pub fn forked_from_id(&self) -> Option<ThreadId> {
         match self {
-            InitialHistory::New => None,
+            InitialHistory::New | InitialHistory::Cleared => None,
             InitialHistory::Resumed(resumed) => {
                 resumed.history.iter().find_map(|item| match item {
                     RolloutItem::SessionMeta(meta_line) => meta_line.meta.forked_from_id,
@@ -2279,7 +2280,7 @@ impl InitialHistory {
 
     pub fn session_cwd(&self) -> Option<PathBuf> {
         match self {
-            InitialHistory::New => None,
+            InitialHistory::New | InitialHistory::Cleared => None,
             InitialHistory::Resumed(resumed) => session_cwd_from_items(&resumed.history),
             InitialHistory::Forked(items) => session_cwd_from_items(items),
         }
@@ -2287,7 +2288,7 @@ impl InitialHistory {
 
     pub fn get_rollout_items(&self) -> Vec<RolloutItem> {
         match self {
-            InitialHistory::New => Vec::new(),
+            InitialHistory::New | InitialHistory::Cleared => Vec::new(),
             InitialHistory::Resumed(resumed) => resumed.history.clone(),
             InitialHistory::Forked(items) => items.clone(),
         }
@@ -2295,7 +2296,7 @@ impl InitialHistory {
 
     pub fn get_event_msgs(&self) -> Option<Vec<EventMsg>> {
         match self {
-            InitialHistory::New => None,
+            InitialHistory::New | InitialHistory::Cleared => None,
             InitialHistory::Resumed(resumed) => Some(
                 resumed
                     .history
@@ -2321,7 +2322,7 @@ impl InitialHistory {
     pub fn get_base_instructions(&self) -> Option<BaseInstructions> {
         // TODO: SessionMeta should (in theory) always be first in the history, so we can probably only check the first item?
         match self {
-            InitialHistory::New => None,
+            InitialHistory::New | InitialHistory::Cleared => None,
             InitialHistory::Resumed(resumed) => {
                 resumed.history.iter().find_map(|item| match item {
                     RolloutItem::SessionMeta(meta_line) => meta_line.meta.base_instructions.clone(),
@@ -2337,7 +2338,7 @@ impl InitialHistory {
 
     pub fn get_dynamic_tools(&self) -> Option<Vec<DynamicToolSpec>> {
         match self {
-            InitialHistory::New => None,
+            InitialHistory::New | InitialHistory::Cleared => None,
             InitialHistory::Resumed(resumed) => {
                 resumed.history.iter().find_map(|item| match item {
                     RolloutItem::SessionMeta(meta_line) => meta_line.meta.dynamic_tools.clone(),

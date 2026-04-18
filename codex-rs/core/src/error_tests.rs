@@ -535,7 +535,10 @@ fn turn_level_unexpected_status_retries_including_401() {
             retry_source: UnexpectedResponseRetrySource::Turn,
         });
 
-        assert!(err.is_retryable(), "turn-level status {status} should retry");
+        assert!(
+            err.is_retryable(),
+            "turn-level status {status} should retry"
+        );
     }
 }
 

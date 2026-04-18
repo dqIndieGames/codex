@@ -2,12 +2,12 @@ use super::AuthRequestTelemetryContext;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::RequestRouteTelemetry;
-use super::UnauthorizedRecoveryExecution;
+use super::WebsocketSession;
 use super::format_retry_transport_error_details;
 use super::should_emit_websocket_connect_or_request_log_trace;
 use super::should_emit_websocket_event_log_trace;
-use super::unauthorized_transport_from_codex_error;
 use crate::client_common::Prompt;
+use codex_api::TransportError;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
@@ -16,7 +16,6 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_client::TransportError;
 use http::StatusCode;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -233,10 +232,11 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
     let auth_context = AuthRequestTelemetryContext::new(
         Some(crate::auth::AuthMode::Chatgpt),
         &crate::api_bridge::CoreAuthProvider::for_test(Some("access-token"), Some("workspace-123")),
-        PendingUnauthorizedRetry::from_recovery(UnauthorizedRecoveryExecution {
-            mode: "managed",
-            phase: "refresh_token",
-        }),
+        PendingUnauthorizedRetry {
+            retry_after_unauthorized: true,
+            recovery_mode: Some("managed"),
+            recovery_phase: Some("refresh_token"),
+        },
     );
 
     assert_eq!(auth_context.auth_mode, Some("Chatgpt"));
@@ -267,7 +267,7 @@ fn refresh_provider_runtime_updates_only_runtime_fields_and_clears_cached_websoc
         .state
         .disable_websockets
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    let mut cached_websocket_session = WebsocketSession::default();
+    let cached_websocket_session = WebsocketSession::default();
     cached_websocket_session.set_connection_reused(true);
     client.store_cached_websocket_session(cached_websocket_session);
 
@@ -311,33 +311,6 @@ fn refresh_provider_runtime_updates_only_runtime_fields_and_clears_cached_websoc
 }
 
 #[test]
-fn unauthorized_transport_from_codex_error_rebuilds_http_401() {
-    let err = crate::error::CodexErr::UnexpectedStatus(crate::error::UnexpectedResponseError {
-        status: StatusCode::UNAUTHORIZED,
-        body: r#"{"detail":"Unauthorized"}"#.to_string(),
-        url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
-        cf_ray: None,
-        request_id: Some("req-401".to_string()),
-        identity_authorization_error: Some("missing_authorization_header".to_string()),
-        identity_error_code: Some("token_expired".to_string()),
-        retry_source: crate::error::UnexpectedResponseRetrySource::Turn,
-    });
-
-    let Some(TransportError::Http { status, url, body, .. }) =
-        unauthorized_transport_from_codex_error(&err)
-    else {
-        panic!("expected unauthorized transport error");
-    };
-
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        url.as_deref(),
-        Some("https://chatgpt.com/backend-api/codex/responses")
-    );
-    assert_eq!(body.as_deref(), Some(r#"{"detail":"Unauthorized"}"#));
-}
-
-#[test]
 fn retry_transport_error_details_reuse_semantic_usage_limit_formatter_when_available() {
     let error = TransportError::Http {
         status: StatusCode::TOO_MANY_REQUESTS,
@@ -376,7 +349,6 @@ fn websocket_connect_log_trace_is_suppressed_for_responses_retry_chain() {
         RequestRouteTelemetry::for_endpoint("/responses"),
         /*retry_chain_active*/ true,
         /*error*/ None,
-        /*can_retry_after_unauthorized*/ false,
     ));
 }
 
@@ -393,7 +365,6 @@ fn websocket_request_log_trace_is_retained_for_non_responses_endpoint() {
         RequestRouteTelemetry::for_endpoint("/responses/compact"),
         /*retry_chain_active*/ false,
         Some(&error),
-        /*can_retry_after_unauthorized*/ false,
     ));
 }
 
@@ -410,7 +381,6 @@ fn websocket_request_log_trace_is_suppressed_for_retryable_responses_failure() {
         RequestRouteTelemetry::for_endpoint("/responses"),
         /*retry_chain_active*/ false,
         Some(&error),
-        /*can_retry_after_unauthorized*/ false,
     ));
 }
 
@@ -427,7 +397,6 @@ fn websocket_request_log_trace_is_suppressed_for_retryable_responses_unauthorize
         RequestRouteTelemetry::for_endpoint("/responses"),
         /*retry_chain_active*/ false,
         Some(&error),
-        /*can_retry_after_unauthorized*/ false,
     ));
 }
 
@@ -449,7 +418,6 @@ fn websocket_event_log_trace_is_suppressed_for_retryable_response_failed() {
     assert!(!should_emit_websocket_event_log_trace(
         RequestRouteTelemetry::for_endpoint("/responses"),
         &result,
-        /*can_retry_after_unauthorized*/ false,
     ));
 }
 
@@ -471,7 +439,6 @@ fn websocket_event_log_trace_is_retained_for_terminal_response_failed() {
     assert!(should_emit_websocket_event_log_trace(
         RequestRouteTelemetry::for_endpoint("/responses"),
         &result,
-        /*can_retry_after_unauthorized*/ false,
     ));
 }
 
@@ -495,6 +462,5 @@ fn websocket_event_log_trace_is_suppressed_for_retryable_responses_unauthorized(
     assert!(!should_emit_websocket_event_log_trace(
         RequestRouteTelemetry::for_endpoint("/responses"),
         &result,
-        /*can_retry_after_unauthorized*/ false,
     ));
 }

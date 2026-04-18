@@ -201,6 +201,9 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::unbounded_channel;
 use toml::Value as TomlValue;
 
+const LEGACY_LOCAL1_CHECKLIST_HEADER: &str = "local1 定制功能已启用";
+const LEGACY_LOCAL1_TRAY_OVERVIEW: &str = "Provider refresh/retry 与 Windows tray 联动";
+
 async fn test_config() -> Config {
     // Use base defaults to avoid depending on host state.
     let codex_home = std::env::temp_dir();
@@ -385,14 +388,13 @@ async fn resumed_initial_messages_render_history() {
 }
 
 #[tokio::test]
-async fn new_thread_first_user_message_inserts_local1_checklist_once() {
+async fn new_thread_first_user_message_does_not_insert_legacy_local1_history_cell() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.handle_codex_event(Event {
         id: "cfg".into(),
         msg: EventMsg::SessionConfigured(test_session_configured_event(
-            /*history_entry_count*/ 0,
-            /*initial_messages*/ None,
+            /*history_entry_count*/ 0, /*initial_messages*/ None,
         )),
     });
 
@@ -402,10 +404,8 @@ async fn new_thread_first_user_message_inserts_local1_checklist_once() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!session_rendered.contains("To get started"));
-    assert!(!session_rendered.contains(
-        history_cell::LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW
-    ));
-    assert!(!session_rendered.contains(history_cell::LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
+    assert!(!session_rendered.contains(LEGACY_LOCAL1_CHECKLIST_HEADER));
+    assert!(!session_rendered.contains(LEGACY_LOCAL1_TRAY_OVERVIEW));
 
     chat.queue_user_message("hello local1".into());
     let _submit = next_submit_op(&mut op_rx);
@@ -415,32 +415,9 @@ async fn new_thread_first_user_message_inserts_local1_checklist_once() {
         .map(|lines| lines_to_single_string(lines))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(first_turn_rendered.contains("local1 定制功能已启用"));
-    assert!(first_turn_rendered.contains(
-        history_cell::LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW
-    ));
-    assert!(first_turn_rendered.contains("统一自动重试，包含 `401`"));
-    assert_eq!(first_turn_rendered.matches("统一自动重试，包含 `401`").count(), 1);
-    assert!(!first_turn_rendered.contains("非 `401`"));
-    assert!(!first_turn_rendered.contains("401 follow-up"));
-    assert!(!first_turn_rendered.contains("unauthorized recovery"));
-    assert!(first_turn_rendered.contains(history_cell::LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
+    assert!(!first_turn_rendered.contains(LEGACY_LOCAL1_CHECKLIST_HEADER));
+    assert!(!first_turn_rendered.contains(LEGACY_LOCAL1_TRAY_OVERVIEW));
     assert!(first_turn_rendered.contains("hello local1"));
-
-    chat.queue_user_message("second turn".into());
-    let _submit = next_submit_op(&mut op_rx);
-
-    let second_turn_rendered = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(!second_turn_rendered.contains("local1 定制功能已启用"));
-    assert!(!second_turn_rendered.contains(
-        history_cell::LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW
-    ));
-    assert!(!second_turn_rendered.contains(history_cell::LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
-    assert!(second_turn_rendered.contains("second turn"));
 }
 
 #[tokio::test]
@@ -465,10 +442,8 @@ async fn resumed_session_does_not_insert_local1_checklist_again() {
         .map(|lines| lines_to_single_string(lines))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!resumed_rendered.contains(
-        history_cell::LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW
-    ));
-    assert!(!resumed_rendered.contains(history_cell::LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
+    assert!(!resumed_rendered.contains(LEGACY_LOCAL1_CHECKLIST_HEADER));
+    assert!(!resumed_rendered.contains(LEGACY_LOCAL1_TRAY_OVERVIEW));
 
     chat.queue_user_message("follow up".into());
     let _submit = next_submit_op(&mut op_rx);
@@ -478,11 +453,8 @@ async fn resumed_session_does_not_insert_local1_checklist_again() {
         .map(|lines| lines_to_single_string(lines))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!follow_up_rendered.contains("local1 定制功能已启用"));
-    assert!(!follow_up_rendered.contains(
-        history_cell::LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW
-    ));
-    assert!(!follow_up_rendered.contains(history_cell::LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
+    assert!(!follow_up_rendered.contains(LEGACY_LOCAL1_CHECKLIST_HEADER));
+    assert!(!follow_up_rendered.contains(LEGACY_LOCAL1_TRAY_OVERVIEW));
     assert!(follow_up_rendered.contains("follow up"));
 }
 
@@ -2295,7 +2267,6 @@ async fn make_chatwidget_manual(
         queued_message_edit_binding: crate::key_hint::alt(KeyCode::Up),
         suppress_session_configured_redraw: false,
         suppress_initial_user_message_submit: false,
-        pending_local1_first_turn_checklist: false,
         pending_notification: None,
         quit_shortcut_expires_at: None,
         quit_shortcut_key: None,
@@ -10289,6 +10260,16 @@ async fn bang_shell_command_submits_run_user_shell_command_in_app_server_tui() {
         Ok(Op::RunUserShellCommand { command }) => assert_eq!(command, "echo hi"),
         other => panic!("expected RunUserShellCommand op, got {other:?}"),
     }
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected a single history cell for the submitted shell command"
+    );
+    let blob = lines_to_single_string(cells.first().unwrap());
+    assert!(blob.contains("echo hi"));
+    assert!(!blob.contains(LEGACY_LOCAL1_CHECKLIST_HEADER));
+    assert!(!blob.contains(LEGACY_LOCAL1_TRAY_OVERVIEW));
     assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
 }
 
@@ -13028,7 +13009,7 @@ async fn stream_error_429_retry_updates_status_indicator() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.bottom_pane.set_task_running(/*running*/ true);
     let msg = "429 retry 1";
-    let details = "unexpected status 429 Too Many Requests: rate limit reached, url: https://chatgpt.com/backend-api/codex/responses, request id: req-429";
+    let details = "Unexpected status 429 Too Many Requests: rate limit reached, url: https://chatgpt.com/backend-api/codex/responses, request id: req-429";
     chat.handle_codex_event(Event {
         id: "sub-429".into(),
         msg: EventMsg::StreamError(StreamErrorEvent {

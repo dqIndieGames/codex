@@ -28,12 +28,7 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
-use wiremock::Mock;
 use wiremock::MockServer;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::header_regex;
-use wiremock::matchers::method;
-use wiremock::matchers::path;
 
 fn remote_model(slug: &str, display: &str, priority: i32) -> ModelInfo {
     remote_model_with_visibility(slug, display, priority, "list")
@@ -145,10 +140,11 @@ mv tokens.next tokens.txt
             let script_path = tempdir.path().join("print-token.ps1");
             std::fs::write(
                 &script_path,
-                r#"$lines = Get-Content -Path tokens.txt
+                r#"$lines = @(Get-Content -Path tokens.txt)
 if ($lines.Count -eq 0) { exit 1 }
 Write-Output $lines[0]
-$lines | Select-Object -Skip 1 | Set-Content -Path tokens.txt
+$remaining = @($lines | Select-Object -Skip 1)
+$remaining | Set-Content -Path tokens.txt
 "#,
             )?;
             (
@@ -174,7 +170,7 @@ $lines | Select-Object -Skip 1 | Set-Content -Path tokens.txt
         ModelProviderAuthInfo {
             command: self.command.clone(),
             args: self.args.clone(),
-            timeout_ms: non_zero_u64(/*value*/ 1_000),
+            timeout_ms: non_zero_u64(/*value*/ 10_000),
             refresh_interval_ms: non_zero_u64(/*value*/ 60_000),
             cwd: match codex_utils_absolute_path::AbsolutePathBuf::try_from(self.tempdir.path()) {
                 Ok(cwd) => cwd,
@@ -418,20 +414,14 @@ async fn refresh_available_models_uses_provider_auth_token() {
         "Provider",
         /*priority*/ 0,
     )];
-
-    Mock::given(method("GET"))
-        .and(path("/models"))
-        .and(header_regex("Authorization", "Bearer provider-token"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/json")
-                .set_body_json(ModelsResponse {
-                    models: remote_models.clone(),
-                }),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
+    let client_version = crate::models_manager::client_version_to_whole();
+    let models_mock = mount_models_once(
+        &server,
+        ModelsResponse {
+            models: remote_models.clone(),
+        },
+    )
+    .await;
 
     let codex_home = tempdir().expect("temp dir");
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("unused"));
@@ -451,6 +441,24 @@ async fn refresh_available_models_uses_provider_auth_token() {
         .expect("refresh succeeds");
 
     assert_models_contain(&manager.get_remote_models().await, &remote_models);
+    let requests = models_mock.requests();
+    assert_eq!(requests.len(), 1, "expected a single /models request");
+    let request = requests.first().expect("captured /models request");
+    assert_eq!(
+        request
+            .headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer provider-token")
+    );
+    assert_eq!(
+        request
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == "client_version")
+            .map(|(_, value)| value.to_string()),
+        Some(client_version)
+    );
 }
 
 #[tokio::test]
@@ -781,6 +789,7 @@ fn models_request_telemetry_emits_auth_env_feedback_tags_on_failure() {
             body: Some("plain text error".to_string()),
         }),
         Duration::from_millis(17),
+        /*emit_log_trace*/ false,
     );
 
     let tags = tags.lock().unwrap().clone();

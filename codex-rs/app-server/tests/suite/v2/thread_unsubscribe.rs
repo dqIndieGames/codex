@@ -6,6 +6,7 @@ use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::create_shell_command_sse_response;
 use app_test_support::to_response;
+use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -259,15 +260,19 @@ async fn thread_unsubscribe_clears_cached_status_before_resume() -> Result<()> {
     )
     .await??;
     let _: TurnStartResponse = to_response::<TurnStartResponse>(turn_resp)?;
-    timeout(
+    let error_notif: JSONRPCNotification = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("error"),
     )
     .await??;
+    let error: ErrorNotification =
+        serde_json::from_value(error_notif.params.expect("error params"))?;
+    assert!(!error.will_retry);
+    assert_eq!(error.thread_id, thread_id);
 
     let read_id = mcp
         .send_thread_read_request(ThreadReadParams {
-            thread_id: thread_id.clone(),
+            thread_id: error.thread_id.clone(),
             include_turns: false,
         })
         .await?;
@@ -281,7 +286,7 @@ async fn thread_unsubscribe_clears_cached_status_before_resume() -> Result<()> {
 
     let unsubscribe_id = mcp
         .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
-            thread_id: thread_id.clone(),
+            thread_id: error.thread_id.clone(),
         })
         .await?;
     let unsubscribe_resp: JSONRPCResponse = timeout(

@@ -616,6 +616,10 @@ async fn wait_for_guardian_review(
                         EventMsg::Error(error) => {
                             last_error_message = Some(error.message);
                         }
+                        EventMsg::StreamError(error) => {
+                            last_error_message =
+                                Some(error.additional_details.unwrap_or(error.message));
+                        }
                         EventMsg::TurnAborted(_) => {
                             return (GuardianReviewSessionOutcome::Aborted, true);
                         }

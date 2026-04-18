@@ -8,8 +8,10 @@ use app_test_support::rollout_path;
 use app_test_support::to_response;
 use chrono::DateTime;
 use chrono::Utc;
+use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::GitInfo as ApiGitInfo;
 use codex_app_server_protocol::JSONRPCError;
+use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
@@ -257,11 +259,15 @@ async fn thread_list_reports_system_error_idle_flag_after_failed_turn() -> Resul
     )
     .await??;
     let _: TurnStartResponse = to_response::<TurnStartResponse>(failed_turn_resp)?;
-    timeout(
+    let error_notif: JSONRPCNotification = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("error"),
     )
     .await??;
+    let error: ErrorNotification =
+        serde_json::from_value(error_notif.params.expect("error params"))?;
+    assert!(!error.will_retry);
+    assert_eq!(error.thread_id, thread.id);
 
     let ThreadListResponse { data, .. } = list_threads(
         &mut mcp,
@@ -280,7 +286,7 @@ async fn thread_list_reports_system_error_idle_flag_after_failed_turn() -> Resul
         .iter()
         .find(|candidate| candidate.id == thread.id)
         .expect("expected started thread to be listed");
-    assert_eq!(listed.status, ThreadStatus::SystemError,);
+    assert_eq!(listed.status, ThreadStatus::SystemError);
 
     Ok(())
 }

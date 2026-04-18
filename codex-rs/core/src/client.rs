@@ -36,7 +36,6 @@ use crate::api_bridge::auth_provider_from_auth_with_live_provider;
 use crate::api_bridge::map_api_error;
 use crate::api_bridge::map_responses_request_api_error;
 use crate::api_bridge::map_responses_stream_api_error;
-use crate::auth::UnauthorizedRecovery;
 use crate::auth_env_telemetry::AuthEnvTelemetry;
 use crate::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_api::CompactClient as ApiCompactClient;
@@ -44,6 +43,7 @@ use codex_api::CompactionInput as ApiCompactionInput;
 use codex_api::MemoriesClient as ApiMemoriesClient;
 use codex_api::MemorySummarizeInput as ApiMemorySummarizeInput;
 use codex_api::MemorySummarizeOutput as ApiMemorySummarizeOutput;
+use codex_api::ProviderSource as ApiProviderSource;
 use codex_api::RawMemory as ApiRawMemory;
 use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
@@ -51,7 +51,6 @@ use codex_api::ResponseCreateWsRequest;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient as ApiResponsesClient;
 use codex_api::ResponsesOptions as ApiResponsesOptions;
-use codex_api::ProviderSource as ApiProviderSource;
 use codex_api::ResponsesWebsocketClient as ApiWebSocketResponsesClient;
 use codex_api::ResponsesWebsocketConnection as ApiWebSocketConnection;
 use codex_api::SseTelemetry;
@@ -102,15 +101,14 @@ use tracing::warn;
 use crate::AuthManager;
 use crate::auth::AuthMode;
 use crate::auth::CodexAuth;
-use crate::auth::RefreshTokenError;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::default_client::build_reqwest_client;
 use crate::error::CodexErr;
+use crate::error::Result;
 use crate::error::UnexpectedResponseError;
 use crate::error::UnexpectedResponseRetrySource;
-use crate::error::Result;
 use crate::flags::CODEX_RS_SSE_FIXTURE;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::WireApi;
@@ -120,7 +118,6 @@ use crate::response_debug_context::extract_response_debug_context_from_api_error
 use crate::response_debug_context::telemetry_api_error_message;
 use crate::response_debug_context::telemetry_transport_error_message;
 use crate::util::FeedbackRequestTags;
-use crate::util::emit_feedback_auth_recovery_tags;
 use crate::util::emit_feedback_request_tags_with_auth_env;
 
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
@@ -290,26 +287,7 @@ fn format_retry_transport_error_details(error: &TransportError) -> String {
     }
 }
 
-fn unauthorized_transport_from_codex_error(err: &CodexErr) -> Option<TransportError> {
-    let CodexErr::UnexpectedStatus(err) = err else {
-        return None;
-    };
-    if err.status != StatusCode::UNAUTHORIZED {
-        return None;
-    }
-
-    Some(TransportError::Http {
-        status: err.status,
-        url: err.url.clone(),
-        headers: None,
-        body: Some(err.body.clone()),
-    })
-}
-
-fn responses_api_error_continues_main_chain_with_auth_recovery(
-    error: &ApiError,
-    _can_retry_after_unauthorized: bool,
-) -> bool {
+fn responses_api_error_continues_main_chain(error: &ApiError) -> bool {
     match error {
         ApiError::Transport(TransportError::Http { status, .. }) | ApiError::Api { status, .. } => {
             responses_http_status_is_retryable(*status)
@@ -331,7 +309,6 @@ fn should_emit_websocket_connect_or_request_log_trace(
     route: RequestRouteTelemetry,
     retry_chain_active: bool,
     error: Option<&ApiError>,
-    can_retry_after_unauthorized: bool,
 ) -> bool {
     if !route.is_responses_main_chain() {
         return true;
@@ -341,18 +318,10 @@ fn should_emit_websocket_connect_or_request_log_trace(
         return false;
     }
 
-    !error.is_some_and(|error| {
-        responses_api_error_continues_main_chain_with_auth_recovery(
-            error,
-            can_retry_after_unauthorized,
-        )
-    })
+    !error.is_some_and(responses_api_error_continues_main_chain)
 }
 
-fn wrapped_websocket_error_event_continues_main_chain(
-    payload: &str,
-    _can_retry_after_unauthorized: bool,
-) -> Option<bool> {
+fn wrapped_websocket_error_event_continues_main_chain(payload: &str) -> Option<bool> {
     let value: Value = serde_json::from_str(payload).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("error") {
         return None;
@@ -383,24 +352,17 @@ fn wrapped_websocket_error_event_continues_main_chain(
 
 fn websocket_event_continues_responses_main_chain(
     result: &std::result::Result<Option<std::result::Result<Message, Error>>, ApiError>,
-    can_retry_after_unauthorized: bool,
 ) -> bool {
     match result {
         Ok(Some(Ok(Message::Text(text)))) => {
-            if let Some(continues) = wrapped_websocket_error_event_continues_main_chain(
-                text,
-                can_retry_after_unauthorized,
-            ) {
+            if let Some(continues) = wrapped_websocket_error_event_continues_main_chain(text) {
                 return continues;
             }
 
             match serde_json::from_str::<ResponsesStreamEvent>(text) {
                 Ok(event) => match process_responses_event(event) {
                     Ok(Some(_)) | Ok(None) => false,
-                    Err(error) => responses_api_error_continues_main_chain_with_auth_recovery(
-                        &error.into_api_error(),
-                        can_retry_after_unauthorized,
-                    ),
+                    Err(error) => responses_api_error_continues_main_chain(&error.into_api_error()),
                 },
                 // Malformed websocket payloads break the active Responses stream and
                 // fall back into the same retry/reconnect chain, so treat them as
@@ -413,23 +375,19 @@ fn websocket_event_continues_responses_main_chain(
         Ok(Some(Ok(Message::Close(_)))) => true,
         Ok(Some(Ok(Message::Frame(_)))) => false,
         Ok(Some(Err(_))) | Ok(None) => true,
-        Err(error) => responses_api_error_continues_main_chain_with_auth_recovery(
-            error,
-            can_retry_after_unauthorized,
-        ),
+        Err(error) => responses_api_error_continues_main_chain(error),
     }
 }
 
 fn should_emit_websocket_event_log_trace(
     route: RequestRouteTelemetry,
     result: &std::result::Result<Option<std::result::Result<Message, Error>>, ApiError>,
-    can_retry_after_unauthorized: bool,
 ) -> bool {
     if !route.is_responses_main_chain() {
         return true;
     }
 
-    !websocket_event_continues_responses_main_chain(result, can_retry_after_unauthorized)
+    !websocket_event_continues_responses_main_chain(result)
 }
 
 #[derive(Debug, Clone)]
@@ -621,7 +579,6 @@ impl ModelClient {
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 &client_setup.api_auth,
                 PendingUnauthorizedRetry::default(),
-                false,
             ),
             RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
             self.state.auth_env_telemetry.clone(),
@@ -691,7 +648,6 @@ impl ModelClient {
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 &client_setup.api_auth,
                 PendingUnauthorizedRetry::default(),
-                false,
             ),
             RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
             self.state.auth_env_telemetry.clone(),
@@ -799,11 +755,12 @@ impl ModelClient {
         let auth_mode = auth.as_ref().map(CodexAuth::auth_mode);
         let provider = self.provider_snapshot();
         let api_provider = provider.to_api_provider(auth_mode)?;
-        let live_api_provider_source: Arc<dyn ApiProviderSource> = Arc::new(LiveApiProviderSource {
-            template: api_provider.clone(),
-            fallback_base_url: default_provider_base_url(auth_mode).to_string(),
-            live_provider: Arc::clone(&self.state.provider),
-        });
+        let live_api_provider_source: Arc<dyn ApiProviderSource> =
+            Arc::new(LiveApiProviderSource {
+                template: api_provider.clone(),
+                fallback_base_url: default_provider_base_url(auth_mode).to_string(),
+                live_provider: Arc::clone(&self.state.provider),
+            });
         let api_auth = auth_provider_from_auth_with_live_provider(
             auth.clone(),
             &provider,
@@ -868,7 +825,6 @@ impl ModelClient {
             request_route_telemetry,
             retry_chain_active.load(Ordering::Relaxed) || auth_context.retry_after_unauthorized,
             result.as_ref().err(),
-            auth_context.can_retry_after_unauthorized,
         );
         session_telemetry.record_websocket_connect(
             start.elapsed(),
@@ -971,6 +927,18 @@ impl ModelClientSession {
         self.websocket_session.last_response_rx = None;
         self.websocket_session
             .set_connection_reused(/*connection_reused*/ false);
+    }
+
+    fn build_auth_request_context(
+        &self,
+        auth: Option<&CodexAuth>,
+        api_auth: &CoreAuthProvider,
+    ) -> AuthRequestTelemetryContext {
+        AuthRequestTelemetryContext::new(
+            auth.map(CodexAuth::auth_mode),
+            api_auth,
+            self.pending_unauthorized_retry,
+        )
     }
 
     fn build_responses_request(
@@ -1181,12 +1149,8 @@ impl ModelClientSession {
                 "failed to build websocket prewarm client setup: {err}"
             ))
         })?;
-        let auth_context = AuthRequestTelemetryContext::new(
-            client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-            &client_setup.api_auth,
-            PendingUnauthorizedRetry::default(),
-            false,
-        );
+        let auth_context =
+            self.build_auth_request_context(client_setup.auth.as_ref(), &client_setup.api_auth);
         let connection = self
             .client
             .connect_websocket(
@@ -1325,23 +1289,16 @@ impl ModelClientSession {
         let provider = self.client.provider_snapshot();
         if let Some(path) = &*CODEX_RS_SSE_FIXTURE {
             warn!(path, "Streaming from fixture");
-            let stream = codex_api::stream_from_fixture(
-                path,
-                provider.stream_idle_timeout(),
-            )
-            .map_err(map_api_error)?;
+            let stream = codex_api::stream_from_fixture(path, provider.stream_idle_timeout())
+                .map_err(map_api_error)?;
             let (stream, _last_request_rx) = map_response_stream(stream, session_telemetry.clone());
             return Ok(stream);
         }
 
         let client_setup = self.client.current_client_setup().await?;
         let transport = ReqwestTransport::new(build_reqwest_client());
-        let request_auth_context = AuthRequestTelemetryContext::new(
-            client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-            &client_setup.api_auth,
-            PendingUnauthorizedRetry::default(),
-            false,
-        );
+        let request_auth_context =
+            self.build_auth_request_context(client_setup.auth.as_ref(), &client_setup.api_auth);
         let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
             session_telemetry,
             request_auth_context,
@@ -1402,12 +1359,8 @@ impl ModelClientSession {
         request_trace: Option<W3cTraceContext>,
     ) -> Result<WebsocketStreamOutcome> {
         let client_setup = self.client.current_client_setup().await?;
-        let request_auth_context = AuthRequestTelemetryContext::new(
-            client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-            &client_setup.api_auth,
-            PendingUnauthorizedRetry::default(),
-            false,
-        );
+        let request_auth_context =
+            self.build_auth_request_context(client_setup.auth.as_ref(), &client_setup.api_auth);
         let retry_chain_active = Arc::clone(&self.retry_chain_active);
         let compression = self.responses_request_compression(client_setup.auth.as_ref());
 
@@ -1439,9 +1392,7 @@ impl ModelClientSession {
                 turn_metadata_header,
                 options: &options,
                 auth_context: request_auth_context,
-                request_route_telemetry: RequestRouteTelemetry::for_endpoint(
-                    RESPONSES_ENDPOINT,
-                ),
+                request_route_telemetry: RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
                 retry_chain_active,
             })
             .await
@@ -1546,7 +1497,9 @@ impl ModelClientSession {
             .await
         {
             Ok(WebsocketStreamOutcome::Stream(mut stream)) => {
-                // Wait for the v2 warmup request to complete before sending the first turn request.
+                self.pending_unauthorized_retry = PendingUnauthorizedRetry::default();
+                // Wait for the v2 warmup request to complete before sending the first turn
+                // request.
                 while let Some(event) = stream.next().await {
                     match event {
                         Ok(ResponseEvent::Completed { .. }) => break,
@@ -1557,10 +1510,14 @@ impl ModelClientSession {
                 Ok(())
             }
             Ok(WebsocketStreamOutcome::FallbackToHttp) => {
+                self.pending_unauthorized_retry = PendingUnauthorizedRetry::default();
                 self.try_switch_fallback_transport(session_telemetry, model_info);
                 Ok(())
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                self.pending_unauthorized_retry = PendingUnauthorizedRetry::default();
+                Err(err)
+            }
         }
     }
 
@@ -1581,8 +1538,7 @@ impl ModelClientSession {
         service_tier: Option<ServiceTier>,
         turn_metadata_header: Option<&str>,
     ) -> Result<ResponseStream> {
-        let wire_api = self.client.provider_snapshot().wire_api;
-        match wire_api {
+        let result = match self.client.provider_snapshot().wire_api {
             WireApi::Responses => {
                 if self.client.responses_websocket_enabled() {
                     let request_trace = current_span_w3c_trace_context();
@@ -1598,25 +1554,47 @@ impl ModelClientSession {
                             /*warmup*/ false,
                             request_trace,
                         )
-                        .await?
+                        .await
                     {
-                        WebsocketStreamOutcome::Stream(stream) => return Ok(stream),
-                        WebsocketStreamOutcome::FallbackToHttp => {
+                        Ok(WebsocketStreamOutcome::Stream(stream)) => Ok(stream),
+                        Ok(WebsocketStreamOutcome::FallbackToHttp) => {
                             self.try_switch_fallback_transport(session_telemetry, model_info);
+                            self.stream_responses_api(
+                                prompt,
+                                model_info,
+                                session_telemetry,
+                                effort,
+                                summary,
+                                service_tier,
+                                turn_metadata_header,
+                            )
+                            .await
                         }
+                        Err(err) => Err(err),
                     }
+                } else {
+                    self.stream_responses_api(
+                        prompt,
+                        model_info,
+                        session_telemetry,
+                        effort,
+                        summary,
+                        service_tier,
+                        turn_metadata_header,
+                    )
+                    .await
                 }
+            }
+        };
 
-                self.stream_responses_api(
-                    prompt,
-                    model_info,
-                    session_telemetry,
-                    effort,
-                    summary,
-                    service_tier,
-                    turn_metadata_header,
-                )
-                .await
+        match result {
+            Ok(stream) => {
+                self.pending_unauthorized_retry = PendingUnauthorizedRetry::default();
+                Ok(stream)
+            }
+            Err(err) => {
+                self.pending_unauthorized_retry = PendingUnauthorizedRetry::default();
+                Err(err)
             }
         }
     }
@@ -1639,10 +1617,7 @@ impl ModelClientSession {
         activated
     }
 
-    pub(crate) fn set_request_retry_notifier(
-        &mut self,
-        notifier: Option<RequestRetryNotifier>,
-    ) {
+    pub(crate) fn set_request_retry_notifier(&mut self, notifier: Option<RequestRetryNotifier>) {
         self.request_retry_notifier = notifier;
     }
 
@@ -1650,6 +1625,9 @@ impl ModelClientSession {
         self.retry_chain_active.store(active, Ordering::Relaxed);
     }
 
+    pub(crate) fn responses_websocket_enabled(&self) -> bool {
+        self.client.responses_websocket_enabled()
+    }
 }
 
 /// Parses per-turn metadata into an HTTP header value.
@@ -1713,7 +1691,6 @@ where
     let (tx_last_response, rx_last_response) = oneshot::channel::<LastResponse>();
 
     tokio::spawn(async move {
-        let mut logged_error = false;
         let mut tx_last_response = Some(tx_last_response);
         let mut items_added: Vec<ResponseItem> = Vec::new();
         let mut api_stream = api_stream;
@@ -1766,13 +1743,11 @@ where
                 }
                 Err(err) => {
                     let mapped = map_responses_stream_api_error(err);
-                    if !logged_error {
-                        session_telemetry.see_event_completed_failed(&mapped);
-                        logged_error = true;
-                    }
+                    session_telemetry.see_event_completed_failed(&mapped);
                     if tx_event.send(Err(mapped)).await.is_err() {
                         return;
                     }
+                    return;
                 }
             }
         }
@@ -1785,12 +1760,6 @@ where
 ///
 /// When refresh succeeds, the caller should retry the API call; otherwise
 /// the mapped `CodexErr` is returned to the caller.
-#[derive(Clone, Copy, Debug)]
-struct UnauthorizedRecoveryExecution {
-    mode: &'static str,
-    phase: &'static str,
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct PendingUnauthorizedRetry {
     retry_after_unauthorized: bool,
@@ -1798,22 +1767,11 @@ struct PendingUnauthorizedRetry {
     recovery_phase: Option<&'static str>,
 }
 
-impl PendingUnauthorizedRetry {
-    fn from_recovery(recovery: UnauthorizedRecoveryExecution) -> Self {
-        Self {
-            retry_after_unauthorized: true,
-            recovery_mode: Some(recovery.mode),
-            recovery_phase: Some(recovery.phase),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct AuthRequestTelemetryContext {
     auth_mode: Option<&'static str>,
     auth_header_attached: bool,
     auth_header_name: Option<&'static str>,
-    can_retry_after_unauthorized: bool,
     retry_after_unauthorized: bool,
     recovery_mode: Option<&'static str>,
     recovery_phase: Option<&'static str>,
@@ -1824,7 +1782,6 @@ impl AuthRequestTelemetryContext {
         auth_mode: Option<AuthMode>,
         api_auth: &CoreAuthProvider,
         retry: PendingUnauthorizedRetry,
-        can_retry_after_unauthorized: bool,
     ) -> Self {
         Self {
             auth_mode: auth_mode.map(|mode| match mode {
@@ -1833,7 +1790,6 @@ impl AuthRequestTelemetryContext {
             }),
             auth_header_attached: api_auth.auth_header_attached(),
             auth_header_name: api_auth.auth_header_name(),
-            can_retry_after_unauthorized,
             retry_after_unauthorized: retry.retry_after_unauthorized,
             recovery_mode: retry.recovery_mode,
             recovery_phase: retry.recovery_phase,
@@ -1850,122 +1806,6 @@ struct WebsocketConnectParams<'a> {
     auth_context: AuthRequestTelemetryContext,
     request_route_telemetry: RequestRouteTelemetry,
     retry_chain_active: Arc<AtomicBool>,
-}
-
-async fn handle_unauthorized(
-    transport: TransportError,
-    auth_recovery: &mut Option<UnauthorizedRecovery>,
-    session_telemetry: &SessionTelemetry,
-) -> Result<UnauthorizedRecoveryExecution> {
-    let debug = extract_response_debug_context(&transport);
-    if let Some(recovery) = auth_recovery
-        && recovery.has_next()
-    {
-        let mode = recovery.mode_name();
-        let phase = recovery.step_name();
-        return match recovery.next().await {
-            Ok(step_result) => {
-                session_telemetry.record_auth_recovery(
-                    mode,
-                    phase,
-                    "recovery_succeeded",
-                    debug.request_id.as_deref(),
-                    debug.cf_ray.as_deref(),
-                    debug.auth_error.as_deref(),
-                    debug.auth_error_code.as_deref(),
-                    /*recovery_reason*/ None,
-                    step_result.auth_state_changed(),
-                );
-                emit_feedback_auth_recovery_tags(
-                    mode,
-                    phase,
-                    "recovery_succeeded",
-                    debug.request_id.as_deref(),
-                    debug.cf_ray.as_deref(),
-                    debug.auth_error.as_deref(),
-                    debug.auth_error_code.as_deref(),
-                );
-                Ok(UnauthorizedRecoveryExecution { mode, phase })
-            }
-            Err(RefreshTokenError::Permanent(failed)) => {
-                session_telemetry.record_auth_recovery(
-                    mode,
-                    phase,
-                    "recovery_failed_permanent",
-                    debug.request_id.as_deref(),
-                    debug.cf_ray.as_deref(),
-                    debug.auth_error.as_deref(),
-                    debug.auth_error_code.as_deref(),
-                    /*recovery_reason*/ None,
-                    /*auth_state_changed*/ None,
-                );
-                emit_feedback_auth_recovery_tags(
-                    mode,
-                    phase,
-                    "recovery_failed_permanent",
-                    debug.request_id.as_deref(),
-                    debug.cf_ray.as_deref(),
-                    debug.auth_error.as_deref(),
-                    debug.auth_error_code.as_deref(),
-                );
-                Err(CodexErr::RefreshTokenFailed(failed))
-            }
-            Err(RefreshTokenError::Transient(other)) => {
-                session_telemetry.record_auth_recovery(
-                    mode,
-                    phase,
-                    "recovery_failed_transient",
-                    debug.request_id.as_deref(),
-                    debug.cf_ray.as_deref(),
-                    debug.auth_error.as_deref(),
-                    debug.auth_error_code.as_deref(),
-                    /*recovery_reason*/ None,
-                    /*auth_state_changed*/ None,
-                );
-                emit_feedback_auth_recovery_tags(
-                    mode,
-                    phase,
-                    "recovery_failed_transient",
-                    debug.request_id.as_deref(),
-                    debug.cf_ray.as_deref(),
-                    debug.auth_error.as_deref(),
-                    debug.auth_error_code.as_deref(),
-                );
-                Err(CodexErr::Io(other))
-            }
-        };
-    }
-
-    let (mode, phase, recovery_reason) = match auth_recovery.as_ref() {
-        Some(recovery) => (
-            recovery.mode_name(),
-            recovery.step_name(),
-            Some(recovery.unavailable_reason()),
-        ),
-        None => ("none", "none", Some("auth_manager_missing")),
-    };
-    session_telemetry.record_auth_recovery(
-        mode,
-        phase,
-        "recovery_not_run",
-        debug.request_id.as_deref(),
-        debug.cf_ray.as_deref(),
-        debug.auth_error.as_deref(),
-        debug.auth_error_code.as_deref(),
-        recovery_reason,
-        /*auth_state_changed*/ None,
-    );
-    emit_feedback_auth_recovery_tags(
-        mode,
-        phase,
-        "recovery_not_run",
-        debug.request_id.as_deref(),
-        debug.cf_ray.as_deref(),
-        debug.auth_error.as_deref(),
-        debug.auth_error_code.as_deref(),
-    );
-
-    Err(map_api_error(ApiError::Transport(transport)))
 }
 
 fn api_error_http_status(error: &ApiError) -> Option<u16> {
@@ -2021,6 +1861,8 @@ impl RequestTelemetry for ApiTelemetry {
         duration: Duration,
         emit_log_trace: bool,
     ) {
+        let emit_log_trace = emit_log_trace
+            && (!self.request_route_telemetry.is_responses_main_chain() || attempt == 0);
         let error_message = error.map(telemetry_transport_error_message);
         let status = status.map(|s| s.as_u16());
         let debug = error
@@ -2093,7 +1935,7 @@ impl RequestTelemetry for ApiTelemetry {
     }
 
     fn can_retry_after_unauthorized(&self) -> bool {
-        self.auth_context.can_retry_after_unauthorized
+        false
     }
 }
 
@@ -2121,7 +1963,6 @@ impl WebsocketTelemetry for ApiTelemetry {
             self.request_route_telemetry,
             self.websocket_retry_chain_active(),
             error,
-            self.auth_context.can_retry_after_unauthorized,
         );
         self.session_telemetry.record_websocket_request(
             duration,
@@ -2162,11 +2003,8 @@ impl WebsocketTelemetry for ApiTelemetry {
         result: &std::result::Result<Option<std::result::Result<Message, Error>>, ApiError>,
         duration: Duration,
     ) {
-        let emit_log_trace = should_emit_websocket_event_log_trace(
-            self.request_route_telemetry,
-            result,
-            self.auth_context.can_retry_after_unauthorized,
-        );
+        let emit_log_trace =
+            should_emit_websocket_event_log_trace(self.request_route_telemetry, result);
         self.session_telemetry
             .record_websocket_event(result, duration, emit_log_trace);
     }

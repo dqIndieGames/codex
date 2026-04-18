@@ -1,11 +1,16 @@
 use super::handle_non_tool_response_item;
 use super::image_generation_artifact_path;
 use super::last_assistant_message_from_item;
+use super::local1_first_turn_checklist_prefix;
+use super::prepend_local1_first_turn_checklist;
+use super::prepend_text_to_assistant_response_item;
 use super::save_image_generation_result;
+use super::assistant_message_should_receive_first_turn_checklist;
 use crate::codex::make_session_and_context;
 use crate::error::CodexErr;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use pretty_assertions::assert_eq;
 
@@ -13,6 +18,18 @@ fn assistant_output_text(text: &str) -> ResponseItem {
     ResponseItem::Message {
         id: Some("msg-1".to_string()),
         role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: text.to_string(),
+        }],
+        end_turn: Some(true),
+        phase: None,
+    }
+}
+
+fn user_output_text(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: Some("msg-user".to_string()),
+        role: "user".to_string(),
         content: vec![ContentItem::OutputText {
             text: text.to_string(),
         }],
@@ -85,6 +102,61 @@ fn last_assistant_message_from_item_returns_none_for_plan_only_hidden_message() 
         last_assistant_message_from_item(&item, /*plan_mode*/ true),
         None
     );
+}
+
+#[test]
+fn local1_first_turn_checklist_prefix_contains_expected_sections() {
+    let prefix = local1_first_turn_checklist_prefix();
+
+    assert!(prefix.starts_with("local1 定制功能已启用：\n\n- 版本显示统一保留 `-local1`。"));
+    assert!(prefix.contains("Provider refresh/retry 与 Windows tray 联动"));
+    assert!(prefix.ends_with("\n\n"));
+}
+
+#[test]
+fn prepend_local1_first_turn_checklist_is_idempotent() {
+    let prefix = local1_first_turn_checklist_prefix();
+    let prefixed = prepend_local1_first_turn_checklist("assistant reply");
+
+    assert!(prefixed.starts_with(&prefix));
+    assert_eq!(
+        prepend_local1_first_turn_checklist(&prefixed),
+        prefixed,
+        "first-turn checklist should not be duplicated"
+    );
+}
+
+#[test]
+fn assistant_message_should_receive_first_turn_checklist_skips_commentary_only() {
+    assert!(assistant_message_should_receive_first_turn_checklist(None));
+    assert!(assistant_message_should_receive_first_turn_checklist(Some(
+        &MessagePhase::FinalAnswer
+    )));
+    assert!(!assistant_message_should_receive_first_turn_checklist(Some(
+        &MessagePhase::Commentary
+    )));
+}
+
+#[test]
+fn prepend_text_to_assistant_response_item_prefixes_once() {
+    let prefix = local1_first_turn_checklist_prefix();
+    let mut item = assistant_output_text("assistant reply");
+
+    assert!(prepend_text_to_assistant_response_item(&mut item, &prefix));
+    assert!(prepend_text_to_assistant_response_item(&mut item, &prefix));
+    assert_eq!(
+        last_assistant_message_from_item(&item, /*plan_mode*/ false),
+        Some(format!("{prefix}assistant reply"))
+    );
+}
+
+#[test]
+fn prepend_text_to_assistant_response_item_ignores_non_assistant_messages() {
+    let prefix = local1_first_turn_checklist_prefix();
+    let mut item = user_output_text("hello");
+
+    assert!(!prepend_text_to_assistant_response_item(&mut item, &prefix));
+    assert_eq!(item, user_output_text("hello"));
 }
 
 #[tokio::test]

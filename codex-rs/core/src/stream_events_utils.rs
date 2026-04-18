@@ -24,6 +24,7 @@ use crate::tools::router::ToolRouter;
 use codex_protocol::models::DeveloperInstructions;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_utils_stream_parser::strip_proposed_plan_blocks;
@@ -32,6 +33,64 @@ use tracing::debug;
 use tracing::instrument;
 
 const GENERATED_IMAGE_ARTIFACTS_DIR: &str = "generated_images";
+
+pub(crate) const LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW: &str =
+    "`/responses` 的远端 HTTP 错误会统一自动重试，包含 `401`；重试中间态只更新状态，不写入历史。";
+
+pub(crate) const LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW: &str =
+    "Provider refresh/retry 与 Windows tray 联动：active thread 在 refresh 后的后续自动 retry 会切到最新 `base_url` / `experimental_bearer_token`；Windows tray 新增退出入口，并支持从 user `config.toml` 的 source provider 下拉复制两字段到当前 `model_provider` 对应 provider 条目；写入成功后再尝试 refresh，无 live instance 也视为成功。";
+
+pub(crate) fn local1_first_turn_checklist_prefix() -> String {
+    format!(
+        "local1 定制功能已启用：\n\n- 版本显示统一保留 `-local1`。\n- {LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW}\n- Provider runtime 热刷新仍只覆盖 `base_url` 与 `experimental_bearer_token` 两字段。\n- {LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW}\n- 历史与 resume 默认支持跨 provider 发现，并继续保留 provider 身份信息。\n- `gpt-5.4` 默认继续走 `service_tier=priority`；顶层 `force_gpt54_priority_fallback = false` 会同时关闭 priority 兜底与 Fast 透传。\n- 未显式设置 `RUST_LOG` 时，Windows app 与 TUI 默认日志继续降噪。\n\n"
+    )
+}
+
+pub(crate) fn prepend_local1_first_turn_checklist(text: &str) -> String {
+    let prefix = local1_first_turn_checklist_prefix();
+    if text.starts_with(&prefix) {
+        text.to_string()
+    } else {
+        format!("{prefix}{text}")
+    }
+}
+
+pub(crate) fn assistant_message_phase(item: &ResponseItem) -> Option<MessagePhase> {
+    match item {
+        ResponseItem::Message { role, phase, .. } if role == "assistant" => phase.clone(),
+        _ => None,
+    }
+}
+
+pub(crate) fn assistant_message_should_receive_first_turn_checklist(
+    phase: Option<&MessagePhase>,
+) -> bool {
+    !matches!(phase, Some(MessagePhase::Commentary))
+}
+
+pub(crate) fn prepend_text_to_assistant_response_item(
+    item: &mut ResponseItem,
+    prefix: &str,
+) -> bool {
+    let ResponseItem::Message { role, content, .. } = item else {
+        return false;
+    };
+    if role != "assistant" {
+        return false;
+    }
+
+    if let Some(text) = content.iter_mut().find_map(|entry| match entry {
+        codex_protocol::models::ContentItem::OutputText { text } => Some(text),
+        _ => None,
+    }) {
+        if !text.starts_with(prefix) {
+            text.insert_str(0, prefix);
+        }
+        return true;
+    }
+
+    false
+}
 
 pub(crate) fn image_generation_artifact_path(
     codex_home: &Path,

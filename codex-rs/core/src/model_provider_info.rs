@@ -44,7 +44,10 @@ enum RetryMode {
 }
 
 fn retry_mode_from_env(env_override: Option<&str>, rust_test_threads_present: bool) -> RetryMode {
-    match env_override.map(str::trim).filter(|value| !value.is_empty()) {
+    match env_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(value) if value.eq_ignore_ascii_case("bounded") => RetryMode::Bounded,
         Some(value) if value.eq_ignore_ascii_case("unbounded") => RetryMode::Unbounded,
         _ if rust_test_threads_present => RetryMode::Bounded,

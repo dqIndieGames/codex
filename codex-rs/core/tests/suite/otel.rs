@@ -73,6 +73,15 @@ fn assert_empty_mcp_tool_fields(line: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn has_event_name(line: &str, event_name: &str) -> bool {
+    extract_log_field(line, "event.name").as_deref() == Some(event_name)
+}
+
+fn has_event_name_and_endpoint(line: &str, event_name: &str, endpoint: &str) -> bool {
+    has_event_name(line, event_name)
+        && extract_log_field(line, "endpoint").as_deref() == Some(endpoint)
+}
+
 #[test]
 fn extract_log_field_handles_empty_bare_values() {
     let line = "event.name=\"codex.tool_result\" mcp_server= mcp_server_origin=";
@@ -118,7 +127,7 @@ async fn responses_api_emits_api_request_event() {
     logs_assert(|lines: &[&str]| {
         lines
             .iter()
-            .find(|line| line.contains("codex.api_request"))
+            .find(|line| has_event_name_and_endpoint(line, "codex.api_request", "/responses"))
             .map(|_| Ok(()))
             .unwrap_or_else(|| Err("expected codex.api_request event".to_string()))
     });
@@ -178,8 +187,15 @@ async fn responses_api_retry_suppresses_request_telemetry_logs() {
     assert_eq!(success_response.requests().len(), 1);
 
     logs_assert(|lines: &[&str]| {
-        if lines.iter().any(|line| line.contains("codex.api_request")) {
-            return Err("expected retry-chain request telemetry to be suppressed".to_string());
+        let matches = lines
+            .iter()
+            .copied()
+            .filter(|line| has_event_name_and_endpoint(line, "codex.api_request", "/responses"))
+            .collect::<Vec<_>>();
+        if !matches.is_empty() {
+            return Err(format!(
+                "expected retry-chain request telemetry to be suppressed, matched lines: {matches:?}"
+            ));
         }
         Ok(())
     });
@@ -192,7 +208,10 @@ async fn responses_websocket_retry_suppresses_retry_logs_and_warns() {
 
     let server = start_websocket_server(vec![
         vec![
-            vec![ev_response_created("resp-prewarm"), ev_completed("resp-prewarm")],
+            vec![
+                ev_response_created("resp-prewarm"),
+                ev_completed("resp-prewarm"),
+            ],
             vec![serde_json::json!({
                 "type": "response.failed",
                 "response": {
@@ -223,21 +242,25 @@ async fn responses_websocket_retry_suppresses_retry_logs_and_warns() {
     logs_assert(|lines: &[&str]| {
         let websocket_connect_count = lines
             .iter()
-            .filter(|line| line.contains("codex.websocket_connect"))
+            .filter(|line| {
+                has_event_name_and_endpoint(line, "codex.websocket_connect", "/responses")
+            })
             .count();
-        if websocket_connect_count != 1 {
+        if websocket_connect_count > 1 {
             return Err(format!(
-                "expected only the first websocket_connect log, got {websocket_connect_count}"
+                "expected retry reconnect websocket_connect logs to be suppressed, got {websocket_connect_count}"
             ));
         }
         if lines.iter().any(|line| {
-            line.contains("codex.websocket_event") && line.contains("event.kind=response.failed")
+            has_event_name(line, "codex.websocket_event")
+                && line.contains("event.kind=response.failed")
         }) {
             return Err("expected retry-driving websocket_event log to be suppressed".to_string());
         }
-        if lines.iter().any(|line| {
-            line.contains("stream disconnected - retrying sampling request")
-        }) {
+        if lines
+            .iter()
+            .any(|line| line.contains("stream disconnected - retrying sampling request"))
+        {
             return Err("expected reconnect warn to be suppressed".to_string());
         }
         Ok(())

@@ -1178,38 +1178,6 @@ pub(crate) fn new_session_info(
     SessionInfoCell(CompositeHistoryCell { parts })
 }
 
-pub(crate) const LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW: &str =
-    "`/responses` 的远端 HTTP 错误会统一自动重试，包含 `401`；重试中间态只更新状态，不写入历史。";
-
-pub(crate) const LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW: &str =
-    "Provider refresh/retry 与 Windows tray 联动：active thread 在 refresh 后的后续自动 retry 会切到最新 `base_url` / `experimental_bearer_token`；Windows tray 新增退出入口，并支持从当前 effective config 的 provider 下拉复制两字段到当前 `model_provider` 对应 provider 条目后立即 refresh。";
-
-pub(crate) fn new_local1_first_turn_checklist() -> PlainHistoryCell {
-    PlainHistoryCell::new(vec![
-        "  local1 定制功能已启用：".dim().into(),
-        Line::from(""),
-        Line::from("  - 版本显示统一保留 `-local1`。"),
-        Line::from(format!(
-            "  - {LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW}"
-        )),
-        Line::from(
-            "  - Provider runtime 热刷新仍只覆盖 `base_url` 与 `experimental_bearer_token` 两字段。",
-        ),
-        Line::from(format!(
-            "  - {LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW}"
-        )),
-        Line::from(
-            "  - 历史与 resume 默认支持跨 provider 发现，并继续保留 provider 身份信息。",
-        ),
-        Line::from(
-            "  - `gpt-5.4` 默认继续走 `service_tier=priority`；顶层 `force_gpt54_priority_fallback = false` 会同时关闭 priority 兜底与 Fast 透传。",
-        ),
-        Line::from(
-            "  - 未显式设置 `RUST_LOG` 时，Windows app 与 TUI 默认日志继续降噪。",
-        ),
-    ])
-}
-
 pub(crate) fn new_user_prompt(
     message: String,
     text_elements: Vec<TextElement>,
@@ -2826,9 +2794,7 @@ mod tests {
         let cell = UpdateAvailableHistoryCell::new("v9.9.9".to_string(), None);
         let rendered = render_lines(&cell.display_lines(80)).join("\n");
 
-        assert!(rendered.contains(&format!(
-            "{CODEX_CLI_DISPLAY_VERSION} -> v9.9.9"
-        )));
+        assert!(rendered.contains(&format!("{CODEX_CLI_DISPLAY_VERSION} -> v9.9.9")));
     }
 
     fn test_cwd() -> PathBuf {
@@ -3144,23 +3110,6 @@ mod tests {
         let rendered = render_transcript(&cell).join("\n");
         assert!(!rendered.contains("Model just became available"));
         assert!(!rendered.contains("To get started"));
-    }
-
-    #[test]
-    fn local1_first_turn_checklist_includes_responses_401_direct_retry_overview() {
-        let rendered = render_lines(&new_local1_first_turn_checklist().display_lines(120)).join("\n");
-        assert!(rendered.contains(LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW));
-        assert!(rendered.contains("统一自动重试，包含 `401`"));
-        assert_eq!(rendered.matches("统一自动重试，包含 `401`").count(), 1);
-        assert!(!rendered.contains("非 `401`"));
-        assert!(!rendered.contains("401 follow-up"));
-        assert!(!rendered.contains("unauthorized recovery"));
-    }
-
-    #[test]
-    fn local1_first_turn_checklist_includes_refresh_retry_windows_tray_overview() {
-        let rendered = render_lines(&new_local1_first_turn_checklist().display_lines(120)).join("\n");
-        assert!(rendered.contains(LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW));
     }
 
     #[tokio::test]

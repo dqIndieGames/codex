@@ -68,22 +68,11 @@ impl WithStatus for StreamResponse {
 }
 
 fn is_primary_responses_endpoint(endpoint: &str) -> bool {
-    endpoint == "/responses"
+    endpoint.trim_start_matches('/') == "responses"
 }
 
-fn responses_request_will_continue_main_chain(
-    endpoint: &str,
-    error: Option<&TransportError>,
-    should_retry: bool,
-    can_retry_after_unauthorized: bool,
-) -> bool {
-    is_primary_responses_endpoint(endpoint)
-        && (should_retry
-            || matches!(
-                error,
-                Some(TransportError::Http { status, .. })
-                    if *status == StatusCode::UNAUTHORIZED && can_retry_after_unauthorized
-            ))
+fn responses_request_will_continue_main_chain(endpoint: &str, should_retry: bool) -> bool {
+    is_primary_responses_endpoint(endpoint) && should_retry
 }
 
 pub(crate) async fn run_with_request_telemetry<T, F, Fut>(
@@ -104,9 +93,6 @@ where
         let retry_after_unauthorized = telemetry
             .as_ref()
             .is_some_and(|telemetry| telemetry.retry_after_unauthorized());
-        let can_retry_after_unauthorized = telemetry
-            .as_ref()
-            .is_some_and(|telemetry| telemetry.can_retry_after_unauthorized());
         let req = make_request();
         let req_for_retry = req.clone();
         let start = Instant::now();
@@ -124,12 +110,7 @@ where
             let emit_log_trace = !is_primary_responses_endpoint(endpoint)
                 || (!retry_after_unauthorized
                     && attempt == 0
-                    && !responses_request_will_continue_main_chain(
-                        endpoint,
-                        err,
-                        should_retry,
-                        can_retry_after_unauthorized,
-                    ));
+                    && !responses_request_will_continue_main_chain(endpoint, should_retry));
             t.on_request(attempt, status, err, start.elapsed(), emit_log_trace);
             if let Some(err) = err
                 && should_retry
@@ -148,4 +129,26 @@ where
     }
 
     Err(TransportError::RetryLimit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_primary_responses_endpoint;
+
+    #[test]
+    fn primary_responses_endpoint_accepts_relative_path() {
+        assert!(is_primary_responses_endpoint("responses"));
+    }
+
+    #[test]
+    fn primary_responses_endpoint_accepts_absolute_path() {
+        assert!(is_primary_responses_endpoint("/responses"));
+    }
+
+    #[test]
+    fn primary_responses_endpoint_rejects_other_routes() {
+        assert!(!is_primary_responses_endpoint("responses/compact"));
+        assert!(!is_primary_responses_endpoint("/responses/compact"));
+        assert!(!is_primary_responses_endpoint("models"));
+    }
 }

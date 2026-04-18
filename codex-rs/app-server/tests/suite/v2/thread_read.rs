@@ -3,7 +3,9 @@ use app_test_support::McpProcess;
 use app_test_support::create_fake_rollout_with_text_elements;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::to_response;
+use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::JSONRPCError;
+use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
@@ -450,11 +452,15 @@ async fn thread_read_reports_system_error_idle_flag_after_failed_turn() -> Resul
     )
     .await??;
     let _: TurnStartResponse = to_response::<TurnStartResponse>(turn_start_response)?;
-    timeout(
+    let error_notif: JSONRPCNotification = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("error"),
     )
     .await??;
+    let error: ErrorNotification =
+        serde_json::from_value(error_notif.params.expect("error params"))?;
+    assert!(!error.will_retry);
+    assert_eq!(error.thread_id, thread.id);
 
     let read_id = mcp
         .send_thread_read_request(ThreadReadParams {
@@ -469,7 +475,7 @@ async fn thread_read_reports_system_error_idle_flag_after_failed_turn() -> Resul
     .await??;
     let ThreadReadResponse { thread } = to_response::<ThreadReadResponse>(read_resp)?;
 
-    assert_eq!(thread.status, ThreadStatus::SystemError,);
+    assert_eq!(thread.status, ThreadStatus::SystemError);
 
     Ok(())
 }
