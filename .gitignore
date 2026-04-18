@@ -67,6 +67,12 @@ tmp/
 # coverage
 coverage/
 
+# codexflow temp artifacts
+.codexflow/**/*.stderr.txt
+.codexflow/**/*.stdout.txt
+.codexflow/**/tmp-release/
+.codexflow/**/pre-final-build-backup/
+
 # personal files
 personal/
 
