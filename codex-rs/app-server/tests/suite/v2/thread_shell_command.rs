@@ -26,6 +26,7 @@ use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_core::shell::default_user_shell;
 use codex_features::FEATURES;
 use codex_features::Feature;
 use pretty_assertions::assert_eq;
@@ -35,24 +36,6 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-fn user_shell_command(line: &str) -> String {
-    if cfg!(windows) {
-        format!("Write-Output '{line}'")
-    } else {
-        format!("printf '{line}'")
-    }
-}
-
-fn normalize_line_endings(text: &str) -> String {
-    text.replace("\r\n", "\n")
-}
-
-fn normalize_shell_output(text: &str) -> String {
-    normalize_line_endings(text)
-        .trim_end_matches('\n')
-        .to_string()
-}
 
 #[tokio::test]
 async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> Result<()> {
@@ -85,11 +68,12 @@ async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> 
     )
     .await??;
     let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+    let (shell_command, expected_output) = current_shell_output_command("hello from bang")?;
 
     let shell_id = mcp
         .send_thread_shell_command_request(ThreadShellCommandParams {
             thread_id: thread.id.clone(),
-            command: user_shell_command("hello from bang"),
+            command: shell_command,
         })
         .await?;
     let shell_resp: JSONRPCResponse = timeout(
@@ -111,7 +95,10 @@ async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> 
     assert_eq!(status, &CommandExecutionStatus::InProgress);
 
     let delta = wait_for_command_execution_output_delta(&mut mcp, &command_id).await?;
-    assert_eq!(normalize_shell_output(&delta.delta), "hello from bang");
+    assert_eq!(
+        delta.delta.trim_end_matches(['\r', '\n']),
+        expected_output.trim_end_matches(['\r', '\n'])
+    );
 
     let completed = wait_for_command_execution_completed(&mut mcp, Some(&command_id)).await?;
     let ThreadItem::CommandExecution {
@@ -128,10 +115,7 @@ async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> 
     assert_eq!(id, &command_id);
     assert_eq!(source, &CommandExecutionSource::UserShell);
     assert_eq!(status, &CommandExecutionStatus::Completed);
-    assert_eq!(
-        aggregated_output.as_deref().map(normalize_shell_output),
-        Some("hello from bang".to_string())
-    );
+    assert_eq!(aggregated_output.as_deref(), Some(expected_output.as_str()));
     assert_eq!(*exit_code, Some(0));
 
     timeout(
@@ -151,7 +135,7 @@ async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> 
         mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
     )
     .await??;
-    let ThreadReadResponse { thread } = to_response::<ThreadReadResponse>(read_resp)?;
+    let ThreadReadResponse { thread, .. } = to_response::<ThreadReadResponse>(read_resp)?;
     assert_eq!(thread.turns.len(), 1);
     let ThreadItem::CommandExecution {
         source,
@@ -168,10 +152,7 @@ async fn thread_shell_command_runs_as_standalone_turn_and_persists_history() -> 
     };
     assert_eq!(source, &CommandExecutionSource::UserShell);
     assert_eq!(status, &CommandExecutionStatus::Completed);
-    assert_eq!(
-        aggregated_output.as_deref().map(normalize_shell_output),
-        Some("hello from bang".to_string())
-    );
+    assert_eq!(aggregated_output.as_deref(), Some(expected_output.as_str()));
 
     Ok(())
 }
@@ -220,6 +201,7 @@ async fn thread_shell_command_uses_existing_active_turn() -> Result<()> {
     )
     .await??;
     let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+    let (shell_command, expected_output) = current_shell_output_command("active turn bang")?;
 
     let turn_id = mcp
         .send_turn_start_request(TurnStartParams {
@@ -264,7 +246,7 @@ async fn thread_shell_command_uses_existing_active_turn() -> Result<()> {
     let shell_id = mcp
         .send_thread_shell_command_request(ThreadShellCommandParams {
             thread_id: thread.id.clone(),
-            command: user_shell_command("active turn bang"),
+            command: shell_command,
         })
         .await?;
     let shell_resp: JSONRPCResponse = timeout(
@@ -293,10 +275,7 @@ async fn thread_shell_command_uses_existing_active_turn() -> Result<()> {
         unreachable!("helper returns command execution item");
     };
     assert_eq!(source, &CommandExecutionSource::UserShell);
-    assert_eq!(
-        aggregated_output.as_deref().map(normalize_shell_output),
-        Some("active turn bang".to_string())
-    );
+    assert_eq!(aggregated_output.as_deref(), Some(expected_output.as_str()));
 
     mcp.send_response(
         request_id,
@@ -326,7 +305,7 @@ async fn thread_shell_command_uses_existing_active_turn() -> Result<()> {
         mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
     )
     .await??;
-    let ThreadReadResponse { thread } = to_response::<ThreadReadResponse>(read_resp)?;
+    let ThreadReadResponse { thread, .. } = to_response::<ThreadReadResponse>(read_resp)?;
     assert_eq!(thread.turns.len(), 1);
     assert!(
         thread.turns[0].items.iter().any(|item| {
@@ -336,16 +315,31 @@ async fn thread_shell_command_uses_existing_active_turn() -> Result<()> {
                     source: CommandExecutionSource::UserShell,
                     aggregated_output,
                     ..
-                } if aggregated_output
-                    .as_deref()
-                    .map(normalize_shell_output)
-                    == Some("active turn bang".to_string())
+                } if aggregated_output.as_deref() == Some(expected_output.as_str())
             )
         }),
         "expected active-turn shell command to be persisted on the existing turn"
     );
 
     Ok(())
+}
+
+fn current_shell_output_command(text: &str) -> Result<(String, String)> {
+    let command_and_output = match default_user_shell().name() {
+        "powershell" => {
+            let escaped_text = text.replace('\'', "''");
+            (
+                format!("Write-Output '{escaped_text}'"),
+                format!("{text}\r\n"),
+            )
+        }
+        "cmd" => (format!("echo {text}"), format!("{text}\r\n")),
+        _ => {
+            let quoted_text = shlex::try_quote(text)?;
+            (format!("printf '%s\\n' {quoted_text}"), format!("{text}\n"))
+        }
+    };
+    Ok(command_and_output)
 }
 
 async fn wait_for_command_execution_started(

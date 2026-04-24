@@ -4,202 +4,228 @@
 //! the TUI output. Many assertions are snapshot-based so that layout regressions and status/header
 //! changes show up as stable, reviewable diffs.
 
-use super::*;
-use crate::app_event::AppEvent;
-use crate::app_event::ExitMode;
+pub(super) use super::*;
+pub(super) use crate::app_event::AppEvent;
+pub(super) use crate::app_event::ExitMode;
 #[cfg(not(target_os = "linux"))]
-use crate::app_event::RealtimeAudioDeviceKind;
-use crate::app_event_sender::AppEventSender;
-use crate::bottom_pane::FeedbackAudience;
-use crate::bottom_pane::LocalImageAttachment;
-use crate::bottom_pane::MentionBinding;
-use crate::bottom_pane::StatusLineItem;
-use crate::chatwidget::realtime::RealtimeConversationPhase;
-use crate::history_cell::UserHistoryCell;
-use crate::model_catalog::ModelCatalog;
-use crate::test_backend::VT100Backend;
-use crate::test_support::PathBufExt;
-use crate::test_support::test_path_display;
-use crate::tui::FrameRequester;
-use crate::version::CODEX_CLI_DISPLAY_VERSION;
-use assert_matches::assert_matches;
-use codex_app_server_protocol::AppSummary;
-use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
-use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;
-use codex_app_server_protocol::CollabAgentTool as AppServerCollabAgentTool;
-use codex_app_server_protocol::CollabAgentToolCallStatus as AppServerCollabAgentToolCallStatus;
-use codex_app_server_protocol::CommandAction as AppServerCommandAction;
-use codex_app_server_protocol::CommandExecutionRequestApprovalParams as AppServerCommandExecutionRequestApprovalParams;
-use codex_app_server_protocol::CommandExecutionSource as AppServerCommandExecutionSource;
-use codex_app_server_protocol::CommandExecutionStatus as AppServerCommandExecutionStatus;
-use codex_app_server_protocol::ErrorNotification;
-use codex_app_server_protocol::FileUpdateChange;
-use codex_app_server_protocol::GuardianApprovalReview;
-use codex_app_server_protocol::GuardianApprovalReviewStatus;
-use codex_app_server_protocol::GuardianRiskLevel as AppServerGuardianRiskLevel;
-use codex_app_server_protocol::HookCompletedNotification as AppServerHookCompletedNotification;
-use codex_app_server_protocol::HookEventName as AppServerHookEventName;
-use codex_app_server_protocol::HookExecutionMode as AppServerHookExecutionMode;
-use codex_app_server_protocol::HookHandlerType as AppServerHookHandlerType;
-use codex_app_server_protocol::HookOutputEntry as AppServerHookOutputEntry;
-use codex_app_server_protocol::HookOutputEntryKind as AppServerHookOutputEntryKind;
-use codex_app_server_protocol::HookRunStatus as AppServerHookRunStatus;
-use codex_app_server_protocol::HookRunSummary as AppServerHookRunSummary;
-use codex_app_server_protocol::HookScope as AppServerHookScope;
-use codex_app_server_protocol::HookStartedNotification as AppServerHookStartedNotification;
-use codex_app_server_protocol::ItemCompletedNotification;
-use codex_app_server_protocol::ItemGuardianApprovalReviewCompletedNotification;
-use codex_app_server_protocol::ItemGuardianApprovalReviewStartedNotification;
-use codex_app_server_protocol::ItemStartedNotification;
-use codex_app_server_protocol::MarketplaceInterface;
-use codex_app_server_protocol::McpServerStartupState;
-use codex_app_server_protocol::McpServerStatusUpdatedNotification;
-use codex_app_server_protocol::PatchApplyStatus as AppServerPatchApplyStatus;
-use codex_app_server_protocol::PatchChangeKind;
-use codex_app_server_protocol::PluginAuthPolicy;
-use codex_app_server_protocol::PluginDetail;
-use codex_app_server_protocol::PluginInstallPolicy;
-use codex_app_server_protocol::PluginInterface;
-use codex_app_server_protocol::PluginListResponse;
-use codex_app_server_protocol::PluginMarketplaceEntry;
-use codex_app_server_protocol::PluginReadResponse;
-use codex_app_server_protocol::PluginSource;
-use codex_app_server_protocol::PluginSummary;
-use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
-use codex_app_server_protocol::ServerNotification;
-use codex_app_server_protocol::SkillSummary;
-use codex_app_server_protocol::ThreadClosedNotification;
-use codex_app_server_protocol::ThreadItem as AppServerThreadItem;
-use codex_app_server_protocol::Turn as AppServerTurn;
-use codex_app_server_protocol::TurnCompletedNotification;
-use codex_app_server_protocol::TurnError as AppServerTurnError;
-use codex_app_server_protocol::TurnStartedNotification;
-use codex_app_server_protocol::TurnStatus as AppServerTurnStatus;
-use codex_app_server_protocol::UserInput as AppServerUserInput;
-use codex_core::config::ApprovalsReviewer;
-use codex_core::config::Config;
-use codex_core::config::ConfigBuilder;
-use codex_core::config::Constrained;
-use codex_core::config::ConstraintError;
-use codex_core::config::types::Notifications;
+pub(super) use crate::app_event::RealtimeAudioDeviceKind;
+pub(super) use crate::app_event_sender::AppEventSender;
+pub(super) use crate::bottom_pane::FeedbackAudience;
+pub(super) use crate::bottom_pane::LocalImageAttachment;
+pub(super) use crate::bottom_pane::MentionBinding;
+pub(super) use crate::bottom_pane::QueuedInputAction;
+pub(super) use crate::bottom_pane::StatusLineItem;
+pub(super) use crate::chatwidget::realtime::RealtimeConversationPhase;
+pub(super) use crate::history_cell::UserHistoryCell;
+pub(super) use crate::legacy_core::config::Config;
+pub(super) use crate::legacy_core::config::ConfigBuilder;
+pub(super) use crate::legacy_core::config::Constrained;
+pub(super) use crate::legacy_core::config::ConstraintError;
+pub(super) use crate::legacy_core::config_loader::AppRequirementToml;
+pub(super) use crate::legacy_core::config_loader::AppsRequirementsToml;
+pub(super) use crate::legacy_core::config_loader::ConfigLayerStack;
+pub(super) use crate::legacy_core::config_loader::ConfigRequirements;
+pub(super) use crate::legacy_core::config_loader::ConfigRequirementsToml;
+pub(super) use crate::legacy_core::config_loader::RequirementSource;
+pub(super) use crate::legacy_core::plugins::OPENAI_CURATED_MARKETPLACE_NAME;
+pub(super) use crate::model_catalog::ModelCatalog;
+pub(super) use crate::test_backend::VT100Backend;
+pub(super) use crate::test_support::PathBufExt;
+pub(super) use crate::test_support::test_path_buf;
+pub(super) use crate::test_support::test_path_display;
+pub(super) use crate::tui::FrameRequester;
+pub(super) use crate::version::CODEX_CLI_DISPLAY_VERSION;
+pub(super) use assert_matches::assert_matches;
+pub(super) use codex_app_server_protocol::AddCreditsNudgeCreditType;
+pub(super) use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
+pub(super) use codex_app_server_protocol::AdditionalFileSystemPermissions as AppServerAdditionalFileSystemPermissions;
+pub(super) use codex_app_server_protocol::AdditionalNetworkPermissions as AppServerAdditionalNetworkPermissions;
+pub(super) use codex_app_server_protocol::AdditionalPermissionProfile as AppServerAdditionalPermissionProfile;
+pub(super) use codex_app_server_protocol::AppSummary;
+pub(super) use codex_app_server_protocol::AutoReviewDecisionSource as AppServerGuardianApprovalReviewDecisionSource;
+pub(super) use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
+pub(super) use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;
+pub(super) use codex_app_server_protocol::CollabAgentTool as AppServerCollabAgentTool;
+pub(super) use codex_app_server_protocol::CollabAgentToolCallStatus as AppServerCollabAgentToolCallStatus;
+pub(super) use codex_app_server_protocol::CommandAction as AppServerCommandAction;
+pub(super) use codex_app_server_protocol::CommandExecutionRequestApprovalParams as AppServerCommandExecutionRequestApprovalParams;
+pub(super) use codex_app_server_protocol::CommandExecutionSource as AppServerCommandExecutionSource;
+pub(super) use codex_app_server_protocol::CommandExecutionStatus as AppServerCommandExecutionStatus;
+pub(super) use codex_app_server_protocol::ConfigWarningNotification;
+pub(super) use codex_app_server_protocol::ErrorNotification;
+pub(super) use codex_app_server_protocol::FileUpdateChange;
+pub(super) use codex_app_server_protocol::GuardianApprovalReview;
+pub(super) use codex_app_server_protocol::GuardianApprovalReviewAction as AppServerGuardianApprovalReviewAction;
+pub(super) use codex_app_server_protocol::GuardianApprovalReviewStatus;
+pub(super) use codex_app_server_protocol::GuardianCommandSource as AppServerGuardianCommandSource;
+pub(super) use codex_app_server_protocol::GuardianRiskLevel as AppServerGuardianRiskLevel;
+pub(super) use codex_app_server_protocol::GuardianUserAuthorization as AppServerGuardianUserAuthorization;
+pub(super) use codex_app_server_protocol::HookCompletedNotification as AppServerHookCompletedNotification;
+pub(super) use codex_app_server_protocol::HookEventName as AppServerHookEventName;
+pub(super) use codex_app_server_protocol::HookExecutionMode as AppServerHookExecutionMode;
+pub(super) use codex_app_server_protocol::HookHandlerType as AppServerHookHandlerType;
+pub(super) use codex_app_server_protocol::HookOutputEntry as AppServerHookOutputEntry;
+pub(super) use codex_app_server_protocol::HookOutputEntryKind as AppServerHookOutputEntryKind;
+pub(super) use codex_app_server_protocol::HookRunStatus as AppServerHookRunStatus;
+pub(super) use codex_app_server_protocol::HookRunSummary as AppServerHookRunSummary;
+pub(super) use codex_app_server_protocol::HookScope as AppServerHookScope;
+pub(super) use codex_app_server_protocol::HookStartedNotification as AppServerHookStartedNotification;
+pub(super) use codex_app_server_protocol::ItemCompletedNotification;
+pub(super) use codex_app_server_protocol::ItemGuardianApprovalReviewCompletedNotification;
+pub(super) use codex_app_server_protocol::ItemGuardianApprovalReviewStartedNotification;
+pub(super) use codex_app_server_protocol::ItemStartedNotification;
+pub(super) use codex_app_server_protocol::MarketplaceInterface;
+pub(super) use codex_app_server_protocol::McpServerStartupState;
+pub(super) use codex_app_server_protocol::McpServerStatusUpdatedNotification;
+pub(super) use codex_app_server_protocol::PatchApplyStatus as AppServerPatchApplyStatus;
+pub(super) use codex_app_server_protocol::PatchChangeKind;
+pub(super) use codex_app_server_protocol::PermissionsRequestApprovalParams as AppServerPermissionsRequestApprovalParams;
+pub(super) use codex_app_server_protocol::PluginAuthPolicy;
+pub(super) use codex_app_server_protocol::PluginDetail;
+pub(super) use codex_app_server_protocol::PluginInstallPolicy;
+pub(super) use codex_app_server_protocol::PluginInterface;
+pub(super) use codex_app_server_protocol::PluginListResponse;
+pub(super) use codex_app_server_protocol::PluginMarketplaceEntry;
+pub(super) use codex_app_server_protocol::PluginReadResponse;
+pub(super) use codex_app_server_protocol::PluginSource;
+pub(super) use codex_app_server_protocol::PluginSummary;
+pub(super) use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
+pub(super) use codex_app_server_protocol::ServerNotification;
+pub(super) use codex_app_server_protocol::SkillSummary;
+pub(super) use codex_app_server_protocol::ThreadClosedNotification;
+pub(super) use codex_app_server_protocol::ThreadItem as AppServerThreadItem;
+pub(super) use codex_app_server_protocol::Turn as AppServerTurn;
+pub(super) use codex_app_server_protocol::TurnCompletedNotification;
+pub(super) use codex_app_server_protocol::TurnError as AppServerTurnError;
+pub(super) use codex_app_server_protocol::TurnStartedNotification;
+pub(super) use codex_app_server_protocol::TurnStatus as AppServerTurnStatus;
+pub(super) use codex_app_server_protocol::UserInput as AppServerUserInput;
+pub(super) use codex_app_server_protocol::WarningNotification;
+pub(super) use codex_config::types::ApprovalsReviewer;
+pub(super) use codex_config::types::Notifications;
 #[cfg(target_os = "windows")]
-use codex_core::config::types::WindowsSandboxModeToml;
-use codex_core::config_loader::AppRequirementToml;
-use codex_core::config_loader::AppsRequirementsToml;
-use codex_core::config_loader::ConfigLayerStack;
-use codex_core::config_loader::ConfigRequirements;
-use codex_core::config_loader::ConfigRequirementsToml;
-use codex_core::config_loader::RequirementSource;
-use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
-use codex_core::plugins::OPENAI_CURATED_MARKETPLACE_NAME;
-use codex_core::skills::model::SkillMetadata;
-use codex_features::FEATURES;
-use codex_features::Feature;
-use codex_git_utils::CommitLogEntry;
-use codex_otel::RuntimeMetricsSummary;
-use codex_otel::SessionTelemetry;
-use codex_protocol::ThreadId;
-use codex_protocol::account::PlanType;
-use codex_protocol::config_types::CollaborationMode;
-use codex_protocol::config_types::ModeKind;
-use codex_protocol::config_types::Personality;
-use codex_protocol::config_types::ServiceTier;
-use codex_protocol::config_types::Settings;
-use codex_protocol::items::AgentMessageContent;
-use codex_protocol::items::AgentMessageItem;
-use codex_protocol::items::PlanItem;
-use codex_protocol::items::TurnItem;
-use codex_protocol::items::UserMessageItem;
-use codex_protocol::models::MessagePhase;
-use codex_protocol::openai_models::ModelPreset;
-use codex_protocol::openai_models::ReasoningEffortPreset;
-use codex_protocol::openai_models::default_input_modalities;
-use codex_protocol::parse_command::ParsedCommand;
-use codex_protocol::plan_tool::PlanItemArg;
-use codex_protocol::plan_tool::StepStatus;
-use codex_protocol::plan_tool::UpdatePlanArgs;
-use codex_protocol::protocol::AgentMessageDeltaEvent;
-use codex_protocol::protocol::AgentMessageEvent;
-use codex_protocol::protocol::AgentReasoningDeltaEvent;
-use codex_protocol::protocol::AgentReasoningEvent;
-use codex_protocol::protocol::AgentStatus;
-use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
-use codex_protocol::protocol::BackgroundEventEvent;
-use codex_protocol::protocol::CodexErrorInfo;
-use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
-use codex_protocol::protocol::CollabAgentSpawnEndEvent;
-use codex_protocol::protocol::CreditsSnapshot;
-use codex_protocol::protocol::Event;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::ExecApprovalRequestEvent;
-use codex_protocol::protocol::ExecCommandBeginEvent;
-use codex_protocol::protocol::ExecCommandEndEvent;
-use codex_protocol::protocol::ExecCommandSource;
-use codex_protocol::protocol::ExecCommandStatus as CoreExecCommandStatus;
-use codex_protocol::protocol::ExecPolicyAmendment;
-use codex_protocol::protocol::ExitedReviewModeEvent;
-use codex_protocol::protocol::FileChange;
-use codex_protocol::protocol::GuardianAssessmentEvent;
-use codex_protocol::protocol::GuardianAssessmentStatus;
-use codex_protocol::protocol::GuardianRiskLevel;
-use codex_protocol::protocol::ImageGenerationEndEvent;
-use codex_protocol::protocol::ItemCompletedEvent;
-use codex_protocol::protocol::McpStartupCompleteEvent;
-use codex_protocol::protocol::McpStartupStatus;
-use codex_protocol::protocol::McpStartupUpdateEvent;
-use codex_protocol::protocol::NonSteerableTurnKind;
-use codex_protocol::protocol::Op;
-use codex_protocol::protocol::PatchApplyBeginEvent;
-use codex_protocol::protocol::PatchApplyEndEvent;
-use codex_protocol::protocol::PatchApplyStatus as CorePatchApplyStatus;
-use codex_protocol::protocol::RateLimitWindow;
-use codex_protocol::protocol::ReadOnlyAccess;
-use codex_protocol::protocol::RealtimeConversationClosedEvent;
-use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
-use codex_protocol::protocol::RealtimeEvent;
-use codex_protocol::protocol::ReviewRequest;
-use codex_protocol::protocol::ReviewTarget;
-use codex_protocol::protocol::SessionConfiguredEvent;
-use codex_protocol::protocol::SessionSource;
-use codex_protocol::protocol::SkillScope;
-use codex_protocol::protocol::StreamErrorEvent;
-use codex_protocol::protocol::TerminalInteractionEvent;
-use codex_protocol::protocol::ThreadRolledBackEvent;
-use codex_protocol::protocol::TokenCountEvent;
-use codex_protocol::protocol::TokenUsage;
-use codex_protocol::protocol::TokenUsageInfo;
-use codex_protocol::protocol::TurnCompleteEvent;
-use codex_protocol::protocol::TurnStartedEvent;
-use codex_protocol::protocol::UndoCompletedEvent;
-use codex_protocol::protocol::UndoStartedEvent;
-use codex_protocol::protocol::ViewImageToolCallEvent;
-use codex_protocol::protocol::WarningEvent;
-use codex_protocol::request_user_input::RequestUserInputEvent;
-use codex_protocol::request_user_input::RequestUserInputQuestion;
-use codex_protocol::request_user_input::RequestUserInputQuestionOption;
-use codex_protocol::user_input::TextElement;
-use codex_protocol::user_input::UserInput;
-use codex_terminal_detection::Multiplexer;
-use codex_terminal_detection::TerminalInfo;
-use codex_terminal_detection::TerminalName;
-use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_approval_presets::builtin_approval_presets;
-use crossterm::event::KeyCode;
-use crossterm::event::KeyEvent;
-use crossterm::event::KeyModifiers;
-use insta::assert_snapshot;
-use pretty_assertions::assert_eq;
+pub(super) use codex_config::types::WindowsSandboxModeToml;
+pub(super) use codex_core_skills::model::SkillMetadata;
+pub(super) use codex_features::FEATURES;
+pub(super) use codex_features::Feature;
+pub(super) use codex_git_utils::CommitLogEntry;
+pub(super) use codex_models_manager::collaboration_mode_presets::CollaborationModesConfig;
+pub(super) use codex_otel::RuntimeMetricsSummary;
+pub(super) use codex_otel::SessionTelemetry;
+pub(super) use codex_protocol::ThreadId;
+pub(super) use codex_protocol::account::PlanType;
+pub(super) use codex_protocol::config_types::CollaborationMode;
+pub(super) use codex_protocol::config_types::ModeKind;
+pub(super) use codex_protocol::config_types::Personality;
+pub(super) use codex_protocol::config_types::ServiceTier;
+pub(super) use codex_protocol::config_types::Settings;
+pub(super) use codex_protocol::items::AgentMessageContent;
+pub(super) use codex_protocol::items::AgentMessageItem;
+pub(super) use codex_protocol::items::PlanItem;
+pub(super) use codex_protocol::items::TurnItem;
+pub(super) use codex_protocol::items::UserMessageItem;
+pub(super) use codex_protocol::models::FileSystemPermissions;
+pub(super) use codex_protocol::models::MessagePhase;
+pub(super) use codex_protocol::models::NetworkPermissions;
+pub(super) use codex_protocol::models::PermissionProfile;
+pub(super) use codex_protocol::openai_models::ModelInfo;
+pub(super) use codex_protocol::openai_models::ModelPreset;
+pub(super) use codex_protocol::openai_models::ModelsResponse;
+pub(super) use codex_protocol::openai_models::ReasoningEffortPreset;
+pub(super) use codex_protocol::openai_models::default_input_modalities;
+pub(super) use codex_protocol::parse_command::ParsedCommand;
+pub(super) use codex_protocol::plan_tool::PlanItemArg;
+pub(super) use codex_protocol::plan_tool::StepStatus;
+pub(super) use codex_protocol::plan_tool::UpdatePlanArgs;
+pub(super) use codex_protocol::protocol::AgentMessageDeltaEvent;
+pub(super) use codex_protocol::protocol::AgentMessageEvent;
+pub(super) use codex_protocol::protocol::AgentReasoningDeltaEvent;
+pub(super) use codex_protocol::protocol::AgentReasoningEvent;
+pub(super) use codex_protocol::protocol::AgentStatus;
+pub(super) use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
+pub(super) use codex_protocol::protocol::BackgroundEventEvent;
+pub(super) use codex_protocol::protocol::CodexErrorInfo;
+pub(super) use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
+pub(super) use codex_protocol::protocol::CollabAgentSpawnEndEvent;
+pub(super) use codex_protocol::protocol::CreditsSnapshot;
+pub(super) use codex_protocol::protocol::Event;
+pub(super) use codex_protocol::protocol::EventMsg;
+pub(super) use codex_protocol::protocol::ExecApprovalRequestEvent;
+pub(super) use codex_protocol::protocol::ExecCommandBeginEvent;
+pub(super) use codex_protocol::protocol::ExecCommandEndEvent;
+pub(super) use codex_protocol::protocol::ExecCommandSource;
+pub(super) use codex_protocol::protocol::ExecCommandStatus as CoreExecCommandStatus;
+pub(super) use codex_protocol::protocol::ExecPolicyAmendment;
+pub(super) use codex_protocol::protocol::ExitedReviewModeEvent;
+pub(super) use codex_protocol::protocol::FileChange;
+pub(super) use codex_protocol::protocol::GuardianAssessmentAction;
+pub(super) use codex_protocol::protocol::GuardianAssessmentDecisionSource;
+pub(super) use codex_protocol::protocol::GuardianAssessmentEvent;
+pub(super) use codex_protocol::protocol::GuardianAssessmentStatus;
+pub(super) use codex_protocol::protocol::GuardianCommandSource;
+pub(super) use codex_protocol::protocol::GuardianRiskLevel;
+pub(super) use codex_protocol::protocol::GuardianUserAuthorization;
+pub(super) use codex_protocol::protocol::ImageGenerationEndEvent;
+pub(super) use codex_protocol::protocol::ItemCompletedEvent;
+pub(super) use codex_protocol::protocol::McpStartupCompleteEvent;
+pub(super) use codex_protocol::protocol::McpStartupStatus;
+pub(super) use codex_protocol::protocol::McpStartupUpdateEvent;
+pub(super) use codex_protocol::protocol::NonSteerableTurnKind;
+pub(super) use codex_protocol::protocol::Op;
+pub(super) use codex_protocol::protocol::PatchApplyBeginEvent;
+pub(super) use codex_protocol::protocol::PatchApplyEndEvent;
+pub(super) use codex_protocol::protocol::PatchApplyStatus as CorePatchApplyStatus;
+pub(super) use codex_protocol::protocol::RateLimitReachedType;
+pub(super) use codex_protocol::protocol::RateLimitSnapshot;
+pub(super) use codex_protocol::protocol::RateLimitWindow;
+pub(super) use codex_protocol::protocol::ReadOnlyAccess;
+pub(super) use codex_protocol::protocol::RealtimeConversationClosedEvent;
+pub(super) use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
+pub(super) use codex_protocol::protocol::RealtimeEvent;
+pub(super) use codex_protocol::protocol::ReviewRequest;
+pub(super) use codex_protocol::protocol::ReviewTarget;
+pub(super) use codex_protocol::protocol::SessionConfiguredEvent;
+pub(super) use codex_protocol::protocol::SessionSource;
+pub(super) use codex_protocol::protocol::SkillScope;
+pub(super) use codex_protocol::protocol::StreamErrorEvent;
+pub(super) use codex_protocol::protocol::TerminalInteractionEvent;
+pub(super) use codex_protocol::protocol::ThreadRolledBackEvent;
+pub(super) use codex_protocol::protocol::TokenCountEvent;
+pub(super) use codex_protocol::protocol::TokenUsage;
+pub(super) use codex_protocol::protocol::TokenUsageInfo;
+pub(super) use codex_protocol::protocol::TurnCompleteEvent;
+pub(super) use codex_protocol::protocol::TurnStartedEvent;
+pub(super) use codex_protocol::protocol::UndoCompletedEvent;
+pub(super) use codex_protocol::protocol::UndoStartedEvent;
+pub(super) use codex_protocol::protocol::ViewImageToolCallEvent;
+pub(super) use codex_protocol::protocol::WarningEvent;
+pub(super) use codex_protocol::request_permissions::RequestPermissionProfile;
+pub(super) use codex_protocol::request_user_input::RequestUserInputEvent;
+pub(super) use codex_protocol::request_user_input::RequestUserInputQuestion;
+pub(super) use codex_protocol::request_user_input::RequestUserInputQuestionOption;
+pub(super) use codex_protocol::user_input::TextElement;
+pub(super) use codex_protocol::user_input::UserInput;
+pub(super) use codex_terminal_detection::Multiplexer;
+pub(super) use codex_terminal_detection::TerminalInfo;
+pub(super) use codex_terminal_detection::TerminalName;
+pub(super) use codex_utils_absolute_path::AbsolutePathBuf;
+pub(super) use codex_utils_approval_presets::builtin_approval_presets;
+pub(super) use crossterm::event::KeyCode;
+pub(super) use crossterm::event::KeyEvent;
+pub(super) use crossterm::event::KeyModifiers;
+pub(super) use insta::assert_snapshot;
+pub(super) use serde_json::json;
 #[cfg(target_os = "windows")]
-use serial_test::serial;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::path::PathBuf;
-use tempfile::NamedTempFile;
-use tempfile::tempdir;
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::unbounded_channel;
-use toml::Value as TomlValue;
+pub(super) use serial_test::serial;
+pub(super) use std::collections::BTreeMap;
+pub(super) use std::collections::HashMap;
+pub(super) use std::collections::HashSet;
+pub(super) use std::path::PathBuf;
+pub(super) use tempfile::NamedTempFile;
+pub(super) use tempfile::tempdir;
+pub(super) use tokio::sync::mpsc::error::TryRecvError;
+pub(super) use tokio::sync::mpsc::unbounded_channel;
+pub(super) use toml::Value as TomlValue;
 
 const LEGACY_LOCAL1_CHECKLIST_HEADER: &str = "local1 定制功能已启用";
 const LEGACY_LOCAL1_TRAY_OVERVIEW: &str = "Provider refresh/retry 与 Windows tray 联动";
@@ -13873,452 +13899,70 @@ async fn post_tool_use_hook_events_render_snapshot() {
     .await;
 }
 
-#[tokio::test]
-async fn session_start_hook_events_render_snapshot() {
-    assert_hook_events_snapshot(
-        codex_protocol::protocol::HookEventName::SessionStart,
-        "session-start:0:/tmp/hooks.json",
-        "warming the shell",
-        "session_start_hook_events_render_snapshot",
+pub(super) use serial_test::serial;
+pub(super) use std::collections::BTreeMap;
+pub(super) use std::collections::HashMap;
+pub(super) use std::collections::HashSet;
+pub(super) use std::path::PathBuf;
+pub(super) use tempfile::NamedTempFile;
+pub(super) use tempfile::tempdir;
+pub(super) use tokio::sync::mpsc::error::TryRecvError;
+pub(super) use tokio::sync::mpsc::unbounded_channel;
+pub(super) use toml::Value as TomlValue;
+
+pub(super) fn chatwidget_snapshot_dir() -> PathBuf {
+    let snapshot_file = codex_utils_cargo_bin::find_resource!(
+        "src/chatwidget/snapshots/codex_tui__chatwidget__tests__chatwidget_tall.snap"
     )
-    .await;
+    .expect("snapshot file");
+    snapshot_file
+        .parent()
+        .unwrap_or_else(|| panic!("snapshot file has no parent: {}", snapshot_file.display()))
+        .to_path_buf()
 }
 
-async fn assert_hook_events_snapshot(
-    event_name: codex_protocol::protocol::HookEventName,
-    run_id: &str,
-    status_message: &str,
-    snapshot_name: &str,
-) {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.handle_codex_event(Event {
-        id: "hook-1".into(),
-        msg: EventMsg::HookStarted(codex_protocol::protocol::HookStartedEvent {
-            turn_id: None,
-            run: codex_protocol::protocol::HookRunSummary {
-                id: run_id.to_string(),
-                event_name,
-                handler_type: codex_protocol::protocol::HookHandlerType::Command,
-                execution_mode: codex_protocol::protocol::HookExecutionMode::Sync,
-                scope: codex_protocol::protocol::HookScope::Turn,
-                source_path: PathBuf::from("/tmp/hooks.json"),
-                display_order: 0,
-                status: codex_protocol::protocol::HookRunStatus::Running,
-                status_message: Some(status_message.to_string()),
-                started_at: 1,
-                completed_at: None,
-                duration_ms: None,
-                entries: vec![],
-            },
-        }),
-    });
-
-    chat.handle_codex_event(Event {
-        id: "hook-1".into(),
-        msg: EventMsg::HookCompleted(codex_protocol::protocol::HookCompletedEvent {
-            turn_id: None,
-            run: codex_protocol::protocol::HookRunSummary {
-                id: run_id.to_string(),
-                event_name,
-                handler_type: codex_protocol::protocol::HookHandlerType::Command,
-                execution_mode: codex_protocol::protocol::HookExecutionMode::Sync,
-                scope: codex_protocol::protocol::HookScope::Turn,
-                source_path: PathBuf::from("/tmp/hooks.json"),
-                display_order: 0,
-                status: codex_protocol::protocol::HookRunStatus::Completed,
-                status_message: Some(status_message.to_string()),
-                started_at: 1,
-                completed_at: Some(11),
-                duration_ms: Some(10),
-                entries: vec![
-                    codex_protocol::protocol::HookOutputEntry {
-                        kind: codex_protocol::protocol::HookOutputEntryKind::Warning,
-                        text: "Heads up from the hook".to_string(),
-                    },
-                    codex_protocol::protocol::HookOutputEntry {
-                        kind: codex_protocol::protocol::HookOutputEntryKind::Context,
-                        text: "Remember the startup checklist.".to_string(),
-                    },
-                ],
-            },
-        }),
-    });
-
-    let cells = drain_insert_history(&mut rx);
-    let combined = cells
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<String>();
-    assert_snapshot!(snapshot_name, combined);
-}
-
-// Combined visual snapshot using vt100 for history + direct buffer overlay for UI.
-// This renders the final visual as seen in a terminal: history above, then a blank line,
-// then the exec block, another blank line, the status line, a blank line, and the composer.
-#[tokio::test]
-async fn chatwidget_exec_and_status_layout_vt100_snapshot() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    complete_assistant_message(
-        &mut chat,
-        "msg-search",
-        "I’m going to search the repo for where “Change Approved” is rendered to update that view.",
-        /*phase*/ None,
-    );
-
-    let command = vec!["bash".into(), "-lc".into(), "rg \"Change Approved\"".into()];
-    let parsed_cmd = vec![
-        ParsedCommand::Search {
-            query: Some("Change Approved".into()),
-            path: None,
-            cmd: "rg \"Change Approved\"".into(),
-        },
-        ParsedCommand::Read {
-            name: "diff_render.rs".into(),
-            cmd: "cat diff_render.rs".into(),
-            path: "diff_render.rs".into(),
-        },
-    ];
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    chat.handle_codex_event(Event {
-        id: "c1".into(),
-        msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
-            call_id: "c1".into(),
-            process_id: None,
-            turn_id: "turn-1".into(),
-            command: command.clone(),
-            cwd: cwd.clone(),
-            parsed_cmd: parsed_cmd.clone(),
-            source: ExecCommandSource::Agent,
-            interaction_input: None,
-        }),
-    });
-    chat.handle_codex_event(Event {
-        id: "c1".into(),
-        msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
-            call_id: "c1".into(),
-            process_id: None,
-            turn_id: "turn-1".into(),
-            command,
-            cwd,
-            parsed_cmd,
-            source: ExecCommandSource::Agent,
-            interaction_input: None,
-            stdout: String::new(),
-            stderr: String::new(),
-            aggregated_output: String::new(),
-            exit_code: 0,
-            duration: std::time::Duration::from_millis(16000),
-            formatted_output: String::new(),
-            status: CoreExecCommandStatus::Completed,
-        }),
-    });
-    chat.handle_codex_event(Event {
-        id: "t1".into(),
-        msg: EventMsg::TurnStarted(TurnStartedEvent {
-            turn_id: "turn-1".to_string(),
-            model_context_window: None,
-            collaboration_mode_kind: ModeKind::Default,
-        }),
-    });
-    chat.handle_codex_event(Event {
-        id: "t1".into(),
-        msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent {
-            delta: "**Investigating rendering code**".into(),
-        }),
-    });
-    chat.bottom_pane.set_composer_text(
-        "Summarize recent commits".to_string(),
-        Vec::new(),
-        Vec::new(),
-    );
-
-    let width: u16 = 80;
-    let ui_height: u16 = chat.desired_height(width);
-    let vt_height: u16 = 40;
-    let viewport = Rect::new(0, vt_height - ui_height - 1, width, ui_height);
-
-    let backend = VT100Backend::new(width, vt_height);
-    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
-    term.set_viewport_area(viewport);
-
-    for lines in drain_insert_history(&mut rx) {
-        crate::insert_history::insert_history_lines(&mut term, lines)
-            .expect("Failed to insert history lines in test");
-    }
-
-    term.draw(|f| {
-        chat.render(f.area(), f.buffer_mut());
-    })
-    .unwrap();
-
-    assert_snapshot!(normalize_snapshot_paths(
-        term.backend().vt100().screen().contents()
-    ));
-}
-
-// E2E vt100 snapshot for complex markdown with indented and nested fenced code blocks
-#[tokio::test]
-async fn chatwidget_markdown_code_blocks_vt100_snapshot() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    // Simulate a final agent message via streaming deltas instead of a single message
-
-    chat.handle_codex_event(Event {
-        id: "t1".into(),
-        msg: EventMsg::TurnStarted(TurnStartedEvent {
-            turn_id: "turn-1".to_string(),
-            model_context_window: None,
-            collaboration_mode_kind: ModeKind::Default,
-        }),
-    });
-    // Build a vt100 visual from the history insertions only (no UI overlay)
-    let width: u16 = 80;
-    let height: u16 = 50;
-    let backend = VT100Backend::new(width, height);
-    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
-    // Place viewport at the last line so that history lines insert above it
-    term.set_viewport_area(Rect::new(0, height - 1, width, 1));
-
-    // Simulate streaming via AgentMessageDelta in 2-character chunks (no final AgentMessage).
-    let source: &str = r#"
-
-    -- Indented code block (4 spaces)
-    SELECT *
-    FROM "users"
-    WHERE "email" LIKE '%@example.com';
-
-````markdown
-```sh
-printf 'fenced within fenced\n'
-```
-````
-
-```jsonc
-{
-  // comment allowed in jsonc
-  "path": "C:\\Program Files\\App",
-  "regex": "^foo.*(bar)?$"
-}
-```
-"#;
-
-    let mut it = source.chars();
-    loop {
-        let mut delta = String::new();
-        match it.next() {
-            Some(c) => delta.push(c),
-            None => break,
-        }
-        if let Some(c2) = it.next() {
-            delta.push(c2);
-        }
-
-        chat.handle_codex_event(Event {
-            id: "t1".into(),
-            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }),
+macro_rules! assert_chatwidget_snapshot {
+    ($name:expr, $value:expr $(,)?) => {{
+        let mut settings = insta::Settings::clone_current();
+        settings.set_prepend_module_to_snapshot(false);
+        settings.set_snapshot_path(crate::chatwidget::tests::chatwidget_snapshot_dir());
+        settings.bind(|| {
+            insta::assert_snapshot!(format!("codex_tui__chatwidget__tests__{}", $name), $value);
         });
-        // Drive commit ticks and drain emitted history lines into the vt100 buffer.
-        loop {
-            chat.on_commit_tick();
-            let mut inserted_any = false;
-            while let Ok(app_ev) = rx.try_recv() {
-                if let AppEvent::InsertHistoryCell(cell) = app_ev {
-                    let lines = cell.display_lines(width);
-                    crate::insert_history::insert_history_lines(&mut term, lines)
-                        .expect("Failed to insert history lines in test");
-                    inserted_any = true;
-                }
-            }
-            if !inserted_any {
-                break;
-            }
-        }
-    }
-
-    // Finalize the stream without sending a final AgentMessage, to flush any tail.
-    chat.handle_codex_event(Event {
-        id: "t1".into(),
-        msg: EventMsg::TurnComplete(TurnCompleteEvent {
-            turn_id: "turn-1".to_string(),
-            last_agent_message: None,
-        }),
-    });
-    for lines in drain_insert_history(&mut rx) {
-        crate::insert_history::insert_history_lines(&mut term, lines)
-            .expect("Failed to insert history lines in test");
-    }
-
-    assert_snapshot!(normalize_snapshot_paths(
-        term.backend().vt100().screen().contents()
-    ));
+    }};
+    ($name:expr, $value:expr, @$snapshot:literal $(,)?) => {{
+        let mut settings = insta::Settings::clone_current();
+        settings.set_prepend_module_to_snapshot(false);
+        settings.set_snapshot_path(crate::chatwidget::tests::chatwidget_snapshot_dir());
+        settings.bind(|| {
+            insta::assert_snapshot!(
+                format!("codex_tui__chatwidget__tests__{}", $name),
+                &($value),
+                @$snapshot
+            );
+        });
+    }};
 }
 
-#[tokio::test]
-async fn chatwidget_tall() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.thread_id = Some(ThreadId::new());
-    chat.handle_codex_event(Event {
-        id: "t1".into(),
-        msg: EventMsg::TurnStarted(TurnStartedEvent {
-            turn_id: "turn-1".to_string(),
-            model_context_window: None,
-            collaboration_mode_kind: ModeKind::Default,
-        }),
-    });
-    for i in 0..30 {
-        chat.queue_user_message(format!("Hello, world! {i}").into());
-    }
-    let width: u16 = 80;
-    let height: u16 = 24;
-    let backend = VT100Backend::new(width, height);
-    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
-    let desired_height = chat.desired_height(width).min(height);
-    term.set_viewport_area(Rect::new(0, height - desired_height, width, desired_height));
-    term.draw(|f| {
-        chat.render(f.area(), f.buffer_mut());
-    })
-    .unwrap();
-    assert_snapshot!(normalize_snapshot_paths(
-        term.backend().vt100().screen().contents()
-    ));
-}
+mod app_server;
+mod approval_requests;
+mod background_events;
+mod composer_submission;
+mod exec_flow;
+mod guardian;
+mod helpers;
+mod history_replay;
+mod mcp_startup;
+mod permissions;
+mod plan_mode;
+mod popups_and_settings;
+mod review_mode;
+mod side;
+mod slash_commands;
+mod status_and_layout;
+mod status_command_tests;
 
-#[tokio::test]
-async fn enter_submits_steer_while_review_is_running() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.thread_id = Some(ThreadId::new());
-    chat.handle_codex_event(Event {
-        id: "turn-start".into(),
-        msg: EventMsg::TurnStarted(TurnStartedEvent {
-            turn_id: "turn-1".to_string(),
-            model_context_window: None,
-            collaboration_mode_kind: ModeKind::Default,
-        }),
-    });
-
-    chat.handle_codex_event(Event {
-        id: "review-1".into(),
-        msg: EventMsg::EnteredReviewMode(ReviewRequest {
-            target: ReviewTarget::UncommittedChanges,
-            user_facing_hint: Some("current changes".to_string()),
-        }),
-    });
-    let _ = drain_insert_history(&mut rx);
-
-    chat.bottom_pane.set_composer_text(
-        "Steer submitted while /review was running.".to_string(),
-        Vec::new(),
-        Vec::new(),
-    );
-    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-    assert!(chat.queued_user_messages.is_empty());
-    assert_eq!(chat.pending_steers.len(), 1);
-    assert_eq!(
-        chat.pending_steers.front().unwrap().user_message.text,
-        "Steer submitted while /review was running."
-    );
-    match next_submit_op(&mut op_rx) {
-        Op::UserTurn { items, .. } => assert_eq!(
-            items,
-            vec![UserInput::Text {
-                text: "Steer submitted while /review was running.".to_string(),
-                text_elements: Vec::new(),
-            }]
-        ),
-        other => panic!("expected running-turn steer submit, got {other:?}"),
-    }
-    assert!(drain_insert_history(&mut rx).is_empty());
-}
-
-#[tokio::test]
-async fn review_queues_user_messages_snapshot() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.thread_id = Some(ThreadId::new());
-    chat.handle_codex_event(Event {
-        id: "turn-start".into(),
-        msg: EventMsg::TurnStarted(TurnStartedEvent {
-            turn_id: "turn-1".to_string(),
-            model_context_window: None,
-            collaboration_mode_kind: ModeKind::Default,
-        }),
-    });
-
-    chat.handle_codex_event(Event {
-        id: "review-1".into(),
-        msg: EventMsg::EnteredReviewMode(ReviewRequest {
-            target: ReviewTarget::UncommittedChanges,
-            user_facing_hint: Some("current changes".to_string()),
-        }),
-    });
-    let _ = drain_insert_history(&mut rx);
-
-    chat.submit_user_message(UserMessage::from(
-        "Steer submitted while /review was running.".to_string(),
-    ));
-    chat.handle_codex_event(Event {
-        id: "steer-rejected".into(),
-        msg: EventMsg::Error(ErrorEvent {
-            message: "cannot steer a review turn".to_string(),
-            codex_error_info: Some(CodexErrorInfo::ActiveTurnNotSteerable {
-                turn_kind: NonSteerableTurnKind::Review,
-            }),
-        }),
-    });
-
-    let width: u16 = 80;
-    let height: u16 = 18;
-    let backend = VT100Backend::new(width, height);
-    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
-    let desired_height = chat.desired_height(width).min(height);
-    term.set_viewport_area(Rect::new(0, height - desired_height, width, desired_height));
-    term.draw(|f| {
-        chat.render(f.area(), f.buffer_mut());
-    })
-    .unwrap();
-    assert_snapshot!(normalize_snapshot_paths(
-        term.backend().vt100().screen().contents()
-    ));
-}
-
-#[tokio::test]
-async fn compact_queues_user_messages_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.thread_id = Some(ThreadId::new());
-    chat.handle_codex_event(Event {
-        id: "turn-start".into(),
-        msg: EventMsg::TurnStarted(TurnStartedEvent {
-            turn_id: "turn-1".to_string(),
-            model_context_window: None,
-            collaboration_mode_kind: ModeKind::Default,
-        }),
-    });
-
-    chat.submit_user_message(UserMessage::from(
-        "Steer submitted while /compact was running.".to_string(),
-    ));
-    chat.handle_codex_event(Event {
-        id: "steer-rejected".into(),
-        msg: EventMsg::Error(ErrorEvent {
-            message: "cannot steer a compact turn".to_string(),
-            codex_error_info: Some(CodexErrorInfo::ActiveTurnNotSteerable {
-                turn_kind: NonSteerableTurnKind::Compact,
-            }),
-        }),
-    });
-
-    let width: u16 = 80;
-    let height: u16 = 18;
-    let backend = VT100Backend::new(width, height);
-    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
-    let desired_height = chat.desired_height(width).min(height);
-    term.set_viewport_area(Rect::new(0, height - desired_height, width, desired_height));
-    term.draw(|f| {
-        chat.render(f.area(), f.buffer_mut());
-    })
-    .unwrap();
-    assert_snapshot!(normalize_snapshot_paths(
-        term.backend().vt100().screen().contents()
-    ));
-}
+pub(crate) use helpers::make_chatwidget_manual_with_sender;
+pub(crate) use helpers::set_chatgpt_auth;
+pub(crate) use helpers::set_fast_mode_test_catalog;
+pub(super) use helpers::*;

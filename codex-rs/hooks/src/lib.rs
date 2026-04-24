@@ -1,10 +1,13 @@
 mod engine;
-pub mod events;
+pub(crate) mod events;
 mod legacy_notify;
 mod registry;
 mod schema;
 mod types;
 
+pub use events::permission_request::PermissionRequestDecision;
+pub use events::permission_request::PermissionRequestOutcome;
+pub use events::permission_request::PermissionRequestRequest;
 pub use events::post_tool_use::PostToolUseOutcome;
 pub use events::post_tool_use::PostToolUseRequest;
 pub use events::pre_tool_use::PreToolUseOutcome;

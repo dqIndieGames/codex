@@ -1,14 +1,17 @@
 use super::new_status_output;
+use super::new_status_output_with_rate_limits;
+use super::new_status_output_with_rate_limits_handle;
 use super::rate_limit_snapshot_display;
 use crate::history_cell::HistoryCell;
+use crate::legacy_core::config::Config;
+use crate::legacy_core::config::ConfigBuilder;
 use crate::status::StatusAccountDisplay;
 use crate::test_support::PathBufExt;
 use crate::version::CODEX_CLI_DISPLAY_VERSION;
+use crate::test_support::test_path_buf;
 use chrono::Duration as ChronoDuration;
 use chrono::TimeZone;
 use chrono::Utc;
-use codex_core::config::Config;
-use codex_core::config::ConfigBuilder;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -22,7 +25,6 @@ use codex_protocol::protocol::TokenUsageInfo;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
 use ratatui::prelude::*;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 async fn test_config(temp_home: &TempDir) -> Config {
@@ -39,7 +41,8 @@ fn test_status_account_display() -> Option<StatusAccountDisplay> {
 
 fn token_info_for(model_slug: &str, config: &Config, usage: &TokenUsage) -> TokenUsageInfo {
     let context_window =
-        codex_core::test_support::construct_model_info_offline(model_slug, config).context_window;
+        crate::legacy_core::test_support::construct_model_info_offline(model_slug, config)
+            .context_window;
     TokenUsageInfo {
         total_token_usage: usage.clone(),
         last_token_usage: usage.clone(),
@@ -108,7 +111,7 @@ async fn status_snapshot_includes_reasoning_details() {
         })
         .expect("set sandbox policy");
 
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage {
@@ -138,10 +141,11 @@ async fn status_snapshot_includes_reasoning_details() {
         }),
         credits: None,
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
 
     let reasoning_effort_override = Some(Some(ReasoningEffort::High));
@@ -192,7 +196,7 @@ async fn status_permissions_non_default_workspace_write_is_custom() {
             exclude_slash_tmp: false,
         })
         .expect("set sandbox policy");
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage::default();
@@ -200,7 +204,7 @@ async fn status_permissions_non_default_workspace_write_is_custom() {
         .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
         .single()
         .expect("timestamp");
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
 
     let composite = new_status_output(
         &config,
@@ -241,7 +245,7 @@ async fn status_snapshot_includes_forked_from() {
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex-max".to_string());
     config.model_provider_id = "openai".to_string();
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage {
@@ -257,7 +261,7 @@ async fn status_snapshot_includes_forked_from() {
         .single()
         .expect("valid time");
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let session_id =
         ThreadId::from_string("0f0f3c13-6cf9-4aa4-8b80-7d49c2f1be2e").expect("session id");
@@ -295,7 +299,7 @@ async fn status_snapshot_includes_monthly_limit() {
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex-max".to_string());
     config.model_provider_id = "openai".to_string();
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage {
@@ -321,10 +325,11 @@ async fn status_snapshot_includes_monthly_limit() {
         secondary: None,
         credits: None,
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -372,9 +377,10 @@ async fn status_snapshot_shows_unlimited_credits() {
             balance: None,
         }),
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -421,9 +427,10 @@ async fn status_snapshot_shows_positive_credits() {
             balance: Some("12.5".to_string()),
         }),
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -470,9 +477,10 @@ async fn status_snapshot_hides_zero_credits() {
             balance: Some("0".to_string()),
         }),
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -517,9 +525,10 @@ async fn status_snapshot_hides_when_has_no_credits_flag() {
             balance: None,
         }),
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -548,7 +557,7 @@ async fn status_card_token_usage_excludes_cached_tokens() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex-max".to_string());
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage {
@@ -564,7 +573,7 @@ async fn status_card_token_usage_excludes_cached_tokens() {
         .single()
         .expect("timestamp");
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -596,7 +605,7 @@ async fn status_snapshot_truncates_in_narrow_terminal() {
     config.model = Some("gpt-5.1-codex-max".to_string());
     config.model_provider_id = "openai".to_string();
     config.model_reasoning_summary = Some(ReasoningSummary::Detailed);
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage {
@@ -622,10 +631,11 @@ async fn status_snapshot_truncates_in_narrow_terminal() {
         secondary: None,
         credits: None,
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let reasoning_effort_override = Some(Some(ReasoningEffort::High));
     let composite = new_status_output(
@@ -659,7 +669,7 @@ async fn status_snapshot_shows_missing_limits_message() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex-max".to_string());
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage {
@@ -675,7 +685,7 @@ async fn status_snapshot_shows_missing_limits_message() {
         .single()
         .expect("timestamp");
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -703,11 +713,126 @@ async fn status_snapshot_shows_missing_limits_message() {
 }
 
 #[tokio::test]
+async fn status_snapshot_uses_default_reasoning_when_config_empty() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.1-codex-max".to_string());
+    config.cwd = test_path_buf("/workspace/tests").abs();
+
+    let account_display = test_status_account_display();
+    let usage = TokenUsage {
+        input_tokens: 500,
+        cached_input_tokens: 0,
+        output_tokens: 250,
+        reasoning_output_tokens: 0,
+        total_tokens: 750,
+    };
+
+    let now = chrono::Local
+        .with_ymd_and_hms(2024, 2, 3, 4, 5, 6)
+        .single()
+        .expect("timestamp");
+
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
+    let token_info = token_info_for(&model_slug, &config, &usage);
+    let (composite, _) = new_status_output_with_rate_limits_handle(
+        &config,
+        account_display.as_ref(),
+        Some(&token_info),
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        &[],
+        None,
+        now,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ Some(Some(ReasoningEffort::Medium)),
+        "<none>".to_string(),
+        /*refreshing_rate_limits*/ false,
+    );
+    let mut rendered_lines = render_lines(&composite.display_lines(/*width*/ 80));
+    if cfg!(windows) {
+        for line in &mut rendered_lines {
+            *line = line.replace('\\', "/");
+        }
+    }
+    let sanitized = sanitize_directory(rendered_lines).join("\n");
+    assert_snapshot!(sanitized);
+}
+
+#[tokio::test]
+async fn status_snapshot_shows_refreshing_limits_notice() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.1-codex-max".to_string());
+    config.cwd = test_path_buf("/workspace/tests").abs();
+
+    let usage = TokenUsage {
+        input_tokens: 500,
+        cached_input_tokens: 0,
+        output_tokens: 250,
+        reasoning_output_tokens: 0,
+        total_tokens: 750,
+    };
+    let captured_at = chrono::Local
+        .with_ymd_and_hms(2024, 6, 7, 8, 9, 10)
+        .single()
+        .expect("timestamp");
+    let snapshot = RateLimitSnapshot {
+        limit_id: None,
+        limit_name: None,
+        primary: Some(RateLimitWindow {
+            used_percent: 45.0,
+            window_minutes: Some(300),
+            resets_at: Some(reset_at_from(&captured_at, /*seconds*/ 900)),
+        }),
+        secondary: Some(RateLimitWindow {
+            used_percent: 30.0,
+            window_minutes: Some(10_080),
+            resets_at: Some(reset_at_from(&captured_at, /*seconds*/ 2_700)),
+        }),
+        credits: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
+    let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
+
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
+    let token_info = token_info_for(&model_slug, &config, &usage);
+    let composite = new_status_output_with_rate_limits(
+        &config,
+        /*account_display*/ None,
+        Some(&token_info),
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        std::slice::from_ref(&rate_display),
+        None,
+        captured_at,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+        /*refreshing_rate_limits*/ true,
+    );
+    let mut rendered_lines = render_lines(&composite.display_lines(/*width*/ 80));
+    if cfg!(windows) {
+        for line in &mut rendered_lines {
+            *line = line.replace('\\', "/");
+        }
+    }
+    let sanitized = sanitize_directory(rendered_lines).join("\n");
+    assert_snapshot!(sanitized);
+}
+
+#[tokio::test]
 async fn status_snapshot_includes_credits_and_limits() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex".to_string());
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage {
@@ -741,10 +866,11 @@ async fn status_snapshot_includes_credits_and_limits() {
             balance: Some("37.5".to_string()),
         }),
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -772,11 +898,11 @@ async fn status_snapshot_includes_credits_and_limits() {
 }
 
 #[tokio::test]
-async fn status_snapshot_shows_empty_limits_message() {
+async fn status_snapshot_shows_unavailable_limits_message() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex-max".to_string());
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage {
@@ -794,6 +920,7 @@ async fn status_snapshot_shows_empty_limits_message() {
         secondary: None,
         credits: None,
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let captured_at = chrono::Local
         .with_ymd_and_hms(2024, 6, 7, 8, 9, 10)
@@ -801,7 +928,7 @@ async fn status_snapshot_shows_empty_limits_message() {
         .expect("timestamp");
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -829,11 +956,69 @@ async fn status_snapshot_shows_empty_limits_message() {
 }
 
 #[tokio::test]
+async fn status_snapshot_treats_refreshing_empty_limits_as_unavailable() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.1-codex-max".to_string());
+    config.cwd = test_path_buf("/workspace/tests").abs();
+
+    let usage = TokenUsage {
+        input_tokens: 500,
+        cached_input_tokens: 0,
+        output_tokens: 250,
+        reasoning_output_tokens: 0,
+        total_tokens: 750,
+    };
+
+    let snapshot = RateLimitSnapshot {
+        limit_id: None,
+        limit_name: None,
+        primary: None,
+        secondary: None,
+        credits: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
+    let captured_at = chrono::Local
+        .with_ymd_and_hms(2024, 6, 7, 8, 9, 10)
+        .single()
+        .expect("timestamp");
+    let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
+
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
+    let token_info = token_info_for(&model_slug, &config, &usage);
+    let composite = new_status_output_with_rate_limits(
+        &config,
+        /*account_display*/ None,
+        Some(&token_info),
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        std::slice::from_ref(&rate_display),
+        None,
+        captured_at,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+        /*refreshing_rate_limits*/ true,
+    );
+    let mut rendered_lines = render_lines(&composite.display_lines(/*width*/ 80));
+    if cfg!(windows) {
+        for line in &mut rendered_lines {
+            *line = line.replace('\\', "/");
+        }
+    }
+    let sanitized = sanitize_directory(rendered_lines).join("\n");
+    assert_snapshot!(sanitized);
+}
+
+#[tokio::test]
 async fn status_snapshot_shows_stale_limits_message() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex-max".to_string());
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage {
@@ -863,11 +1048,12 @@ async fn status_snapshot_shows_stale_limits_message() {
         }),
         credits: None,
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
     let now = captured_at + ChronoDuration::minutes(20);
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -899,7 +1085,7 @@ async fn status_snapshot_cached_limits_hide_credits_without_flag() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex".to_string());
-    config.cwd = PathBuf::from("/workspace/tests").abs();
+    config.cwd = test_path_buf("/workspace/tests").abs();
 
     let account_display = test_status_account_display();
     let usage = TokenUsage {
@@ -933,11 +1119,12 @@ async fn status_snapshot_cached_limits_hide_credits_without_flag() {
             balance: Some("80".to_string()),
         }),
         plan_type: None,
+        rate_limit_reached_type: None,
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
     let now = captured_at + ChronoDuration::minutes(20);
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
     let composite = new_status_output(
         &config,
@@ -991,7 +1178,7 @@ async fn status_context_window_uses_last_usage() {
         .single()
         .expect("timestamp");
 
-    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let model_slug = crate::legacy_core::test_support::get_model_offline(config.model.as_deref());
     let token_info = TokenUsageInfo {
         total_token_usage: total_usage.clone(),
         last_token_usage: last_usage,

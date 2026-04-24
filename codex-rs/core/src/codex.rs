@@ -4382,10 +4382,7 @@ impl Session {
             .openai_base_url
             .clone()
             .filter(|value| !value.is_empty());
-        let openai_base_url_from_env = std::env::var("OPENAI_BASE_URL")
-            .ok()
-            .filter(|value| !value.is_empty());
-        let mut providers = built_in_model_providers(openai_base_url.or(openai_base_url_from_env));
+        let mut providers = built_in_model_providers(openai_base_url);
         for (key, provider) in cfg.model_providers {
             providers.entry(key).or_insert(provider);
         }

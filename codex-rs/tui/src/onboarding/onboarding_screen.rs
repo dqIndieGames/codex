@@ -1,9 +1,11 @@
+use crate::legacy_core::config::Config;
+#[cfg(target_os = "windows")]
+use crate::legacy_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_protocol::ServerNotification;
-use codex_core::config::Config;
-#[cfg(target_os = "windows")]
-use codex_core::windows_sandbox::WindowsSandboxLevelExt;
+use codex_exec_server::LOCAL_FS;
+use codex_git_utils::resolve_root_git_project_for_trust;
 #[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
 use crossterm::event::KeyCode;
@@ -77,7 +79,7 @@ pub(crate) struct OnboardingResult {
 }
 
 impl OnboardingScreen {
-    pub(crate) fn new(tui: &mut Tui, args: OnboardingScreenArgs) -> Self {
+    pub(crate) async fn new(tui: &mut Tui, args: OnboardingScreenArgs) -> Self {
         let OnboardingScreenArgs {
             show_trust_screen,
             show_login_screen,
@@ -86,10 +88,8 @@ impl OnboardingScreen {
             config,
         } = args;
         let cwd = config.cwd.to_path_buf();
-        let forced_chatgpt_workspace_id = config.forced_chatgpt_workspace_id.clone();
+        let codex_home = config.codex_home.to_path_buf();
         let forced_login_method = config.forced_login_method;
-        let codex_home = config.codex_home.clone();
-        let cli_auth_credentials_store_mode = config.cli_auth_credentials_store_mode;
         let mut steps: Vec<Step> = Vec::new();
         steps.push(Step::Welcome(WelcomeWidget::new(
             !matches!(login_status, LoginStatus::NotAuthenticated),
@@ -107,13 +107,11 @@ impl OnboardingScreen {
                     highlighted_mode,
                     error: Arc::new(RwLock::new(None)),
                     sign_in_state: Arc::new(RwLock::new(SignInState::PickMode)),
-                    codex_home: codex_home.clone(),
-                    cli_auth_credentials_store_mode,
                     login_status,
                     app_server_request_handle,
-                    forced_chatgpt_workspace_id,
                     forced_login_method,
                     animations_enabled: config.animations,
+                    animations_suppressed: std::cell::Cell::new(false),
                 }));
             } else {
                 tracing::warn!("skipping onboarding login step without app-server request handle");
@@ -126,8 +124,13 @@ impl OnboardingScreen {
         let show_windows_create_sandbox_hint = false;
         let highlighted = TrustDirectorySelection::Trust;
         if show_trust_screen {
+            let trust_target = resolve_root_git_project_for_trust(LOCAL_FS.as_ref(), &config.cwd)
+                .await
+                .map(Into::into)
+                .unwrap_or_else(|| cwd.clone());
             steps.push(Step::TrustDirectory(TrustDirectoryWidget {
                 cwd,
+                trust_target,
                 codex_home,
                 show_windows_create_sandbox_hint,
                 should_quit: false,
@@ -173,6 +176,15 @@ impl OnboardingScreen {
             }
         }
         out
+    }
+
+    fn should_suppress_animations(&self) -> bool {
+        // Freeze the whole onboarding screen when auth is showing copyable login
+        // material so terminal selection is not interrupted by redraws.
+        self.current_steps().into_iter().any(|step| match step {
+            Step::Auth(widget) => widget.should_suppress_animations(),
+            Step::Welcome(_) | Step::TrustDirectory(_) => false,
+        })
     }
 
     fn is_auth_in_progress(&self) -> bool {
@@ -323,6 +335,15 @@ impl KeyboardHandler for OnboardingScreen {
 
 impl WidgetRef for &OnboardingScreen {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
+        let suppress_animations = self.should_suppress_animations();
+        for step in self.current_steps() {
+            match step {
+                Step::Welcome(widget) => widget.set_animations_suppressed(suppress_animations),
+                Step::Auth(widget) => widget.set_animations_suppressed(suppress_animations),
+                Step::TrustDirectory(_) => {}
+            }
+        }
+
         Clear.render(area, buf);
         // Render steps top-to-bottom, measuring each step's height dynamically.
         let mut y = area.y;
@@ -433,12 +454,12 @@ impl WidgetRef for Step {
 
 pub(crate) async fn run_onboarding_app(
     args: OnboardingScreenArgs,
-    mut app_server: Option<AppServerSession>,
+    mut app_server: Option<&mut AppServerSession>,
     tui: &mut Tui,
 ) -> Result<OnboardingResult> {
     use tokio_stream::StreamExt;
 
-    let mut onboarding_screen = OnboardingScreen::new(tui, args);
+    let mut onboarding_screen = OnboardingScreen::new(tui, args).await;
     // One-time guard to fully clear the screen after ChatGPT login success message is shown
     let mut did_full_clear_after_success = false;
 
@@ -518,9 +539,6 @@ pub(crate) async fn run_onboarding_app(
                 }
             }
         }
-    }
-    if let Some(app_server) = app_server {
-        app_server.shutdown().await.ok();
     }
     Ok(OnboardingResult {
         directory_trust_decision: onboarding_screen.directory_trust_decision(),

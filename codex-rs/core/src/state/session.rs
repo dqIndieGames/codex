@@ -6,13 +6,14 @@ use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::codex::PreviousTurnSettings;
-use crate::codex::SessionConfiguration;
 use crate::context_manager::ContextManager;
-use crate::protocol::RateLimitSnapshot;
-use crate::protocol::TokenUsage;
-use crate::protocol::TokenUsageInfo;
+use crate::session::PreviousTurnSettings;
+use crate::session::session::SessionConfiguration;
 use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
+use codex_protocol::protocol::RateLimitSnapshot;
+use codex_protocol::protocol::SessionAgentTask;
+use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_output_truncation::TruncationPolicy;
 
@@ -30,12 +31,14 @@ pub(crate) struct SessionState {
     previous_turn_settings: Option<PreviousTurnSettings>,
     /// Startup prewarmed session prepared during session initialization.
     pub(crate) startup_prewarm: Option<SessionStartupPrewarmHandle>,
+    pub(crate) agent_task: Option<SessionAgentTask>,
     pub(crate) active_connector_selection: HashSet<String>,
     pub(crate) pending_session_start_source: Option<codex_hooks::SessionStartSource>,
     pub(crate) pending_first_turn_checklist_candidate_source:
         Option<codex_hooks::SessionStartSource>,
     pub(crate) pending_first_turn_checklist_source: Option<codex_hooks::SessionStartSource>,
     granted_permissions: Option<PermissionProfile>,
+    next_turn_is_first: bool,
 }
 
 impl SessionState {
@@ -51,11 +54,13 @@ impl SessionState {
             mcp_dependency_prompted: HashSet::new(),
             previous_turn_settings: None,
             startup_prewarm: None,
+            agent_task: None,
             active_connector_selection: HashSet::new(),
             pending_session_start_source: None,
             pending_first_turn_checklist_candidate_source: None,
             pending_first_turn_checklist_source: None,
             granted_permissions: None,
+            next_turn_is_first: true,
         }
     }
 
@@ -76,6 +81,16 @@ impl SessionState {
         previous_turn_settings: Option<PreviousTurnSettings>,
     ) {
         self.previous_turn_settings = previous_turn_settings;
+    }
+
+    pub(crate) fn set_next_turn_is_first(&mut self, value: bool) {
+        self.next_turn_is_first = value;
+    }
+
+    pub(crate) fn take_next_turn_is_first(&mut self) -> bool {
+        let is_first_turn = self.next_turn_is_first;
+        self.next_turn_is_first = false;
+        is_first_turn
     }
 
     pub(crate) fn clone_history(&self) -> ContextManager {
@@ -177,6 +192,18 @@ impl SessionState {
 
     pub(crate) fn take_session_startup_prewarm(&mut self) -> Option<SessionStartupPrewarmHandle> {
         self.startup_prewarm.take()
+    }
+
+    pub(crate) fn agent_task(&self) -> Option<SessionAgentTask> {
+        self.agent_task.clone()
+    }
+
+    pub(crate) fn set_agent_task(&mut self, agent_task: SessionAgentTask) {
+        self.agent_task = Some(agent_task);
+    }
+
+    pub(crate) fn clear_agent_task(&mut self) {
+        self.agent_task = None;
     }
 
     // Adds connector IDs to the active set and returns the merged selection.

@@ -8,6 +8,7 @@ use crate::skills_load_input_from_config;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use std::fs;
 use std::path::PathBuf;
@@ -85,6 +86,22 @@ async fn apply_explorer_role_sets_model_and_adds_session_flags_layer() {
     assert_eq!(config.model.as_deref(), Some("gpt-5.1-codex-mini"));
     assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::Medium));
     assert_eq!(session_flags_layer_count(&config), before_layers + 1);
+}
+
+#[tokio::test]
+async fn apply_empty_explorer_role_preserves_current_model_and_reasoning_effort() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let before_layers = session_flags_layer_count(&config);
+    config.model = Some("gpt-5.4-mini".to_string());
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+
+    apply_role_to_config(&mut config, Some("explorer"))
+        .await
+        .expect("explorer role should apply");
+
+    assert_eq!(config.model.as_deref(), Some("gpt-5.4-mini"));
+    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
+    assert_eq!(session_flags_layer_count(&config), before_layers);
 }
 
 #[tokio::test]
@@ -636,14 +653,17 @@ enabled = false
         .expect("custom role should apply");
 
     let plugins_manager = Arc::new(PluginsManager::new(home.path().to_path_buf()));
-    let skills_manager = SkillsManager::new(
-        home.path().to_path_buf(),
-        /*bundled_skills_enabled*/ true,
-    );
-    let plugin_outcome = plugins_manager.plugins_for_config(&config);
+    let skills_manager =
+        SkillsManager::new(home.path().abs(), /*bundled_skills_enabled*/ true);
+    let plugin_outcome = plugins_manager.plugins_for_config(&config).await;
     let effective_skill_roots = plugin_outcome.effective_skill_roots();
     let skills_input = skills_load_input_from_config(&config, effective_skill_roots);
-    let outcome = skills_manager.skills_for_config(&skills_input);
+    let outcome = skills_manager
+        .skills_for_config(
+            &skills_input,
+            Some(Arc::clone(&codex_exec_server::LOCAL_FS)),
+        )
+        .await;
     let skill = outcome
         .skills
         .iter()

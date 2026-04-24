@@ -12,8 +12,8 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::RequestId;
-use codex_core::auth::AuthCredentialsStoreMode;
-use codex_core::auth::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
+use codex_config::types::AuthCredentialsStoreMode;
+use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use pretty_assertions::assert_eq;
 use std::path::Path;
 use tempfile::TempDir;
@@ -24,7 +24,9 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+// Bazel CI can spend tens of seconds starting app-server subprocesses or
+// processing auth RPCs under load.
+const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn create_config_toml_custom_provider(
     codex_home: &Path,
@@ -349,6 +351,8 @@ async fn get_auth_status_omits_token_after_proactive_refresh_failure() -> Result
     )?;
 
     let server = MockServer::start().await;
+    // App-server startup may proactively read stale auth before this test sends
+    // getAuthStatus; require the refresh path without depending on that race.
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
@@ -356,7 +360,7 @@ async fn get_auth_status_omits_token_after_proactive_refresh_failure() -> Result
                 "code": "refresh_token_reused"
             }
         })))
-        .expect(2)
+        .expect(1..=2)
         .mount(&server)
         .await;
 
@@ -416,6 +420,8 @@ async fn get_auth_status_returns_token_after_proactive_refresh_recovery() -> Res
     )?;
 
     let server = MockServer::start().await;
+    // App-server startup may proactively read stale auth before this test sends
+    // getAuthStatus; require the refresh path without depending on that race.
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
@@ -423,7 +429,7 @@ async fn get_auth_status_returns_token_after_proactive_refresh_recovery() -> Res
                 "code": "refresh_token_reused"
             }
         })))
-        .expect(2)
+        .expect(1..=2)
         .mount(&server)
         .await;
 

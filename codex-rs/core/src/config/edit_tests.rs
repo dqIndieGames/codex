@@ -1,7 +1,7 @@
 use super::*;
-use crate::config::types::AppToolApproval;
-use crate::config::types::McpServerToolConfig;
-use crate::config::types::McpServerTransportConfig;
+use codex_config::types::AppToolApproval;
+use codex_config::types::McpServerToolConfig;
+use codex_config::types::McpServerTransportConfig;
 use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 #[cfg(unix)]
@@ -553,6 +553,130 @@ gpt-5 = "gpt-5.1"
 }
 
 #[test]
+fn blocking_set_hide_external_config_migration_prompt_home_preserves_table() {
+    let tmp = tempdir().expect("tmpdir");
+    let codex_home = tmp.path();
+    std::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        r#"[notice]
+existing = "value"
+"#,
+    )
+    .expect("seed");
+    apply_blocking(
+        codex_home,
+        /*profile*/ None,
+        &[ConfigEdit::SetNoticeHideExternalConfigMigrationPromptHome(
+            true,
+        )],
+    )
+    .expect("persist");
+
+    let contents = std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+    let expected = r#"[notice]
+existing = "value"
+
+[notice.external_config_migration_prompts]
+home = true
+"#;
+    assert_eq!(contents, expected);
+}
+
+#[test]
+fn blocking_set_hide_external_config_migration_prompt_project_preserves_table() {
+    let tmp = tempdir().expect("tmpdir");
+    let codex_home = tmp.path();
+    std::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        r#"[notice]
+existing = "value"
+"#,
+    )
+    .expect("seed");
+    apply_blocking(
+        codex_home,
+        /*profile*/ None,
+        &[
+            ConfigEdit::SetNoticeHideExternalConfigMigrationPromptProject(
+                "/Users/alexsong/code/skills".to_string(),
+                true,
+            ),
+        ],
+    )
+    .expect("persist");
+
+    let contents = std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+    let expected = r#"[notice]
+existing = "value"
+
+[notice.external_config_migration_prompts.projects]
+"/Users/alexsong/code/skills" = true
+"#;
+    assert_eq!(contents, expected);
+}
+
+#[test]
+fn blocking_set_external_config_migration_prompt_home_last_prompted_at_preserves_table() {
+    let tmp = tempdir().expect("tmpdir");
+    let codex_home = tmp.path();
+    std::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        r#"[notice]
+existing = "value"
+"#,
+    )
+    .expect("seed");
+    apply_blocking(
+        codex_home,
+        /*profile*/ None,
+        &[ConfigEdit::SetNoticeExternalConfigMigrationPromptHomeLastPromptedAt(1_760_000_000)],
+    )
+    .expect("persist");
+
+    let contents = std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+    let expected = r#"[notice]
+existing = "value"
+
+[notice.external_config_migration_prompts]
+home_last_prompted_at = 1760000000
+"#;
+    assert_eq!(contents, expected);
+}
+
+#[test]
+fn blocking_set_external_config_migration_prompt_project_last_prompted_at_preserves_table() {
+    let tmp = tempdir().expect("tmpdir");
+    let codex_home = tmp.path();
+    std::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        r#"[notice]
+existing = "value"
+"#,
+    )
+    .expect("seed");
+    apply_blocking(
+        codex_home,
+        /*profile*/ None,
+        &[
+            ConfigEdit::SetNoticeExternalConfigMigrationPromptProjectLastPromptedAt(
+                "/Users/alexsong/code/skills".to_string(),
+                1_760_000_000,
+            ),
+        ],
+    )
+    .expect("persist");
+
+    let contents = std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+    let expected = r#"[notice]
+existing = "value"
+
+[notice.external_config_migration_prompts.project_last_prompted_at]
+"/Users/alexsong/code/skills" = 1760000000
+"#;
+    assert_eq!(contents, expected);
+}
+
+#[test]
 fn blocking_replace_mcp_servers_round_trips() {
     let tmp = tempdir().expect("tmpdir");
     let codex_home = tmp.path();
@@ -572,14 +696,17 @@ fn blocking_replace_mcp_servers_round_trips() {
                     .into_iter()
                     .collect(),
                 ),
-                env_vars: vec!["FOO".to_string()],
+                env_vars: vec!["FOO".into()],
                 cwd: None,
             },
+            experimental_environment: None,
             enabled: true,
             required: false,
+            supports_parallel_tool_calls: true,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
+            default_tools_approval_mode: None,
             enabled_tools: Some(vec!["one".to_string(), "two".to_string()]),
             disabled_tools: None,
             scopes: None,
@@ -601,11 +728,14 @@ fn blocking_replace_mcp_servers_round_trips() {
                 ),
                 env_http_headers: None,
             },
+            experimental_environment: None,
             enabled: false,
             required: false,
+            supports_parallel_tool_calls: false,
             disabled_reason: None,
             startup_timeout_sec: Some(std::time::Duration::from_secs(5)),
             tool_timeout_sec: None,
+            default_tools_approval_mode: None,
             enabled_tools: None,
             disabled_tools: Some(vec!["forbidden".to_string()]),
             scopes: None,
@@ -638,6 +768,7 @@ Z-Header = \"z\"
 command = \"cmd\"
 args = [\"--flag\"]
 env_vars = [\"FOO\"]
+supports_parallel_tool_calls = true
 enabled_tools = [\"one\", \"two\"]
 
 [mcp_servers.stdio.env]
@@ -663,11 +794,14 @@ fn blocking_replace_mcp_servers_serializes_tool_approval_overrides() {
                 env_vars: Vec::new(),
                 cwd: None,
             },
+            experimental_environment: None,
             enabled: true,
             required: false,
+            supports_parallel_tool_calls: false,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
+            default_tools_approval_mode: Some(AppToolApproval::Prompt),
             enabled_tools: None,
             disabled_tools: None,
             scopes: None,
@@ -692,6 +826,7 @@ fn blocking_replace_mcp_servers_serializes_tool_approval_overrides() {
     let expected = "\
 [mcp_servers.docs]
 command = \"docs-server\"
+default_tools_approval_mode = \"prompt\"
 
 [mcp_servers.docs.tools.search]
 approval_mode = \"approve\"
@@ -723,11 +858,14 @@ foo = { command = "cmd" }
                 env_vars: Vec::new(),
                 cwd: None,
             },
+            experimental_environment: None,
             enabled: true,
             required: false,
+            supports_parallel_tool_calls: false,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
+            default_tools_approval_mode: None,
             enabled_tools: None,
             disabled_tools: None,
             scopes: None,
@@ -774,11 +912,14 @@ foo = { command = "cmd" } # keep me
                 env_vars: Vec::new(),
                 cwd: None,
             },
+            experimental_environment: None,
             enabled: false,
             required: false,
+            supports_parallel_tool_calls: false,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
+            default_tools_approval_mode: None,
             enabled_tools: None,
             disabled_tools: None,
             scopes: None,
@@ -824,11 +965,14 @@ foo = { command = "cmd", args = ["--flag"] } # keep me
                 env_vars: Vec::new(),
                 cwd: None,
             },
+            experimental_environment: None,
             enabled: true,
             required: false,
+            supports_parallel_tool_calls: false,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
+            default_tools_approval_mode: None,
             enabled_tools: None,
             disabled_tools: None,
             scopes: None,
@@ -875,11 +1019,14 @@ foo = { command = "cmd" }
                 env_vars: Vec::new(),
                 cwd: None,
             },
+            experimental_environment: None,
             enabled: false,
             required: false,
+            supports_parallel_tool_calls: false,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
+            default_tools_approval_mode: None,
             enabled_tools: None,
             disabled_tools: None,
             scopes: None,
@@ -1064,6 +1211,41 @@ fn blocking_builder_set_realtime_audio_persists_and_clears() {
         realtime_audio.get("speaker").and_then(TomlValue::as_str),
         Some("Desk Speakers")
     );
+}
+
+#[test]
+fn blocking_builder_set_realtime_voice_persists_and_clears() {
+    let tmp = tempdir().expect("tmpdir");
+    let codex_home = tmp.path();
+
+    ConfigEditsBuilder::new(codex_home)
+        .set_realtime_voice(Some("cedar"))
+        .apply_blocking()
+        .expect("persist realtime voice");
+
+    let raw = std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+    let config: TomlValue = toml::from_str(&raw).expect("parse config");
+    let realtime = config
+        .get("realtime")
+        .and_then(TomlValue::as_table)
+        .expect("realtime table should exist");
+    assert_eq!(
+        realtime.get("voice").and_then(TomlValue::as_str),
+        Some("cedar")
+    );
+
+    ConfigEditsBuilder::new(codex_home)
+        .set_realtime_voice(/*voice*/ None)
+        .apply_blocking()
+        .expect("clear realtime voice");
+
+    let raw = std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+    let config: TomlValue = toml::from_str(&raw).expect("parse config");
+    let realtime = config
+        .get("realtime")
+        .and_then(TomlValue::as_table)
+        .expect("realtime table should exist");
+    assert_eq!(realtime.get("voice"), None);
 }
 
 #[test]

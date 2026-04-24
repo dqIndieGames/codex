@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_config::shell_environment;
+use codex_config::types::EnvironmentVariablePattern;
+use codex_config::types::ShellEnvironmentPolicy;
 use codex_utils_pty::ExecCommandSession;
 use codex_utils_pty::TerminalSize;
 use tokio::sync::Mutex;
@@ -16,17 +17,20 @@ use tokio::sync::watch;
 
 use crate::ExecBackend;
 use crate::ExecProcess;
+use crate::ExecProcessEvent;
+use crate::ExecProcessEventReceiver;
 use crate::ExecServerError;
 use crate::ProcessId;
 use crate::StartedExecProcess;
+use crate::process::ExecProcessEventLog;
 use crate::protocol::EXEC_CLOSED_METHOD;
 use crate::protocol::ExecClosedNotification;
+use crate::protocol::ExecEnvPolicy;
 use crate::protocol::ExecExitedNotification;
 use crate::protocol::ExecOutputDeltaNotification;
 use crate::protocol::ExecOutputStream;
 use crate::protocol::ExecParams;
 use crate::protocol::ExecResponse;
-use crate::protocol::InitializeResponse;
 use crate::protocol::ProcessOutputChunk;
 use crate::protocol::ReadParams;
 use crate::protocol::ReadResponse;
@@ -43,6 +47,7 @@ use crate::rpc::invalid_request;
 
 const RETAINED_OUTPUT_BYTES_PER_PROCESS: usize = 1024 * 1024;
 const NOTIFICATION_CHANNEL_CAPACITY: usize = 256;
+const PROCESS_EVENT_CHANNEL_CAPACITY: usize = 256;
 #[cfg(test)]
 const EXITED_PROCESS_RETENTION: Duration = Duration::from_millis(25);
 #[cfg(not(test))]
@@ -58,11 +63,13 @@ struct RetainedOutputChunk {
 struct RunningProcess {
     session: ExecCommandSession,
     tty: bool,
+    pipe_stdin: bool,
     output: VecDeque<RetainedOutputChunk>,
     retained_bytes: usize,
     next_seq: u64,
     exit_code: Option<i32>,
     wake_tx: watch::Sender<u64>,
+    events: ExecProcessEventLog,
     output_notify: Arc<Notify>,
     open_streams: usize,
     closed: bool,
@@ -74,10 +81,8 @@ enum ProcessEntry {
 }
 
 struct Inner {
-    notifications: RpcNotificationSender,
+    notifications: std::sync::RwLock<Option<RpcNotificationSender>>,
     processes: Mutex<HashMap<ProcessId, ProcessEntry>>,
-    initialize_requested: AtomicBool,
-    initialized: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -89,6 +94,7 @@ struct LocalExecProcess {
     process_id: ProcessId,
     backend: LocalProcess,
     wake_tx: watch::Sender<u64>,
+    events: ExecProcessEventLog,
 }
 
 impl Default for LocalProcess {
@@ -104,10 +110,8 @@ impl LocalProcess {
     pub(crate) fn new(notifications: RpcNotificationSender) -> Self {
         Self {
             inner: Arc::new(Inner {
-                notifications,
+                notifications: std::sync::RwLock::new(Some(notifications)),
                 processes: Mutex::new(HashMap::new()),
-                initialize_requested: AtomicBool::new(false),
-                initialized: AtomicBool::new(false),
             }),
         }
     }
@@ -128,45 +132,19 @@ impl LocalProcess {
         }
     }
 
-    pub(crate) fn initialize(&self) -> Result<InitializeResponse, JSONRPCErrorError> {
-        if self.inner.initialize_requested.swap(true, Ordering::SeqCst) {
-            return Err(invalid_request(
-                "initialize may only be sent once per connection".to_string(),
-            ));
-        }
-        Ok(InitializeResponse {})
-    }
-
-    pub(crate) fn initialized(&self) -> Result<(), String> {
-        if !self.inner.initialize_requested.load(Ordering::SeqCst) {
-            return Err("received `initialized` notification before `initialize`".into());
-        }
-        self.inner.initialized.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-
-    pub(crate) fn require_initialized_for(
-        &self,
-        method_family: &str,
-    ) -> Result<(), JSONRPCErrorError> {
-        if !self.inner.initialize_requested.load(Ordering::SeqCst) {
-            return Err(invalid_request(format!(
-                "client must call initialize before using {method_family} methods"
-            )));
-        }
-        if !self.inner.initialized.load(Ordering::SeqCst) {
-            return Err(invalid_request(format!(
-                "client must send initialized before using {method_family} methods"
-            )));
-        }
-        Ok(())
+    pub(crate) fn set_notification_sender(&self, notifications: Option<RpcNotificationSender>) {
+        let mut notification_sender = self
+            .inner
+            .notifications
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *notification_sender = notifications;
     }
 
     async fn start_process(
         &self,
         params: ExecParams,
-    ) -> Result<(ExecResponse, watch::Sender<u64>), JSONRPCErrorError> {
-        self.require_initialized_for("exec")?;
+    ) -> Result<(ExecResponse, watch::Sender<u64>, ExecProcessEventLog), JSONRPCErrorError> {
         let process_id = params.process_id.clone();
         let (program, args) = params
             .argv
@@ -183,14 +161,24 @@ impl LocalProcess {
             process_map.insert(process_id.clone(), ProcessEntry::Starting);
         }
 
+        let env = child_env(&params);
         let spawned_result = if params.tty {
             codex_utils_pty::spawn_pty_process(
                 program,
                 args,
                 params.cwd.as_path(),
-                &params.env,
+                &env,
                 &params.arg0,
                 TerminalSize::default(),
+            )
+            .await
+        } else if params.pipe_stdin {
+            codex_utils_pty::spawn_pipe_process(
+                program,
+                args,
+                params.cwd.as_path(),
+                &env,
+                &params.arg0,
             )
             .await
         } else {
@@ -198,7 +186,7 @@ impl LocalProcess {
                 program,
                 args,
                 params.cwd.as_path(),
-                &params.env,
+                &env,
                 &params.arg0,
             )
             .await
@@ -216,6 +204,10 @@ impl LocalProcess {
 
         let output_notify = Arc::new(Notify::new());
         let (wake_tx, _wake_rx) = watch::channel(0);
+        let events = ExecProcessEventLog::new(
+            PROCESS_EVENT_CHANNEL_CAPACITY,
+            RETAINED_OUTPUT_BYTES_PER_PROCESS,
+        );
         {
             let mut process_map = self.inner.processes.lock().await;
             process_map.insert(
@@ -223,11 +215,13 @@ impl LocalProcess {
                 ProcessEntry::Running(Box::new(RunningProcess {
                     session: spawned.session,
                     tty: params.tty,
+                    pipe_stdin: params.pipe_stdin,
                     output: VecDeque::new(),
                     retained_bytes: 0,
                     next_seq: 1,
                     exit_code: None,
                     wake_tx: wake_tx.clone(),
+                    events: events.clone(),
                     output_notify: Arc::clone(&output_notify),
                     open_streams: 2,
                     closed: false,
@@ -264,20 +258,19 @@ impl LocalProcess {
             output_notify,
         ));
 
-        Ok((ExecResponse { process_id }, wake_tx))
+        Ok((ExecResponse { process_id }, wake_tx, events))
     }
 
     pub(crate) async fn exec(&self, params: ExecParams) -> Result<ExecResponse, JSONRPCErrorError> {
         self.start_process(params)
             .await
-            .map(|(response, _)| response)
+            .map(|(response, _, _)| response)
     }
 
     pub(crate) async fn exec_read(
         &self,
         params: ReadParams,
     ) -> Result<ReadResponse, JSONRPCErrorError> {
-        self.require_initialized_for("exec")?;
         let _process_id = params.process_id.clone();
         let after_seq = params.after_seq.unwrap_or(0);
         let max_bytes = params.max_bytes.unwrap_or(usize::MAX);
@@ -354,7 +347,6 @@ impl LocalProcess {
         &self,
         params: WriteParams,
     ) -> Result<WriteResponse, JSONRPCErrorError> {
-        self.require_initialized_for("exec")?;
         let _process_id = params.process_id.clone();
         let _input_bytes = params.chunk.0.len();
         let writer_tx = {
@@ -369,7 +361,7 @@ impl LocalProcess {
                     status: WriteStatus::Starting,
                 });
             };
-            if !process.tty {
+            if !process.tty && !process.pipe_stdin {
                 return Ok(WriteResponse {
                     status: WriteStatus::StdinClosed,
                 });
@@ -391,7 +383,6 @@ impl LocalProcess {
         &self,
         params: TerminateParams,
     ) -> Result<TerminateResponse, JSONRPCErrorError> {
-        self.require_initialized_for("exec")?;
         let _process_id = params.process_id.clone();
         let running = {
             let process_map = self.inner.processes.lock().await;
@@ -411,10 +402,40 @@ impl LocalProcess {
     }
 }
 
+fn child_env(params: &ExecParams) -> HashMap<String, String> {
+    let Some(env_policy) = &params.env_policy else {
+        return params.env.clone();
+    };
+
+    let policy = shell_environment_policy(env_policy);
+    let mut env = shell_environment::create_env(&policy, /*thread_id*/ None);
+    env.extend(params.env.clone());
+    env
+}
+
+fn shell_environment_policy(env_policy: &ExecEnvPolicy) -> ShellEnvironmentPolicy {
+    ShellEnvironmentPolicy {
+        inherit: env_policy.inherit.clone(),
+        ignore_default_excludes: env_policy.ignore_default_excludes,
+        exclude: env_policy
+            .exclude
+            .iter()
+            .map(|pattern| EnvironmentVariablePattern::new_case_insensitive(pattern))
+            .collect(),
+        r#set: env_policy.r#set.clone(),
+        include_only: env_policy
+            .include_only
+            .iter()
+            .map(|pattern| EnvironmentVariablePattern::new_case_insensitive(pattern))
+            .collect(),
+        use_profile: false,
+    }
+}
+
 #[async_trait]
 impl ExecBackend for LocalProcess {
     async fn start(&self, params: ExecParams) -> Result<StartedExecProcess, ExecServerError> {
-        let (response, wake_tx) = self
+        let (response, wake_tx, events) = self
             .start_process(params)
             .await
             .map_err(map_handler_error)?;
@@ -423,6 +444,7 @@ impl ExecBackend for LocalProcess {
                 process_id: response.process_id,
                 backend: self.clone(),
                 wake_tx,
+                events,
             }),
         })
     }
@@ -436,6 +458,10 @@ impl ExecProcess for LocalExecProcess {
 
     fn subscribe_wake(&self) -> watch::Receiver<u64> {
         self.wake_tx.subscribe()
+    }
+
+    fn subscribe_events(&self) -> ExecProcessEventReceiver {
+        self.events.subscribe()
     }
 
     async fn read(
@@ -538,21 +564,26 @@ async fn stream_output(
                 process.retained_bytes = process.retained_bytes.saturating_sub(evicted.chunk.len());
             }
             let _ = process.wake_tx.send(seq);
+            let output = ProcessOutputChunk {
+                seq,
+                stream,
+                chunk: chunk.into(),
+            };
+            process
+                .events
+                .publish(ExecProcessEvent::Output(output.clone()));
             ExecOutputDeltaNotification {
                 process_id: process_id.clone(),
                 seq,
                 stream,
-                chunk: chunk.into(),
+                chunk: output.chunk,
             }
         };
         output_notify.notify_waiters();
-        if inner
-            .notifications
-            .notify(crate::protocol::EXEC_OUTPUT_DELTA_METHOD, &notification)
-            .await
-            .is_err()
-        {
-            break;
+        if let Some(notifications) = notification_sender(&inner) {
+            let _ = notifications
+                .notify(crate::protocol::EXEC_OUTPUT_DELTA_METHOD, &notification)
+                .await;
         }
     }
 
@@ -573,6 +604,9 @@ async fn watch_exit(
             process.next_seq += 1;
             process.exit_code = Some(exit_code);
             let _ = process.wake_tx.send(seq);
+            process
+                .events
+                .publish(ExecProcessEvent::Exited { seq, exit_code });
             Some(ExecExitedNotification {
                 process_id: process_id.clone(),
                 seq,
@@ -584,13 +618,11 @@ async fn watch_exit(
     };
     output_notify.notify_waiters();
     if let Some(notification) = notification
-        && inner
-            .notifications
-            .notify(crate::protocol::EXEC_EXITED_METHOD, &notification)
-            .await
-            .is_err()
+        && let Some(notifications) = notification_sender(&inner)
     {
-        return;
+        let _ = notifications
+            .notify(crate::protocol::EXEC_EXITED_METHOD, &notification)
+            .await;
     }
 
     maybe_emit_closed(process_id.clone(), Arc::clone(&inner)).await;
@@ -635,6 +667,7 @@ async fn maybe_emit_closed(process_id: ProcessId, inner: Arc<Inner>) {
         let seq = process.next_seq;
         process.next_seq += 1;
         let _ = process.wake_tx.send(seq);
+        process.events.publish(ExecProcessEvent::Closed { seq });
         Some(ExecClosedNotification {
             process_id: process_id.clone(),
             seq,
@@ -645,10 +678,71 @@ async fn maybe_emit_closed(process_id: ProcessId, inner: Arc<Inner>) {
         return;
     };
 
-    if inner
+    if let Some(notifications) = notification_sender(&inner) {
+        let _ = notifications
+            .notify(EXEC_CLOSED_METHOD, &notification)
+            .await;
+    }
+}
+
+fn notification_sender(inner: &Inner) -> Option<RpcNotificationSender> {
+    inner
         .notifications
-        .notify(EXEC_CLOSED_METHOD, &notification)
-        .await
-        .is_err()
-    {}
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_config::types::ShellEnvironmentPolicyInherit;
+
+    fn test_exec_params(env: HashMap<String, String>) -> ExecParams {
+        ExecParams {
+            process_id: ProcessId::from("env-test"),
+            argv: vec!["true".to_string()],
+            cwd: std::path::PathBuf::from("/tmp"),
+            env_policy: None,
+            env,
+            tty: false,
+            pipe_stdin: false,
+            arg0: None,
+        }
+    }
+
+    #[test]
+    fn child_env_defaults_to_exact_env() {
+        let params = test_exec_params(HashMap::from([("ONLY_THIS".to_string(), "1".to_string())]));
+
+        assert_eq!(
+            child_env(&params),
+            HashMap::from([("ONLY_THIS".to_string(), "1".to_string())])
+        );
+    }
+
+    #[test]
+    fn child_env_applies_policy_then_overlay() {
+        let mut params = test_exec_params(HashMap::from([
+            ("OVERLAY".to_string(), "overlay".to_string()),
+            ("POLICY_SET".to_string(), "overlay-wins".to_string()),
+        ]));
+        params.env_policy = Some(ExecEnvPolicy {
+            inherit: ShellEnvironmentPolicyInherit::None,
+            ignore_default_excludes: true,
+            exclude: Vec::new(),
+            r#set: HashMap::from([("POLICY_SET".to_string(), "policy".to_string())]),
+            include_only: Vec::new(),
+        });
+
+        let mut expected = HashMap::from([
+            ("OVERLAY".to_string(), "overlay".to_string()),
+            ("POLICY_SET".to_string(), "overlay-wins".to_string()),
+        ]);
+        if cfg!(target_os = "windows") {
+            expected.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+        }
+
+        assert_eq!(child_env(&params), expected);
+    }
 }

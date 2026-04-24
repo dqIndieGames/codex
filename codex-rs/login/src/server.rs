@@ -24,7 +24,6 @@ use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration;
 
-use crate::auth::AuthCredentialsStoreMode;
 use crate::auth::AuthDotJson;
 use crate::auth::save_auth;
 use crate::default_client::originator;
@@ -36,6 +35,7 @@ use base64::Engine;
 use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
 use codex_client::build_reqwest_client_with_custom_ca;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_utils_template::Template;
 use rand::RngCore;
 use serde_json::Value as JsonValue;
@@ -781,6 +781,7 @@ pub(crate) async fn persist_tokens_async(
             openai_api_key: api_key,
             tokens: Some(tokens),
             last_refresh: Some(Utc::now()),
+            agent_identity: None,
         };
         save_auth(&codex_home, &auth, auth_credentials_store_mode)
     })

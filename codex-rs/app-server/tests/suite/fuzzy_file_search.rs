@@ -11,6 +11,11 @@ use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
+// macOS arm64 and Windows Bazel CI can spend tens of seconds in app-server
+// startup before the initialize response or fuzzy-search notifications arrive.
+#[cfg(any(target_os = "macos", windows))]
+const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(not(any(target_os = "macos", windows)))]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const SHORT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 const STOP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_millis(250);
@@ -362,6 +367,30 @@ async fn test_fuzzy_file_search_session_streams_updates() -> Result<()> {
     assert_eq!(completed.session_id, session_id);
 
     mcp.stop_fuzzy_file_search_session(session_id).await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_fuzzy_file_search_session_update_is_case_insensitive() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let root = TempDir::new()?;
+    std::fs::write(root.path().join("alpha.txt"), "contents")?;
+    let mut mcp = initialized_mcp(&codex_home).await?;
+
+    let root_path = root.path().to_string_lossy().to_string();
+    let session_id = "session-case-insensitive";
+
+    mcp.start_fuzzy_file_search_session(session_id, vec![root_path.clone()])
+        .await?;
+    mcp.update_fuzzy_file_search_session(session_id, "ALP")
+        .await?;
+
+    let payload =
+        wait_for_session_updated(&mut mcp, session_id, "ALP", FileExpectation::NonEmpty).await?;
+    assert_eq!(payload.files.len(), 1);
+    assert_eq!(payload.files[0].root, root_path);
+    assert_eq!(payload.files[0].path, "alpha.txt");
 
     Ok(())
 }

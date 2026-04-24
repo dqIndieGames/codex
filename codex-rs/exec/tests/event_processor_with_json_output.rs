@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use codex_app_server_protocol::CollabAgentState as ApiCollabAgentState;
 use codex_app_server_protocol::CollabAgentStatus as ApiCollabAgentStatus;
 use codex_app_server_protocol::CollabAgentTool;
@@ -34,45 +32,47 @@ use codex_protocol::models::WebSearchAction;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionConfiguredEvent;
+use codex_utils_absolute_path::test_support::PathBufExt;
+use codex_utils_absolute_path::test_support::test_path_buf;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
-use codex_exec::event_processor_with_jsonl_output::CodexStatus;
-use codex_exec::event_processor_with_jsonl_output::CollectedThreadEvents;
-use codex_exec::event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
-use codex_exec::exec_events::AgentMessageItem;
-use codex_exec::exec_events::CollabAgentState;
-use codex_exec::exec_events::CollabAgentStatus;
-use codex_exec::exec_events::CollabTool;
-use codex_exec::exec_events::CollabToolCallItem;
-use codex_exec::exec_events::CollabToolCallStatus;
-use codex_exec::exec_events::CommandExecutionItem;
-use codex_exec::exec_events::CommandExecutionStatus;
-use codex_exec::exec_events::ErrorItem;
-use codex_exec::exec_events::FileChangeItem;
-use codex_exec::exec_events::FileUpdateChange as ExecFileUpdateChange;
-use codex_exec::exec_events::ItemCompletedEvent;
-use codex_exec::exec_events::ItemStartedEvent;
-use codex_exec::exec_events::ItemUpdatedEvent;
-use codex_exec::exec_events::McpToolCallItem;
-use codex_exec::exec_events::McpToolCallItemError;
-use codex_exec::exec_events::McpToolCallItemResult;
-use codex_exec::exec_events::McpToolCallStatus;
-use codex_exec::exec_events::PatchApplyStatus;
-use codex_exec::exec_events::PatchChangeKind;
-use codex_exec::exec_events::ReasoningItem;
-use codex_exec::exec_events::ThreadErrorEvent;
-use codex_exec::exec_events::ThreadEvent;
-use codex_exec::exec_events::ThreadItem as ExecThreadItem;
-use codex_exec::exec_events::ThreadItemDetails;
-use codex_exec::exec_events::ThreadStartedEvent;
-use codex_exec::exec_events::TodoItem;
-use codex_exec::exec_events::TodoListItem;
-use codex_exec::exec_events::TurnCompletedEvent;
-use codex_exec::exec_events::TurnFailedEvent;
-use codex_exec::exec_events::TurnStartedEvent;
-use codex_exec::exec_events::Usage;
-use codex_exec::exec_events::WebSearchItem;
+use codex_exec::AgentMessageItem;
+use codex_exec::CodexStatus;
+use codex_exec::CollabAgentState;
+use codex_exec::CollabAgentStatus;
+use codex_exec::CollabTool;
+use codex_exec::CollabToolCallItem;
+use codex_exec::CollabToolCallStatus;
+use codex_exec::CollectedThreadEvents;
+use codex_exec::CommandExecutionItem;
+use codex_exec::CommandExecutionStatus;
+use codex_exec::ErrorItem;
+use codex_exec::EventProcessorWithJsonOutput;
+use codex_exec::ExecThreadItem;
+use codex_exec::FileChangeItem;
+use codex_exec::FileUpdateChange as ExecFileUpdateChange;
+use codex_exec::ItemCompletedEvent;
+use codex_exec::ItemStartedEvent;
+use codex_exec::ItemUpdatedEvent;
+use codex_exec::McpToolCallItem;
+use codex_exec::McpToolCallItemError;
+use codex_exec::McpToolCallItemResult;
+use codex_exec::McpToolCallStatus;
+use codex_exec::PatchApplyStatus;
+use codex_exec::PatchChangeKind;
+use codex_exec::ReasoningItem;
+use codex_exec::ThreadErrorEvent;
+use codex_exec::ThreadEvent;
+use codex_exec::ThreadItemDetails;
+use codex_exec::ThreadStartedEvent;
+use codex_exec::TodoItem;
+use codex_exec::TodoListItem;
+use codex_exec::TurnCompletedEvent;
+use codex_exec::TurnFailedEvent;
+use codex_exec::TurnStartedEvent;
+use codex_exec::Usage;
+use codex_exec::WebSearchItem;
 
 #[test]
 fn map_todo_items_preserves_text_and_completion_state() {
@@ -115,7 +115,7 @@ fn session_configured_produces_thread_started_event() {
         approval_policy: AskForApproval::Never,
         approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        cwd: PathBuf::from("/tmp/project"),
+        cwd: test_path_buf("/tmp/project").abs(),
         reasoning_effort: None,
         history_log_id: 0,
         history_entry_count: 0,
@@ -144,6 +144,9 @@ fn turn_started_emits_turn_started_event() {
                 items: Vec::new(),
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         }));
 
@@ -162,7 +165,7 @@ fn command_execution_started_and_completed_translate_to_thread_events() {
     let command_item = ThreadItem::CommandExecution {
         id: "cmd-1".to_string(),
         command: "ls".to_string(),
-        cwd: PathBuf::from("/tmp/project"),
+        cwd: test_path_buf("/tmp/project").abs(),
         process_id: Some("123".to_string()),
         source: CommandExecutionSource::UserShell,
         status: ApiCommandExecutionStatus::InProgress,
@@ -201,7 +204,7 @@ fn command_execution_started_and_completed_translate_to_thread_events() {
             item: ThreadItem::CommandExecution {
                 id: "cmd-1".to_string(),
                 command: "ls".to_string(),
-                cwd: PathBuf::from("/tmp/project"),
+                cwd: test_path_buf("/tmp/project").abs(),
                 process_id: Some("123".to_string()),
                 source: CommandExecutionSource::UserShell,
                 status: ApiCommandExecutionStatus::Completed,
@@ -461,6 +464,7 @@ fn mcp_tool_call_begin_and_end_emit_item_events() {
                 tool: "tool_x".to_string(),
                 status: ApiMcpToolCallStatus::InProgress,
                 arguments: json!({ "key": "value" }),
+                mcp_app_resource_uri: None,
                 result: None,
                 error: None,
                 duration_ms: None,
@@ -476,10 +480,12 @@ fn mcp_tool_call_begin_and_end_emit_item_events() {
                 tool: "tool_x".to_string(),
                 status: ApiMcpToolCallStatus::Completed,
                 arguments: json!({ "key": "value" }),
-                result: Some(McpToolCallResult {
+                mcp_app_resource_uri: None,
+                result: Some(Box::new(McpToolCallResult {
                     content: Vec::new(),
                     structured_content: None,
-                }),
+                    meta: None,
+                })),
                 error: None,
                 duration_ms: Some(1_000),
             },
@@ -543,6 +549,7 @@ fn mcp_tool_call_failure_sets_failed_status() {
                 tool: "tool_y".to_string(),
                 status: ApiMcpToolCallStatus::Failed,
                 arguments: json!({ "param": 42 }),
+                mcp_app_resource_uri: None,
                 result: None,
                 error: Some(McpToolCallError {
                     message: "tool exploded".to_string(),
@@ -589,6 +596,7 @@ fn mcp_tool_call_defaults_arguments_and_preserves_structured_content() {
                 tool: "tool_z".to_string(),
                 status: ApiMcpToolCallStatus::InProgress,
                 arguments: serde_json::Value::Null,
+                mcp_app_resource_uri: None,
                 result: None,
                 error: None,
                 duration_ms: None,
@@ -604,13 +612,15 @@ fn mcp_tool_call_defaults_arguments_and_preserves_structured_content() {
                 tool: "tool_z".to_string(),
                 status: ApiMcpToolCallStatus::Completed,
                 arguments: serde_json::Value::Null,
-                result: Some(McpToolCallResult {
+                mcp_app_resource_uri: None,
+                result: Some(Box::new(McpToolCallResult {
                     content: vec![json!({
                         "type": "text",
                         "text": "done",
                     })],
                     structured_content: Some(json!({ "status": "ok" })),
-                }),
+                    meta: None,
+                })),
                 error: None,
                 duration_ms: Some(10),
             },
@@ -1066,6 +1076,9 @@ fn plan_update_emits_started_then_updated_then_completed() {
                 items: Vec::new(),
                 status: TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         },
     ));
@@ -1122,6 +1135,9 @@ fn plan_update_after_completion_starts_new_todo_list_with_new_id() {
                 items: Vec::new(),
                 status: TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         },
     ));
@@ -1201,6 +1217,9 @@ fn token_usage_update_is_emitted_on_turn_completion() {
                 items: Vec::new(),
                 status: TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         },
     ));
@@ -1236,6 +1255,9 @@ fn turn_completion_recovers_final_message_from_turn_items() {
                 }],
                 status: TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         },
     ));
@@ -1261,7 +1283,7 @@ fn turn_completion_reconciles_started_items_from_turn_items() {
             item: ThreadItem::CommandExecution {
                 id: "cmd-1".to_string(),
                 command: "ls".to_string(),
-                cwd: PathBuf::from("/tmp/project"),
+                cwd: test_path_buf("/tmp/project").abs(),
                 process_id: Some("123".to_string()),
                 source: CommandExecutionSource::UserShell,
                 status: ApiCommandExecutionStatus::InProgress,
@@ -1299,7 +1321,7 @@ fn turn_completion_reconciles_started_items_from_turn_items() {
                 items: vec![ThreadItem::CommandExecution {
                     id: "cmd-1".to_string(),
                     command: "ls".to_string(),
-                    cwd: PathBuf::from("/tmp/project"),
+                    cwd: test_path_buf("/tmp/project").abs(),
                     process_id: Some("123".to_string()),
                     source: CommandExecutionSource::UserShell,
                     status: ApiCommandExecutionStatus::Completed,
@@ -1310,6 +1332,9 @@ fn turn_completion_reconciles_started_items_from_turn_items() {
                 }],
                 status: TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         },
     ));
@@ -1367,6 +1392,9 @@ fn turn_completion_overwrites_stale_final_message_from_turn_items() {
                 }],
                 status: TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         },
     ));
@@ -1407,6 +1435,9 @@ fn turn_completion_preserves_streamed_final_message_when_turn_items_are_empty() 
                 items: Vec::new(),
                 status: TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         },
     ));
@@ -1455,6 +1486,9 @@ fn failed_turn_clears_stale_final_message() {
                     additional_details: None,
                     codex_error_info: None,
                 }),
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         },
     ));
@@ -1478,6 +1512,9 @@ fn turn_completion_falls_back_to_final_plan_text() {
                 }],
                 status: TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         },
     ));
@@ -1526,6 +1563,9 @@ fn turn_failure_prefers_structured_error_message() {
                 items: Vec::new(),
                 status: TurnStatus::Failed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         },
     ));

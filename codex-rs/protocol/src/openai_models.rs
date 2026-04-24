@@ -20,6 +20,7 @@ use crate::config_types::ReasoningSummary;
 use crate::config_types::Verbosity;
 
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
+pub const SPEED_TIER_FAST: &str = "fast";
 
 /// See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning
 #[derive(
@@ -132,6 +133,9 @@ pub struct ModelPreset {
     /// Whether this model supports personality-specific instructions.
     #[serde(default)]
     pub supports_personality: bool,
+    /// Additional speed tiers this model can run with beyond the standard path.
+    #[serde(default)]
+    pub additional_speed_tiers: Vec<String>,
     /// Whether this is the default model for new users.
     pub is_default: bool,
     /// recommended upgrade model
@@ -252,6 +256,8 @@ pub struct ModelInfo {
     pub visibility: ModelVisibility,
     pub supported_in_api: bool,
     pub priority: i32,
+    #[serde(default)]
+    pub additional_speed_tiers: Vec<String>,
     pub availability_nux: Option<ModelAvailabilityNux>,
     pub upgrade: Option<ModelInfoUpgrade>,
     pub base_instructions: String,
@@ -271,6 +277,9 @@ pub struct ModelInfo {
     pub supports_image_detail_original: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<i64>,
+    /// Maximum context window allowed for config overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_window: Option<i64>,
     /// Token threshold for automatic compaction. When omitted, core derives it
     /// from `context_window` (90%). When provided, core clamps it to 90% of the
     /// context window when available.
@@ -294,9 +303,13 @@ pub struct ModelInfo {
 }
 
 impl ModelInfo {
+    pub fn resolved_context_window(&self) -> Option<i64> {
+        self.context_window.or(self.max_context_window)
+    }
+
     pub fn auto_compact_token_limit(&self) -> Option<i64> {
         let context_limit = self
-            .context_window
+            .resolved_context_window()
             .map(|context_window| (context_window * 9) / 10);
         let config_limit = self.auto_compact_token_limit;
         if let Some(context_limit) = context_limit {
@@ -428,6 +441,7 @@ impl From<ModelInfo> for ModelPreset {
                 .unwrap_or(ReasoningEffort::None),
             supported_reasoning_efforts: info.supported_reasoning_levels.clone(),
             supports_personality,
+            additional_speed_tiers: info.additional_speed_tiers,
             is_default: false, // default is the highest priority available model
             upgrade: info.upgrade.as_ref().map(|upgrade| ModelUpgrade {
                 id: upgrade.model.clone(),
@@ -449,6 +463,12 @@ impl From<ModelInfo> for ModelPreset {
 }
 
 impl ModelPreset {
+    pub fn supports_fast_mode(&self) -> bool {
+        self.additional_speed_tiers
+            .iter()
+            .any(|tier| tier == SPEED_TIER_FAST)
+    }
+
     /// Filter models based on authentication mode.
     ///
     /// In ChatGPT mode, all models are visible. Otherwise, only API-supported models are shown.
@@ -527,6 +547,7 @@ mod tests {
             visibility: ModelVisibility::List,
             supported_in_api: true,
             priority: 1,
+            additional_speed_tiers: Vec::new(),
             availability_nux: None,
             upgrade: None,
             base_instructions: "base".to_string(),
@@ -541,6 +562,7 @@ mod tests {
             supports_parallel_tool_calls: false,
             supports_image_detail_original: false,
             context_window: None,
+            max_context_window: None,
             auto_compact_token_limit: None,
             effective_context_window_percent: 95,
             experimental_supported_tools: vec![],
@@ -767,11 +789,35 @@ mod tests {
     }
 
     #[test]
+    fn resolved_context_window_prefers_context_window() {
+        let model = ModelInfo {
+            context_window: Some(273_000),
+            max_context_window: Some(400_000),
+            ..test_model(/*spec*/ None)
+        };
+
+        assert_eq!(model.resolved_context_window(), Some(273_000));
+    }
+
+    #[test]
+    fn resolved_context_window_falls_back_to_max_context_window() {
+        let model = ModelInfo {
+            context_window: None,
+            max_context_window: Some(400_000),
+            ..test_model(/*spec*/ None)
+        };
+
+        assert_eq!(model.resolved_context_window(), Some(400_000));
+        assert_eq!(model.auto_compact_token_limit(), Some(360_000));
+    }
+
+    #[test]
     fn model_preset_preserves_availability_nux() {
         let preset = ModelPreset::from(ModelInfo {
             availability_nux: Some(ModelAvailabilityNux {
                 message: "Try Spark.".to_string(),
             }),
+            additional_speed_tiers: vec![SPEED_TIER_FAST.to_string()],
             ..test_model(/*spec*/ None)
         });
 
@@ -781,5 +827,6 @@ mod tests {
                 message: "Try Spark.".to_string(),
             })
         );
+        assert!(preset.supports_fast_mode());
     }
 }

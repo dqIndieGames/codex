@@ -3,6 +3,7 @@ use crate::config_requirements::ConfigRequirementsToml;
 
 use super::fingerprint::record_origins;
 use super::fingerprint::version_for_toml;
+use super::key_aliases::normalized_with_key_aliases;
 use super::merge::merge_toml_values;
 use codex_app_server_protocol::ConfigLayer;
 use codex_app_server_protocol::ConfigLayerMetadata;
@@ -17,10 +18,39 @@ use toml::Value as TomlValue;
 #[derive(Debug, Default, Clone)]
 pub struct LoaderOverrides {
     pub managed_config_path: Option<PathBuf>,
+    pub ignore_user_config: bool,
+    pub ignore_user_and_project_exec_policy_rules: bool,
     //TODO(gt): Add a macos_ prefix to this field and remove the target_os check.
     #[cfg(target_os = "macos")]
     pub managed_preferences_base64: Option<String>,
     pub macos_managed_config_requirements_base64: Option<String>,
+}
+
+impl LoaderOverrides {
+    /// Returns overrides that ignore host-managed configuration.
+    ///
+    /// This is intended for tests that should load only repo-controlled config fixtures.
+    pub fn without_managed_config_for_tests() -> Self {
+        Self::with_managed_config_path_for_tests(
+            std::env::temp_dir()
+                .join("codex-config-tests")
+                .join("managed_config.toml"),
+        )
+    }
+
+    /// Returns overrides with host MDM disabled and managed config loaded from `managed_config_path`.
+    ///
+    /// This is intended for tests that supply an explicit managed config fixture.
+    pub fn with_managed_config_path_for_tests(managed_config_path: PathBuf) -> Self {
+        Self {
+            managed_config_path: Some(managed_config_path),
+            ignore_user_config: false,
+            ignore_user_and_project_exec_policy_rules: false,
+            #[cfg(target_os = "macos")]
+            managed_preferences_base64: Some(String::new()),
+            macos_managed_config_requirements_base64: Some(String::new()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -131,6 +161,9 @@ pub struct ConfigLayerStack {
     /// sources. This preserves the original allow-lists so they can be
     /// surfaced via APIs.
     requirements_toml: ConfigRequirementsToml,
+
+    /// Whether execpolicy should skip `.rules` files from user and project config-layer folders.
+    ignore_user_and_project_exec_policy_rules: bool,
 }
 
 impl ConfigLayerStack {
@@ -145,7 +178,20 @@ impl ConfigLayerStack {
             user_layer_index,
             requirements,
             requirements_toml,
+            ignore_user_and_project_exec_policy_rules: false,
         })
+    }
+
+    pub fn with_user_and_project_exec_policy_rules_ignored(
+        mut self,
+        ignore_user_and_project_exec_policy_rules: bool,
+    ) -> Self {
+        self.ignore_user_and_project_exec_policy_rules = ignore_user_and_project_exec_policy_rules;
+        self
+    }
+
+    pub fn ignore_user_and_project_exec_policy_rules(&self) -> bool {
+        self.ignore_user_and_project_exec_policy_rules
     }
 
     /// Returns the raw user config layer, if any.
@@ -185,6 +231,8 @@ impl ConfigLayerStack {
                     user_layer_index: self.user_layer_index,
                     requirements: self.requirements.clone(),
                     requirements_toml: self.requirements_toml.clone(),
+                    ignore_user_and_project_exec_policy_rules: self
+                        .ignore_user_and_project_exec_policy_rules,
                 }
             }
             None => {
@@ -206,6 +254,8 @@ impl ConfigLayerStack {
                     user_layer_index: Some(user_layer_index),
                     requirements: self.requirements.clone(),
                     requirements_toml: self.requirements_toml.clone(),
+                    ignore_user_and_project_exec_policy_rules: self
+                        .ignore_user_and_project_exec_policy_rules,
                 }
             }
         }
@@ -237,7 +287,8 @@ impl ConfigLayerStack {
             ConfigLayerStackOrdering::LowestPrecedenceFirst,
             /*include_disabled*/ false,
         ) {
-            record_origins(&layer.config, &layer.metadata(), &mut path, &mut origins);
+            let config = normalized_with_key_aliases(&layer.config, &[]);
+            record_origins(&config, &layer.metadata(), &mut path, &mut origins);
         }
 
         origins
@@ -329,3 +380,7 @@ fn verify_layer_ordering(layers: &[ConfigLayerEntry]) -> std::io::Result<Option<
 
     Ok(user_layer_index)
 }
+
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod tests;
