@@ -17,6 +17,11 @@ concurrency:
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 jobs:
   test:
+    # Forks do not have OpenAI's BuildBuddy cache/remote execution, so the
+    # full Bazel matrix can exceed hosted-runner limits on every push. Keep the
+    # workflow available for manual fork runs, but only run it automatically in
+    # the upstream repository.
+    if: ${{ github.repository == 'openai/codex' || github.event_name == 'workflow_dispatch' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -125,6 +130,11 @@ jobs:
           key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
 
   clippy:
+    # Forks do not have OpenAI's BuildBuddy cache/remote execution, so the
+    # full Bazel matrix can exceed hosted-runner limits on every push. Keep the
+    # workflow available for manual fork runs, but only run it automatically in
+    # the upstream repository.
+    if: ${{ github.repository == 'openai/codex' || github.event_name == 'workflow_dispatch' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -209,6 +219,11 @@ jobs:
           key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
 
   verify-release-build:
+    # Forks do not have OpenAI's BuildBuddy cache/remote execution, so the
+    # full Bazel matrix can exceed hosted-runner limits on every push. Keep the
+    # workflow available for manual fork runs, but only run it automatically in
+    # the upstream repository.
+    if: ${{ github.repository == 'openai/codex' || github.event_name == 'workflow_dispatch' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false

@@ -7,6 +7,11 @@ on:
 
 jobs:
   sdks:
+    # Forks do not have OpenAI's BuildBuddy cache/remote execution, so the
+    # Bazel prebuild can exceed hosted-runner limits on every push. Keep the
+    # workflow available for manual fork runs, but only run it automatically in
+    # the upstream repository.
+    if: ${{ github.repository == 'openai/codex' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
