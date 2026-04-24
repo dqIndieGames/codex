@@ -1,4 +1,4 @@
-# 跨 Provider 历史默认全量读取_TASK_2026-04-02
+# 跨 Provider 历史默认全量读取\_TASK_2026-04-02
 
 ## Context
 
@@ -54,27 +54,27 @@
 ## Checklist
 
 - [x] 调整 `codex-rs/app-server/src/codex_message_processor.rs` 中 `thread/list` 的默认 provider 过滤逻辑：
-  未传 `modelProviders` 时不再自动回退到当前 `config.model_provider_id`；显式传入 provider 列表时继续按传入值过滤；显式传空数组时继续表示“所有 provider”。
+      未传 `modelProviders` 时不再自动回退到当前 `config.model_provider_id`；显式传入 provider 列表时继续按传入值过滤；显式传空数组时继续表示“所有 provider”。
 - [x] 保持 `thread/list` 返回结构不变：
-  继续返回线程自身的 `model_provider` 字段，供调用方按需展示或记录来源。
+      继续返回线程自身的 `model_provider` 字段，供调用方按需展示或记录来源。
 - [x] 调整 `codex-rs/exec/src/lib.rs` 中 `resume --last` 的历史查询逻辑：
-  最近会话查询不再自动注入当前 provider 过滤；通过线程 ID 或线程名恢复的现有逻辑保持不变，不改当前按 `thread.name` 客户端扫描匹配的逻辑。
+      最近会话查询不再自动注入当前 provider 过滤；通过线程 ID 或线程名恢复的现有逻辑保持不变，不改当前按 `thread.name` 客户端扫描匹配的逻辑。
 - [x] 保持 CLI 恢复旧线程时的 provider 口径不变：
-  `thread_resume_params_from_config()` 仍显式带上当前 `config.model_provider_id`，不自动切换到历史线程记录的 provider。
+      `thread_resume_params_from_config()` 仍显式带上当前 `config.model_provider_id`，不自动切换到历史线程记录的 provider。
 - [x] 调整 `codex-rs/tui/src/lib.rs` 中最近会话查询参数：
-  本地 `resume --last` 默认不再传 `model_providers = Some(vec![config.model_provider_id.clone()])`；本地 `fork --last` 维持当前 provider 过滤；remote 模式维持现状。
+      本地 `resume --last` 默认不再传 `model_providers = Some(vec![config.model_provider_id.clone()])`；本地 `fork --last` 维持当前 provider 过滤；remote 模式维持现状。
 - [x] 调整 `codex-rs/tui/src/resume_picker.rs` 中 provider 默认筛选：
-  本地 resume picker 默认从 `ProviderFilter::MatchDefault(config.model_provider_id.to_string())` 改为全量 provider；本地 fork picker 保持当前 provider 过滤；remote picker 继续保持全量语义。
+      本地 resume picker 默认从 `ProviderFilter::MatchDefault(config.model_provider_id.to_string())` 改为全量 provider；本地 fork picker 保持当前 provider 过滤；remote picker 继续保持全量语义。
 - [x] 保持 remote TUI 生命周期参数口径不变：
-  `codex-rs/tui/src/app_server_session.rs` 中 `ThreadParamsMode::Remote` 的 `thread_start_params_from_config()`、`thread_resume_params_from_config()`、`thread_fork_params_from_config()` 继续不从客户端注入 `model_provider`。
+      `codex-rs/tui/src/app_server_session.rs` 中 `ThreadParamsMode::Remote` 的 `thread_start_params_from_config()`、`thread_resume_params_from_config()`、`thread_fork_params_from_config()` 继续不从客户端注入 `model_provider`。
 - [x] 同步更新注释和测试名：
-  删除 `codex-rs/tui/src/resume_picker.rs` 中“只看当前 provider”之类的过期注释；若测试名依赖旧语义，必须一并改成新口径。
+      删除 `codex-rs/tui/src/resume_picker.rs` 中“只看当前 provider”之类的过期注释；若测试名依赖旧语义，必须一并改成新口径。
 - [x] 补齐测试源码改写：
-  服务端补或改 `thread_list` 测试，覆盖“未传 provider 默认全量、显式 provider 仍过滤、显式空数组仍全量、返回项 `model_provider` 不丢失”；CLI 补或改 `resume_lookup_model_providers()` 与 `thread_resume_params_from_config()` 相关测试；TUI 补或改 local resume、local fork、remote 三种 provider 口径差异测试。若共享 helper 被拆分，补对应静态单测源码。
+      服务端补或改 `thread_list` 测试，覆盖“未传 provider 默认全量、显式 provider 仍过滤、显式空数组仍全量、返回项 `model_provider` 不丢失”；CLI 补或改 `resume_lookup_model_providers()` 与 `thread_resume_params_from_config()` 相关测试；TUI 补或改 local resume、local fork、remote 三种 provider 口径差异测试。若共享 helper 被拆分，补对应静态单测源码。
 - [x] 审核所有 `model_providers: None` 调用方：
-  至少复核 `exec`、`tui`、`debug-client`、`app-server-test-client` 是否接受 `thread/list` 的新默认值；若仅需审计、不需改代码，也必须在执行记录中记明。
+      至少复核 `exec`、`tui`、`debug-client`、`app-server-test-client` 是否接受 `thread/list` 的新默认值；若仅需审计、不需改代码，也必须在执行记录中记明。
 - [x] 修改 [local1-custom-feature-checklist-2026-03-28.md](/E:/vscodeProject/codex_github/codex/docs/local1-custom-feature-checklist-2026-03-28.md)：
-  在“定制功能主清单”新增 `F11`，并在“同步官方后的必查清单”新增对应回归项。新增内容按以下文案写死：
+      在“定制功能主清单”新增 `F11`，并在“同步官方后的必查清单”新增对应回归项。新增内容按以下文案写死：
 
   `F11` 行建议内容：
 
@@ -106,26 +106,26 @@
 
 **按严重度排序的问题清单**
 
-1. 严重度：中  
-问题描述：task 和 `local1` 清单把“跨 provider 默认全量”写成了“默认展示/看到所有 provider 下的线程”，但当前实现仍然保留了原有的 cwd 过滤，只有在 `--all` / `show_all` 时才会放开 cwd。对应文案见 [cross-provider-history-default-task-2026-04-02.md](/E:/vscodeProject/codex_github/codex/docs/cross-provider-history-default-task-2026-04-02.md#L78)、[cross-provider-history-default-task-2026-04-02.md](/E:/vscodeProject/codex_github/codex/docs/cross-provider-history-default-task-2026-04-02.md#L82)、[local1-custom-feature-checklist-2026-03-28.md](/E:/vscodeProject/codex_github/codex/docs/local1-custom-feature-checklist-2026-03-28.md#L36)、[local1-custom-feature-checklist-2026-03-28.md](/E:/vscodeProject/codex_github/codex/docs/local1-custom-feature-checklist-2026-03-28.md#L49)。而代码里 CLI 仍然在默认路径下按 cwd 过滤，见 [lib.rs](/E:/vscodeProject/codex_github/codex/codex-rs/exec/src/lib.rs#L1160) 和 [lib.rs](/E:/vscodeProject/codex_github/codex/codex-rs/exec/src/lib.rs#L1183)；TUI `resume --last` 仍然构造 `filter_cwd`，见 [lib.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/lib.rs#L1191) 和 [lib.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/lib.rs#L1194)；resume picker 默认也仍然按 cwd 过滤，见 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L239) 、 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L245) 和 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L867)。  
-为什么是问题：这会把“去掉 provider 默认过滤”误写成“去掉全部默认过滤”。后续按文档回归时，维护者可能会把“仍然受 cwd 限制”的现状误判为 bug，或者错误地继续放开 cwd 过滤，造成超出本次需求范围的行为变更。  
-修改建议：把所有相关文案改成“在保留现有 cwd / `--all` / `show_all` 语义的前提下，默认不再按 provider 过滤”或等价表述。`F11` 行和必查清单都应补上这个边界。  
-建议落到 task 的哪个章节：`Checklist` 中 `local1` 文案项、`Acceptance`、`Notes`、`执行记录`。
+1. 严重度：中
+   问题描述：task 和 `local1` 清单把“跨 provider 默认全量”写成了“默认展示/看到所有 provider 下的线程”，但当前实现仍然保留了原有的 cwd 过滤，只有在 `--all` / `show_all` 时才会放开 cwd。对应文案见 [cross-provider-history-default-task-2026-04-02.md](/E:/vscodeProject/codex_github/codex/docs/cross-provider-history-default-task-2026-04-02.md#L78)、[cross-provider-history-default-task-2026-04-02.md](/E:/vscodeProject/codex_github/codex/docs/cross-provider-history-default-task-2026-04-02.md#L82)、[local1-custom-feature-checklist-2026-03-28.md](/E:/vscodeProject/codex_github/codex/docs/local1-custom-feature-checklist-2026-03-28.md#L36)、[local1-custom-feature-checklist-2026-03-28.md](/E:/vscodeProject/codex_github/codex/docs/local1-custom-feature-checklist-2026-03-28.md#L49)。而代码里 CLI 仍然在默认路径下按 cwd 过滤，见 [lib.rs](/E:/vscodeProject/codex_github/codex/codex-rs/exec/src/lib.rs#L1160) 和 [lib.rs](/E:/vscodeProject/codex_github/codex/codex-rs/exec/src/lib.rs#L1183)；TUI `resume --last` 仍然构造 `filter_cwd`，见 [lib.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/lib.rs#L1191) 和 [lib.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/lib.rs#L1194)；resume picker 默认也仍然按 cwd 过滤，见 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L239) 、 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L245) 和 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L867)。
+   为什么是问题：这会把“去掉 provider 默认过滤”误写成“去掉全部默认过滤”。后续按文档回归时，维护者可能会把“仍然受 cwd 限制”的现状误判为 bug，或者错误地继续放开 cwd 过滤，造成超出本次需求范围的行为变更。
+   修改建议：把所有相关文案改成“在保留现有 cwd / `--all` / `show_all` 语义的前提下，默认不再按 provider 过滤”或等价表述。`F11` 行和必查清单都应补上这个边界。
+   建议落到 task 的哪个章节：`Checklist` 中 `local1` 文案项、`Acceptance`、`Notes`、`执行记录`。
 
-2. 严重度：低（风险）  
-问题描述：本次把本地 resume picker 默认值改成了 `ProviderFilter::Any`，见 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L297) 到 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L308)。但本地 rollout loader 在 `ProviderFilter::Any` 分支下会把 `default_provider.as_deref().unwrap_or_default()` 传给 `RolloutRecorder::list_threads()`，见 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L334) 和 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L341)。`RolloutRecorder::list_threads()` 及其后续 cwd/metadata 回退链路仍然接收这个 `default_provider`，见 [recorder.rs](/E:/vscodeProject/codex_github/codex/codex-rs/rollout/src/recorder.rs#L165)、[recorder.rs](/E:/vscodeProject/codex_github/codex/codex-rs/rollout/src/recorder.rs#L172)、[recorder.rs](/E:/vscodeProject/codex_github/codex/codex-rs/rollout/src/recorder.rs#L1022) 和 [recorder.rs](/E:/vscodeProject/codex_github/codex/codex-rs/rollout/src/recorder.rs#L1069)。当前新增测试只验证了 helper 选择 `ProviderFilter::Any`，没有覆盖“本地 rollout picker + Any + legacy rollout / metadata fallback”这条新路径，见 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L1891) 到 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L1938)。  
-为什么是问题：这是本次改动首次让本地 rollout picker 真实走到 `Any` 分支。静态上不能证明空字符串 fallback 一定安全，尤其是老 rollout 缺失 `model_provider`、需要 metadata 回退或 cwd 二次解析时，可能出现边界行为偏差。当前我把它判断为“风险”，不是已证实缺陷。  
-修改建议：二选一即可。  
-其一，把 rollout loader 在 `ProviderFilter::Any` 时仍传 `config.model_provider_id` 作为 fallback provider，只是不传过滤条件。  
-其二，至少补一个静态测试源码，明确覆盖“本地 rollout picker 的 `Any` 分支对缺失 provider 的老 rollout 仍然安全”。  
-建议验证点：包含缺失 `session_meta.model_provider` 的历史 rollout、开启 cwd 过滤、关闭 `show_all` 的本地 resume picker。  
-建议落到 task 的哪个章节：`Checklist` 的“补齐测试源码改写”、`Notes`、`执行记录`。
+2. 严重度：低（风险）
+   问题描述：本次把本地 resume picker 默认值改成了 `ProviderFilter::Any`，见 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L297) 到 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L308)。但本地 rollout loader 在 `ProviderFilter::Any` 分支下会把 `default_provider.as_deref().unwrap_or_default()` 传给 `RolloutRecorder::list_threads()`，见 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L334) 和 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L341)。`RolloutRecorder::list_threads()` 及其后续 cwd/metadata 回退链路仍然接收这个 `default_provider`，见 [recorder.rs](/E:/vscodeProject/codex_github/codex/codex-rs/rollout/src/recorder.rs#L165)、[recorder.rs](/E:/vscodeProject/codex_github/codex/codex-rs/rollout/src/recorder.rs#L172)、[recorder.rs](/E:/vscodeProject/codex_github/codex/codex-rs/rollout/src/recorder.rs#L1022) 和 [recorder.rs](/E:/vscodeProject/codex_github/codex/codex-rs/rollout/src/recorder.rs#L1069)。当前新增测试只验证了 helper 选择 `ProviderFilter::Any`，没有覆盖“本地 rollout picker + Any + legacy rollout / metadata fallback”这条新路径，见 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L1891) 到 [resume_picker.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/resume_picker.rs#L1938)。
+   为什么是问题：这是本次改动首次让本地 rollout picker 真实走到 `Any` 分支。静态上不能证明空字符串 fallback 一定安全，尤其是老 rollout 缺失 `model_provider`、需要 metadata 回退或 cwd 二次解析时，可能出现边界行为偏差。当前我把它判断为“风险”，不是已证实缺陷。
+   修改建议：二选一即可。
+   其一，把 rollout loader 在 `ProviderFilter::Any` 时仍传 `config.model_provider_id` 作为 fallback provider，只是不传过滤条件。
+   其二，至少补一个静态测试源码，明确覆盖“本地 rollout picker 的 `Any` 分支对缺失 provider 的老 rollout 仍然安全”。
+   建议验证点：包含缺失 `session_meta.model_provider` 的历史 rollout、开启 cwd 过滤、关闭 `show_all` 的本地 resume picker。
+   建议落到 task 的哪个章节：`Checklist` 的“补齐测试源码改写”、`Notes`、`执行记录`。
 
-3. 严重度：低  
-问题描述：task 的“关键修改文件”把 [cross-provider-history-default-task-2026-04-02.md](/E:/vscodeProject/codex_github/codex/docs/cross-provider-history-default-task-2026-04-02.md#L41) 中的 [app_server_session.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/app_server_session.rs#L857) 列成了“修改文件”，但本次我看到的是“作为不变语义的审计对象”，没有对应源码 diff。  
-为什么是问题：这会让后续读 task 的人误以为 remote 生命周期参数实现也有实际改动，增加复盘成本，也会弱化“这里只做语义保护、未改代码”的边界。  
-修改建议：把该文件从“关键修改文件”改成“关键审计文件”或在同一行明确标注“未改代码，仅复核 remote 语义保持不变”。  
-建议落到 task 的哪个章节：`关键修改文件`、`执行记录`。
+3. 严重度：低
+   问题描述：task 的“关键修改文件”把 [cross-provider-history-default-task-2026-04-02.md](/E:/vscodeProject/codex_github/codex/docs/cross-provider-history-default-task-2026-04-02.md#L41) 中的 [app_server_session.rs](/E:/vscodeProject/codex_github/codex/codex-rs/tui/src/app_server_session.rs#L857) 列成了“修改文件”，但本次我看到的是“作为不变语义的审计对象”，没有对应源码 diff。
+   为什么是问题：这会让后续读 task 的人误以为 remote 生命周期参数实现也有实际改动，增加复盘成本，也会弱化“这里只做语义保护、未改代码”的边界。
+   修改建议：把该文件从“关键修改文件”改成“关键审计文件”或在同一行明确标注“未改代码，仅复核 remote 语义保持不变”。
+   建议落到 task 的哪个章节：`关键修改文件`、`执行记录`。
 
 **剩余风险或验证缺口**
 
