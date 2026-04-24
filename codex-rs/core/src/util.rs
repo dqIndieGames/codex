@@ -37,6 +37,7 @@ macro_rules! feedback_tags {
     };
 }
 
+#[cfg(test)]
 struct Auth401FeedbackSnapshot<'a> {
     request_id: &'a str,
     cf_ray: &'a str,
@@ -44,6 +45,7 @@ struct Auth401FeedbackSnapshot<'a> {
     error_code: &'a str,
 }
 
+#[cfg(test)]
 impl<'a> Auth401FeedbackSnapshot<'a> {
     fn from_optional_fields(
         request_id: Option<&'a str>,
@@ -60,6 +62,7 @@ impl<'a> Auth401FeedbackSnapshot<'a> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn emit_feedback_auth_recovery_tags(
     auth_recovery_mode: &str,
     auth_recovery_phase: &str,

@@ -2072,6 +2072,7 @@ where
     (ResponseStream { rx_event }, rx_last_response)
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct UnauthorizedRecoveryExecution {
     mode: &'static str,
@@ -2086,6 +2087,7 @@ struct PendingUnauthorizedRetry {
 }
 
 impl PendingUnauthorizedRetry {
+    #[cfg(test)]
     fn from_recovery(recovery: UnauthorizedRecoveryExecution) -> Self {
         Self {
             retry_after_unauthorized: true,

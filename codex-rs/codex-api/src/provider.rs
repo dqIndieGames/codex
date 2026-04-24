@@ -204,6 +204,12 @@ fn matches_azure_responses_base_url(base_url: &str) -> bool {
     AZURE_MARKERS.iter().any(|marker| base_url.contains(marker))
 }
 
+impl ProviderSource for Provider {
+    fn snapshot(&self) -> Provider {
+        self.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,11 +386,5 @@ mod tests {
             &non_usage_limit_err,
             0
         ));
-    }
-}
-
-impl ProviderSource for Provider {
-    fn snapshot(&self) -> Provider {
-        self.clone()
     }
 }

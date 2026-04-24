@@ -778,6 +778,7 @@ fn models_request_telemetry_emits_auth_env_feedback_tags_on_failure() {
             body: Some("plain text error".to_string()),
         }),
         Duration::from_millis(17),
+        /*emit_log_trace*/ true,
     );
 
     let tags = tags.lock().unwrap().clone();

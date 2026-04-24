@@ -1388,12 +1388,7 @@ impl Session {
     }
 
     fn resolve_user_config_toml_path(config: &Config) -> CodexResult<AbsolutePathBuf> {
-        let config_toml_path = config.codex_home.join(CONFIG_TOML_FILE);
-        AbsolutePathBuf::try_from(config_toml_path).map_err(|err| {
-            CodexErr::InvalidRequest(format!(
-                "failed to resolve user config path while reloading layer: {err}"
-            ))
-        })
+        Ok(config.codex_home.join(CONFIG_TOML_FILE))
     }
 
     fn read_user_config_toml_value(config_toml_path: &AbsolutePathBuf) -> CodexResult<TomlValue> {
