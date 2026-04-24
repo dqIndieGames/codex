@@ -220,9 +220,9 @@ fn assistant_message_should_receive_first_turn_checklist_skips_commentary_only()
     assert!(assistant_message_should_receive_first_turn_checklist(Some(
         &MessagePhase::FinalAnswer
     )));
-    assert!(!assistant_message_should_receive_first_turn_checklist(Some(
-        &MessagePhase::Commentary
-    )));
+    assert!(!assistant_message_should_receive_first_turn_checklist(
+        Some(&MessagePhase::Commentary)
+    ));
 }
 
 #[test]

@@ -14,6 +14,7 @@ use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
+use crate::tools::hook_names::HookToolName;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterToolUse;
 use codex_hooks::HookPayload;
@@ -69,9 +70,8 @@ pub trait ToolHandler: Send + Sync {
 
     fn post_tool_use_payload(
         &self,
-        _call_id: &str,
-        _payload: &ToolPayload,
-        _result: &dyn ToolOutput,
+        _invocation: &ToolInvocation,
+        _result: &Self::Output,
     ) -> Option<PostToolUsePayload> {
         None
     }
@@ -95,12 +95,18 @@ pub(crate) trait ToolArgumentDiffConsumer: Send {
     /// Consume the next argument diff for a tool call.
     fn consume_diff(&mut self, turn: &TurnContext, call_id: String, diff: &str)
     -> Option<EventMsg>;
+
+    /// Flush any buffered event before the tool call completes.
+    fn flush_on_complete(&mut self) -> Option<EventMsg> {
+        None
+    }
 }
 
 pub(crate) struct AnyToolResult {
     pub(crate) call_id: String,
     pub(crate) payload: ToolPayload,
     pub(crate) result: Box<dyn ToolOutput>,
+    pub(crate) post_tool_use_payload: Option<PostToolUsePayload>,
 }
 
 impl AnyToolResult {
@@ -124,12 +130,30 @@ impl AnyToolResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreToolUsePayload {
-    pub(crate) command: String,
+    /// Hook-facing tool name model.
+    ///
+    /// The canonical name is serialized to hook stdin, while aliases are used
+    /// only for matcher compatibility.
+    pub(crate) tool_name: HookToolName,
+    /// Tool-specific input exposed at `tool_input`.
+    ///
+    /// Shell-like tools use `{ "command": ... }`; MCP tools use their resolved
+    /// JSON arguments.
+    pub(crate) tool_input: Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PostToolUsePayload {
-    pub(crate) command: String,
+    /// Hook-facing tool name model.
+    ///
+    /// The canonical name is serialized to hook stdin, while aliases are used
+    /// only for matcher compatibility.
+    pub(crate) tool_name: HookToolName,
+    /// The originating tool-use id exposed at `tool_use_id`.
+    pub(crate) tool_use_id: String,
+    /// Tool-specific input exposed at `tool_input`.
+    pub(crate) tool_input: Value,
+    /// Tool result exposed at `tool_response`.
     pub(crate) tool_response: Value,
 }
 
@@ -140,15 +164,7 @@ trait AnyToolHandler: Send + Sync {
 
     fn pre_tool_use_payload(&self, invocation: &ToolInvocation) -> Option<PreToolUsePayload>;
 
-    fn post_tool_use_payload(
-        &self,
-        call_id: &str,
-        payload: &ToolPayload,
-        result: &dyn ToolOutput,
-    ) -> Option<PostToolUsePayload>;
-
     fn create_diff_consumer(&self) -> Option<Box<dyn ToolArgumentDiffConsumer>>;
-
     fn handle_any<'a>(
         &'a self,
         invocation: ToolInvocation,
@@ -171,19 +187,9 @@ where
         ToolHandler::pre_tool_use_payload(self, invocation)
     }
 
-    fn post_tool_use_payload(
-        &self,
-        call_id: &str,
-        payload: &ToolPayload,
-        result: &dyn ToolOutput,
-    ) -> Option<PostToolUsePayload> {
-        ToolHandler::post_tool_use_payload(self, call_id, payload, result)
-    }
-
     fn create_diff_consumer(&self) -> Option<Box<dyn ToolArgumentDiffConsumer>> {
         ToolHandler::create_diff_consumer(self)
     }
-
     fn handle_any<'a>(
         &'a self,
         invocation: ToolInvocation,
@@ -191,11 +197,14 @@ where
         Box::pin(async move {
             let call_id = invocation.call_id.clone();
             let payload = invocation.payload.clone();
-            let output = self.handle(invocation).await?;
+            let output = self.handle(invocation.clone()).await?;
+            let post_tool_use_payload =
+                ToolHandler::post_tool_use_payload(self, &invocation, &output);
             Ok(AnyToolResult {
                 call_id,
                 payload,
                 result: Box::new(output),
+                post_tool_use_payload,
             })
         })
     }
@@ -234,6 +243,10 @@ impl ToolRegistry {
     //     }
     // }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "tool dispatch must keep active-turn accounting atomic"
+    )]
     pub(crate) async fn dispatch_any(
         &self,
         invocation: ToolInvocation,
@@ -317,18 +330,16 @@ impl ToolRegistry {
         }
 
         if let Some(pre_tool_use_payload) = handler.pre_tool_use_payload(&invocation)
-            && let Some(reason) = run_pre_tool_use_hooks(
+            && let Some(message) = run_pre_tool_use_hooks(
                 &invocation.session,
                 &invocation.turn,
                 invocation.call_id.clone(),
-                pre_tool_use_payload.command.clone(),
+                &pre_tool_use_payload.tool_name,
+                &pre_tool_use_payload.tool_input,
             )
             .await
         {
-            return Err(FunctionCallError::RespondToModel(format!(
-                "Command blocked by PreToolUse hook: {reason}. Command: {}",
-                pre_tool_use_payload.command
-            )));
+            return Err(FunctionCallError::RespondToModel(message));
         }
 
         let is_mutating = handler.is_mutating(&invocation).await;
@@ -375,13 +386,9 @@ impl ToolRegistry {
         emit_metric_for_tool_read(&invocation, success).await;
         let post_tool_use_payload = if success {
             let guard = response_cell.lock().await;
-            guard.as_ref().and_then(|result| {
-                handler.post_tool_use_payload(
-                    &result.call_id,
-                    &result.payload,
-                    result.result.as_ref(),
-                )
-            })
+            guard
+                .as_ref()
+                .and_then(|result| result.post_tool_use_payload.clone())
         } else {
             None
         };
@@ -390,8 +397,10 @@ impl ToolRegistry {
                 run_post_tool_use_hooks(
                     &invocation.session,
                     &invocation.turn,
-                    invocation.call_id.clone(),
-                    post_tool_use_payload.command,
+                    post_tool_use_payload.tool_use_id,
+                    post_tool_use_payload.tool_name.name().to_string(),
+                    post_tool_use_payload.tool_name.matcher_aliases().to_vec(),
+                    post_tool_use_payload.tool_input,
                     post_tool_use_payload.tool_response,
                 )
                 .await,

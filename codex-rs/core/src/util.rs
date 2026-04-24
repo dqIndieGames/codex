@@ -5,7 +5,6 @@ use std::time::Duration;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_shell_command::parse_command::shlex_join;
-use codex_login::AuthEnvTelemetry;
 use rand::Rng;
 use tracing::error;
 

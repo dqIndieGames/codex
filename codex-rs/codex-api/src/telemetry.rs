@@ -1,4 +1,5 @@
 use crate::error::ApiError;
+use crate::provider::RequestRetryRoute;
 use crate::provider::should_retry_request_error;
 use codex_client::Request;
 use codex_client::RequestTelemetry;
@@ -67,12 +68,8 @@ impl WithStatus for StreamResponse {
     }
 }
 
-fn is_primary_responses_endpoint(endpoint: &str) -> bool {
-    endpoint.trim_start_matches('/') == "responses"
-}
-
 fn responses_request_will_continue_main_chain(endpoint: &str, should_retry: bool) -> bool {
-    is_primary_responses_endpoint(endpoint) && should_retry
+    RequestRetryRoute::from_endpoint(endpoint).is_responses() && should_retry
 }
 
 pub(crate) async fn run_with_request_telemetry<T, F, Fut>(
@@ -94,12 +91,12 @@ where
             .as_ref()
             .is_some_and(|telemetry| telemetry.retry_after_unauthorized());
         let req = make_request();
-        let req_for_retry = req.clone();
+        let retry_route = RequestRetryRoute::from_endpoint(endpoint);
         let start = Instant::now();
         let result = send.clone()(req).await;
         let should_retry = match &result {
             Ok(_) => false,
-            Err(err) => should_retry_request_error(&policy, &req_for_retry, err, attempt),
+            Err(err) => should_retry_request_error(&policy, retry_route, err, attempt),
         };
 
         if let Some(t) = telemetry.as_ref() {
@@ -107,7 +104,7 @@ where
                 Ok(resp) => (Some(resp.status()), None),
                 Err(err) => (http_status(err), Some(err)),
             };
-            let emit_log_trace = !is_primary_responses_endpoint(endpoint)
+            let emit_log_trace = !retry_route.is_responses()
                 || (!retry_after_unauthorized
                     && attempt == 0
                     && !responses_request_will_continue_main_chain(endpoint, should_retry));
@@ -133,22 +130,22 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::is_primary_responses_endpoint;
+    use crate::provider::RequestRetryRoute;
 
     #[test]
     fn primary_responses_endpoint_accepts_relative_path() {
-        assert!(is_primary_responses_endpoint("responses"));
+        assert!(RequestRetryRoute::from_endpoint("responses").is_responses());
     }
 
     #[test]
     fn primary_responses_endpoint_accepts_absolute_path() {
-        assert!(is_primary_responses_endpoint("/responses"));
+        assert!(RequestRetryRoute::from_endpoint("/responses").is_responses());
     }
 
     #[test]
     fn primary_responses_endpoint_rejects_other_routes() {
-        assert!(!is_primary_responses_endpoint("responses/compact"));
-        assert!(!is_primary_responses_endpoint("/responses/compact"));
-        assert!(!is_primary_responses_endpoint("models"));
+        assert!(!RequestRetryRoute::from_endpoint("responses/compact").is_responses());
+        assert!(!RequestRetryRoute::from_endpoint("/responses/compact").is_responses());
+        assert!(!RequestRetryRoute::from_endpoint("models").is_responses());
     }
 }

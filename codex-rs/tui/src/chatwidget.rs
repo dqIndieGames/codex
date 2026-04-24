@@ -52,15 +52,15 @@ use crate::app_server_session::ThreadSessionState;
 #[cfg(not(target_os = "linux"))]
 use crate::audio_device::list_realtime_audio_device_names;
 use crate::bottom_pane::StatusLineItem;
-use crate::bottom_pane::StatusLinePreviewData;
 use crate::bottom_pane::StatusLineSetupView;
+use crate::bottom_pane::StatusSurfacePreviewData;
+use crate::bottom_pane::StatusSurfacePreviewItem;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::bottom_pane::TerminalTitleSetupView;
 use crate::legacy_core::DEFAULT_AGENTS_MD_FILENAME;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::Constrained;
 use crate::legacy_core::config::ConstraintResult;
-use crate::legacy_core::config_loader::ConfigLayerStackOrdering;
 #[cfg(target_os = "windows")]
 use crate::legacy_core::windows_sandbox::WindowsSandboxLevelExt;
 use crate::mention_codec::LinkedMention;
@@ -95,7 +95,9 @@ use codex_app_server_protocol::GuardianApprovalReviewAction;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::McpServerStartupState;
+use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::McpServerStatusUpdatedNotification;
+use codex_app_server_protocol::ModelVerification as AppServerModelVerification;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
@@ -106,6 +108,7 @@ use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnPlanStepStatus;
 use codex_app_server_protocol::TurnStatus;
 use codex_chatgpt::connectors;
+use codex_config::ConfigLayerStackOrdering;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::Notifications;
 use codex_config::types::WindowsSandboxModeToml;
@@ -134,6 +137,7 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::parse_command::ParsedCommand;
@@ -167,7 +171,6 @@ use codex_protocol::protocol::DeprecationNoticeEvent;
 use codex_protocol::protocol::ErrorEvent;
 #[cfg(test)]
 use codex_protocol::protocol::Event;
-#[cfg(test)]
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
 use codex_protocol::protocol::ExecCommandBeginEvent;
@@ -192,6 +195,8 @@ use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::McpToolCallEndEvent;
+#[cfg(test)]
+use codex_protocol::protocol::ModelVerification as CoreModelVerification;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::PatchApplyBeginEvent;
 use codex_protocol::protocol::RateLimitReachedType;
@@ -225,7 +230,6 @@ use codex_protocol::request_user_input::RequestUserInputQuestionOption;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
 use codex_protocol::user_input::UserInput;
-use codex_rollout::find_thread_name_by_id;
 use codex_terminal_detection::Multiplexer;
 use codex_terminal_detection::TerminalInfo;
 use codex_terminal_detection::TerminalName;
@@ -255,6 +259,7 @@ const MULTI_AGENT_ENABLE_TITLE: &str = "Enable subagents?";
 const MULTI_AGENT_ENABLE_YES: &str = "Yes, enable";
 const MULTI_AGENT_ENABLE_NO: &str = "Not now";
 const MULTI_AGENT_ENABLE_NOTICE: &str = "Subagents will be enabled in the next session.";
+const TRUSTED_ACCESS_FOR_CYBER_VERIFICATION_WARNING: &str = "Your account was flagged for potentially high-risk cyber activity. Requests may be slower while additional verification is applied. To regain faster access, apply for trusted access: https://chatgpt.com/cyber or learn more: https://developers.openai.com/codex/concepts/cyber-safety";
 const MEMORIES_DOC_URL: &str = "https://developers.openai.com/codex/memories";
 const MEMORIES_ENABLE_TITLE: &str = "Enable memories?";
 const MEMORIES_ENABLE_YES: &str = "Yes, enable";
@@ -378,6 +383,7 @@ use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
 mod realtime;
 use self::realtime::RealtimeConversationUiState;
 use self::realtime::RenderedUserMessageEvent;
+mod reasoning_shortcuts;
 mod side;
 mod status_surfaces;
 use self::status_surfaces::CachedProjectRootName;
@@ -471,8 +477,15 @@ fn is_standard_tool_call(parsed_cmd: &[ParsedCommand]) -> bool {
 }
 
 const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 3] = [75.0, 90.0, 95.0];
-const NUDGE_MODEL_SLUG: &str = "gpt-5.1-codex-mini";
+const NUDGE_MODEL_SLUG: &str = "gpt-5.4-mini";
 const RATE_LIMIT_SWITCH_PROMPT_THRESHOLD: f64 = 90.0;
+const MAX_AGENT_COPY_HISTORY: usize = 32;
+
+#[derive(Debug)]
+struct AgentTurnMarkdown {
+    user_turn_count: usize,
+    markdown: String,
+}
 
 #[derive(Default)]
 struct RateLimitWarningState {
@@ -642,6 +655,15 @@ fn app_server_rate_limit_error_kind(info: &AppServerCodexErrorInfo) -> Option<Ra
     }
 }
 
+#[cfg(test)]
+fn is_core_cyber_policy_error(info: &CoreCodexErrorInfo) -> bool {
+    matches!(info, CoreCodexErrorInfo::CyberPolicy)
+}
+
+fn is_app_server_cyber_policy_error(info: &AppServerCodexErrorInfo) -> bool {
+    matches!(info, AppServerCodexErrorInfo::CyberPolicy)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ExternalEditorState {
     #[default]
@@ -767,6 +789,8 @@ pub(crate) struct ChatWidget {
     /// where the overlay may briefly treat new tail content as already cached.
     active_cell_revision: u64,
     config: Config,
+    /// Runtime value resolved by core. `config.service_tier` remains the explicit user choice.
+    effective_service_tier: Option<ServiceTier>,
     /// The unmasked collaboration mode settings (always Default mode).
     ///
     /// Masks are applied on top of this base mode to derive the effective mode.
@@ -795,13 +819,17 @@ pub(crate) struct ChatWidget {
     plan_stream_controller: Option<PlanStreamController>,
     /// Holds the platform clipboard lease so copied text remains available while supported.
     clipboard_lease: Option<crate::clipboard_copy::ClipboardLease>,
-    /// Raw markdown of the most recently completed agent response.
-    ///
-    /// This cache is intentionally best-effort: if the user rolls back the
-    /// thread and then copies before a replacement response arrives, `/copy`
-    /// may still return the response from before the rollback. Keeping this as
-    /// a single cache avoids coupling copy state to the backtrack transcript.
+    /// Raw markdown of the most recently completed agent response that
+    /// survived any local thread rollback.
     last_agent_markdown: Option<String>,
+    /// Copyable agent responses keyed by the number of visible user turns at
+    /// the time the response completed.
+    agent_turn_markdowns: Vec<AgentTurnMarkdown>,
+    /// Number of user turns currently reflected in the visible transcript.
+    visible_user_turn_count: usize,
+    /// True when rollback discarded the requested copy source because it was
+    /// older than the retained copy history.
+    copy_history_evicted_by_rollback: bool,
     /// Raw markdown of the most recently completed proposed plan.
     ///
     /// This is cached only for the approval popup. It is reset at the start of each new task so the
@@ -1345,6 +1373,8 @@ pub(crate) enum ReplayKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionConfiguredDisplay {
     Normal,
+    /// Apply session state without emitting the session info cell.
+    Quiet,
     SideConversation,
 }
 
@@ -1380,6 +1410,7 @@ fn thread_session_state_to_legacy_event(
         approval_policy: session.approval_policy,
         approvals_reviewer: session.approvals_reviewer,
         sandbox_policy: session.sandbox_policy,
+        permission_profile: session.permission_profile,
         cwd: session.cwd,
         reasoning_effort: session.reasoning_effort,
         history_log_id: session.history_log_id,
@@ -1659,6 +1690,7 @@ fn request_permissions_from_params(
         call_id: params.item_id,
         reason: params.reason,
         permissions: params.permissions.into(),
+        cwd: Some(params.cwd),
     }
 }
 
@@ -1776,7 +1808,7 @@ impl ChatWidget {
     fn update_task_running_state(&mut self) {
         self.bottom_pane
             .set_task_running(self.agent_turn_running || self.mcp_startup_status.is_some());
-        self.refresh_terminal_title();
+        self.refresh_status_surfaces();
     }
 
     fn restore_reasoning_status_header(&mut self) {
@@ -1881,7 +1913,11 @@ impl ChatWidget {
             .config
             .tui_terminal_title
             .as_ref()
-            .is_some_and(|items| items.iter().any(|item| item == "status"));
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item == "run-state" || item == "status")
+            });
         let title_uses_spinner = self
             .config
             .tui_terminal_title
@@ -1891,7 +1927,7 @@ impl ChatWidget {
             || (title_uses_spinner
                 && self.terminal_title_status_kind == TerminalTitleStatusKind::Undoing)
         {
-            self.refresh_terminal_title();
+            self.refresh_status_surfaces();
         }
     }
 
@@ -2043,21 +2079,50 @@ impl ChatWidget {
         if message.is_empty() {
             return;
         }
-        self.last_agent_markdown = Some(message.to_string());
+        let markdown = message.to_string();
+        match self.agent_turn_markdowns.last_mut() {
+            Some(entry) if entry.user_turn_count == self.visible_user_turn_count => {
+                entry.markdown = markdown.clone();
+            }
+            _ => {
+                self.agent_turn_markdowns.push(AgentTurnMarkdown {
+                    user_turn_count: self.visible_user_turn_count,
+                    markdown: markdown.clone(),
+                });
+                if self.agent_turn_markdowns.len() > MAX_AGENT_COPY_HISTORY {
+                    self.agent_turn_markdowns.remove(0);
+                }
+            }
+        }
+        self.last_agent_markdown = Some(markdown);
+        self.copy_history_evicted_by_rollback = false;
         self.saw_copy_source_this_turn = true;
     }
 
-    // --- Small event handlers ---
-    fn on_session_configured(&mut self, event: codex_protocol::protocol::SessionConfiguredEvent) {
-        self.on_session_configured_with_display(event, SessionConfiguredDisplay::Normal);
+    fn record_visible_user_turn_for_copy(&mut self) {
+        self.visible_user_turn_count = self.visible_user_turn_count.saturating_add(1);
     }
 
-    fn on_session_configured_with_display(
+    // --- Small event handlers ---
+    #[cfg(test)]
+    fn on_session_configured(&mut self, event: codex_protocol::protocol::SessionConfiguredEvent) {
+        self.on_session_configured_with_display_and_fork_parent_title(
+            event,
+            SessionConfiguredDisplay::Normal,
+            /*fork_parent_title*/ None,
+        );
+    }
+
+    fn on_session_configured_with_display_and_fork_parent_title(
         &mut self,
         event: codex_protocol::protocol::SessionConfiguredEvent,
         display: SessionConfiguredDisplay,
+        fork_parent_title: Option<String>,
     ) {
         self.last_agent_markdown = None;
+        self.agent_turn_markdowns.clear();
+        self.visible_user_turn_count = 0;
+        self.copy_history_evicted_by_rollback = false;
         self.saw_copy_source_this_turn = false;
         self.bottom_pane
             .set_history_metadata(event.history_log_id, event.history_entry_count);
@@ -2070,6 +2135,7 @@ impl ChatWidget {
         self.current_rollout_path = event.rollout_path.clone();
         self.current_cwd = Some(event.cwd.to_path_buf());
         self.config.cwd = event.cwd.clone();
+        self.effective_service_tier = event.service_tier;
         if let Err(err) = self
             .config
             .permissions
@@ -2154,7 +2220,7 @@ impl ChatWidget {
         if display == SessionConfiguredDisplay::Normal
             && let Some(forked_from_id) = forked_from_id
         {
-            self.emit_forked_thread_event(forked_from_id);
+            self.emit_forked_thread_event(forked_from_id, fork_parent_title);
         }
         if !self.suppress_session_configured_redraw {
             self.request_redraw();
@@ -2173,57 +2239,62 @@ impl ChatWidget {
 
     pub(crate) fn handle_thread_session(&mut self, session: ThreadSessionState) {
         self.instruction_source_paths = session.instruction_source_paths.clone();
-        self.on_session_configured(thread_session_state_to_legacy_event(session));
+        let fork_parent_title = session.fork_parent_title.clone();
+        self.on_session_configured_with_display_and_fork_parent_title(
+            thread_session_state_to_legacy_event(session),
+            SessionConfiguredDisplay::Normal,
+            fork_parent_title,
+        );
+    }
+
+    pub(crate) fn handle_thread_session_quiet(&mut self, session: ThreadSessionState) {
+        self.instruction_source_paths = session.instruction_source_paths.clone();
+        self.on_session_configured_with_display_and_fork_parent_title(
+            thread_session_state_to_legacy_event(session),
+            SessionConfiguredDisplay::Quiet,
+            /*fork_parent_title*/ None,
+        );
     }
 
     pub(crate) fn handle_side_thread_session(&mut self, session: ThreadSessionState) {
         self.instruction_source_paths = session.instruction_source_paths.clone();
-        self.on_session_configured_with_display(
+        let fork_parent_title = session.fork_parent_title.clone();
+        self.on_session_configured_with_display_and_fork_parent_title(
             thread_session_state_to_legacy_event(session),
             SessionConfiguredDisplay::SideConversation,
+            fork_parent_title,
         );
     }
 
-    fn emit_forked_thread_event(&mut self, forked_from_id: ThreadId) {
-        let app_event_tx = self.app_event_tx.clone();
-        let codex_home = self.config.codex_home.clone();
-        tokio::spawn(async move {
-            let forked_from_id_text = forked_from_id.to_string();
-            let send_name_and_id = |name: String| {
-                let line: Line<'static> = vec![
-                    "• ".dim(),
-                    "Thread forked from ".into(),
-                    name.cyan(),
-                    " (".into(),
-                    forked_from_id_text.clone().cyan(),
-                    ")".into(),
-                ]
-                .into();
-                app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                    PlainHistoryCell::new(vec![line]),
-                )));
-            };
-            let send_id_only = || {
-                let line: Line<'static> = vec![
-                    "• ".dim(),
-                    "Thread forked from ".into(),
-                    forked_from_id_text.clone().cyan(),
-                ]
-                .into();
-                app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                    PlainHistoryCell::new(vec![line]),
-                )));
-            };
-
-            match find_thread_name_by_id(&codex_home, &forked_from_id).await {
-                Ok(Some(name)) if !name.trim().is_empty() => send_name_and_id(name),
-                Ok(_) => send_id_only(),
-                Err(err) => {
-                    tracing::warn!("Failed to read forked thread name: {err}");
-                    send_id_only();
-                }
-            }
-        });
+    fn emit_forked_thread_event(
+        &mut self,
+        forked_from_id: ThreadId,
+        fork_parent_title: Option<String>,
+    ) {
+        let forked_from_id_text = forked_from_id.to_string();
+        let line: Line<'static> = if let Some(name) = fork_parent_title
+            && !name.trim().is_empty()
+        {
+            vec![
+                "• ".dim(),
+                "Thread forked from ".into(),
+                name.cyan(),
+                " (".into(),
+                forked_from_id_text.cyan(),
+                ")".into(),
+            ]
+            .into()
+        } else {
+            vec![
+                "• ".dim(),
+                "Thread forked from ".into(),
+                forked_from_id_text.cyan(),
+            ]
+            .into()
+        };
+        self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+            PlainHistoryCell::new(vec![line]),
+        )));
     }
 
     fn on_thread_name_updated(&mut self, event: codex_protocol::protocol::ThreadNameUpdatedEvent) {
@@ -2233,7 +2304,6 @@ impl ChatWidget {
                 self.add_boxed_history(Box::new(cell));
             }
             self.thread_name = event.thread_name;
-            self.refresh_terminal_title();
             self.refresh_status_surfaces();
             self.request_redraw();
             self.maybe_send_next_queued_input();
@@ -2437,7 +2507,6 @@ impl ChatWidget {
         self.saw_plan_update_this_turn = false;
         self.saw_plan_item_this_turn = false;
         self.latest_proposed_plan_markdown = None;
-        self.last_plan_progress = None;
         self.plan_delta_buffer.clear();
         self.plan_item_active = false;
         self.adaptive_chunking.reset();
@@ -2984,6 +3053,16 @@ impl ChatWidget {
         self.maybe_send_next_queued_input();
     }
 
+    fn on_cyber_policy_error(&mut self) {
+        self.submit_pending_steers_after_interrupt = false;
+        self.finalize_turn();
+        self.add_to_history(history_cell::new_cyber_policy_error_event());
+        self.request_redraw();
+
+        // After an error ends the turn, try sending the next queued input.
+        self.maybe_send_next_queued_input();
+    }
+
     fn workspace_owner_usage_nudge_enabled(&self) -> bool {
         self.config
             .features
@@ -3049,6 +3128,11 @@ impl ChatWidget {
             .as_ref()
             .is_some_and(|info| self.handle_app_server_steer_rejected_error(info))
         {
+        } else if codex_error_info
+            .as_ref()
+            .is_some_and(is_app_server_cyber_policy_error)
+        {
+            self.on_cyber_policy_error();
         } else if let Some(info) = codex_error_info
             .as_ref()
             .and_then(app_server_rate_limit_error_kind)
@@ -3067,6 +3151,19 @@ impl ChatWidget {
     fn on_warning(&mut self, message: impl Into<String>) {
         self.add_to_history(history_cell::new_warning_event(message.into()));
         self.request_redraw();
+    }
+
+    #[cfg(test)]
+    fn on_core_model_verification(&mut self, verifications: &[CoreModelVerification]) {
+        if verifications.contains(&CoreModelVerification::TrustedAccessForCyber) {
+            self.on_warning(TRUSTED_ACCESS_FOR_CYBER_VERIFICATION_WARNING);
+        }
+    }
+
+    fn on_app_server_model_verification(&mut self, verifications: &[AppServerModelVerification]) {
+        if verifications.contains(&AppServerModelVerification::TrustedAccessForCyber) {
+            self.on_warning(TRUSTED_ACCESS_FOR_CYBER_VERIFICATION_WARNING);
+        }
     }
 
     /// Record one MCP startup update, promoting it into either the active startup
@@ -3509,7 +3606,7 @@ impl ChatWidget {
         self.update_task_running_state();
         if restored_task_running && !self.bottom_pane.is_task_running() {
             self.bottom_pane.set_task_running(/*running*/ true);
-            self.refresh_terminal_title();
+            self.refresh_status_surfaces();
         }
         self.refresh_pending_input_preview();
         self.request_redraw();
@@ -3531,7 +3628,7 @@ impl ChatWidget {
             })
             .count();
         self.last_plan_progress = (total > 0).then_some((completed, total));
-        self.refresh_terminal_title();
+        self.refresh_status_surfaces();
         self.add_to_history(history_cell::new_plan_update(update));
     }
 
@@ -3559,6 +3656,14 @@ impl ChatWidget {
     /// render the final approved/denied history cell when guardian returns a
     /// decision.
     fn on_guardian_assessment(&mut self, ev: GuardianAssessmentEvent) {
+        let permission_request_summary = |subject: &str, reason: &Option<String>| {
+            reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+                .map(|reason| format!("{subject}: {reason}"))
+                .unwrap_or_else(|| subject.to_string())
+        };
         let guardian_action_summary = |action: &GuardianAssessmentAction| match action {
             GuardianAssessmentAction::Command { command, .. } => Some(command.clone()),
             GuardianAssessmentAction::Execve { program, argv, .. } => {
@@ -3588,6 +3693,9 @@ impl ChatWidget {
                 let label = connector_name.as_deref().unwrap_or(server.as_str());
                 Some(format!("MCP {tool_name} on {label}"))
             }
+            GuardianAssessmentAction::RequestPermissions { reason, .. } => {
+                Some(permission_request_summary("permission request", reason))
+            }
         };
         let guardian_command = |action: &GuardianAssessmentAction| match action {
             GuardianAssessmentAction::Command { command, .. } => shlex::split(command)
@@ -3601,7 +3709,8 @@ impl ChatWidget {
             .filter(|command| !command.is_empty()),
             GuardianAssessmentAction::ApplyPatch { .. }
             | GuardianAssessmentAction::NetworkAccess { .. }
-            | GuardianAssessmentAction::McpToolCall { .. } => None,
+            | GuardianAssessmentAction::McpToolCall { .. }
+            | GuardianAssessmentAction::RequestPermissions { .. } => None,
         };
 
         if ev.status == GuardianAssessmentStatus::InProgress
@@ -3692,6 +3801,11 @@ impl ChatWidget {
                             "codex could access {target}"
                         ))
                     }
+                    GuardianAssessmentAction::RequestPermissions { reason, .. } => {
+                        history_cell::new_guardian_timed_out_action_request(
+                            permission_request_summary("codex could request permissions", reason),
+                        )
+                    }
                     GuardianAssessmentAction::Command { .. } => unreachable!(),
                     GuardianAssessmentAction::Execve { .. } => unreachable!(),
                 }
@@ -3728,6 +3842,12 @@ impl ChatWidget {
                 GuardianAssessmentAction::NetworkAccess { target, .. } => {
                     history_cell::new_guardian_denied_action_request(format!(
                         "codex to access {target}"
+                    ))
+                }
+                GuardianAssessmentAction::RequestPermissions { reason, .. } => {
+                    history_cell::new_guardian_denied_action_request(permission_request_summary(
+                        "codex to request permissions",
+                        reason,
                     ))
                 }
                 GuardianAssessmentAction::Command { .. } => unreachable!(),
@@ -5030,6 +5150,7 @@ impl ChatWidget {
         let active_cell = Some(Self::placeholder_session_header_cell(&config));
 
         let current_cwd = Some(config.cwd.to_path_buf());
+        let effective_service_tier = config.service_tier;
         let queued_message_edit_binding = queued_message_edit_binding_for_terminal(terminal_info());
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
@@ -5048,6 +5169,7 @@ impl ChatWidget {
             active_cell,
             active_cell_revision: 0,
             config,
+            effective_service_tier,
             skills_all: Vec::new(),
             skills_initial_state: None,
             current_collaboration_mode,
@@ -5083,6 +5205,9 @@ impl ChatWidget {
             agent_turn_running: false,
             mcp_startup_status: None,
             last_agent_markdown: None,
+            agent_turn_markdowns: Vec::new(),
+            visible_user_turn_count: 0,
+            copy_history_evicted_by_rollback: false,
             latest_proposed_plan_markdown: None,
             saw_copy_source_this_turn: false,
             mcp_startup_expected_servers: None,
@@ -5201,6 +5326,13 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if self.handle_reasoning_shortcut(key_event) {
+            self.bottom_pane.clear_quit_shortcut_hint();
+            self.quit_shortcut_expires_at = None;
+            self.quit_shortcut_key = None;
+            return;
+        }
+
         match key_event {
             // Ctrl+O - copy last agent response from the main view.
             KeyEvent {
@@ -5337,6 +5469,12 @@ impl ChatWidget {
                         let should_submit_now =
                             self.is_session_configured() && !self.is_plan_streaming_in_tui();
                         if should_submit_now {
+                            if self.only_user_shell_commands_running()
+                                && !user_message.text.starts_with('!')
+                            {
+                                self.queue_user_message(user_message);
+                                return;
+                            }
                             // Submitted is emitted when user submits.
                             // Reset any reasoning header only when we are actually submitting a turn.
                             self.reasoning_buffer.clear();
@@ -5451,6 +5589,23 @@ impl ChatWidget {
         self.copy_last_agent_markdown_with(crate::clipboard_copy::copy_to_clipboard);
     }
 
+    pub(crate) fn truncate_agent_copy_history_to_user_turn_count(
+        &mut self,
+        user_turn_count: usize,
+    ) {
+        self.visible_user_turn_count = user_turn_count;
+        let had_copy_history = !self.agent_turn_markdowns.is_empty();
+        self.agent_turn_markdowns
+            .retain(|entry| entry.user_turn_count <= user_turn_count);
+        self.last_agent_markdown = self
+            .agent_turn_markdowns
+            .last()
+            .map(|entry| entry.markdown.clone());
+        self.copy_history_evicted_by_rollback =
+            had_copy_history && self.last_agent_markdown.is_none();
+        self.saw_copy_source_this_turn = false;
+    }
+
     /// Inner implementation with an injectable clipboard backend for testing.
     fn copy_last_agent_markdown_with(
         &mut self,
@@ -5469,6 +5624,11 @@ impl ChatWidget {
                     "Copy failed: {error}"
                 ))),
             },
+            _ if self.copy_history_evicted_by_rollback => {
+                self.add_to_history(history_cell::new_error_event(format!(
+                    "Cannot copy that response after rewinding. Only the most recent {MAX_AGENT_COPY_HISTORY} responses are available to /copy."
+                )));
+            }
             _ => self.add_to_history(history_cell::new_error_event(
                 "No agent response to copy".into(),
             )),
@@ -5828,7 +5988,11 @@ impl ChatWidget {
             .personality
             .filter(|_| self.config.features.enabled(Feature::Personality))
             .filter(|_| self.current_model_supports_personality());
-        let service_tier = Some(self.config.service_tier);
+        let service_tier = match self.config.service_tier {
+            Some(service_tier) => Some(Some(service_tier)),
+            None if self.config.notices.fast_default_opt_out == Some(true) => Some(None),
+            None => None,
+        };
         let op = AppCommand::user_turn(
             items,
             self.config.cwd.to_path_buf(),
@@ -5884,6 +6048,7 @@ impl ChatWidget {
                     local_image_paths.clone(),
                     remote_image_urls.clone(),
                 ));
+            self.record_visible_user_turn_for_copy();
             self.add_to_history(history_cell::new_user_prompt(
                 text,
                 text_elements,
@@ -5898,6 +6063,7 @@ impl ChatWidget {
                     Vec::new(),
                     remote_image_urls.clone(),
                 ));
+            self.record_visible_user_turn_for_copy();
             self.add_to_history(history_cell::new_user_prompt(
                 String::new(),
                 Vec::new(),
@@ -6005,54 +6171,14 @@ impl ChatWidget {
         let replay_kind = render_source.replay_kind();
         match item {
             ThreadItem::UserMessage { id, content } => {
-                let user_message = codex_protocol::items::UserMessageItem {
+                let user_message = UserMessageItem {
                     id,
                     content: content
                         .into_iter()
                         .map(codex_app_server_protocol::UserInput::into_core)
                         .collect(),
                 };
-                let codex_protocol::protocol::EventMsg::UserMessage(event) =
-                    user_message.as_legacy_event()
-                else {
-                    unreachable!("user message item should convert to a user message event");
-                };
-                if from_replay {
-                    self.on_user_message_event(event);
-                } else {
-                    let rendered = Self::rendered_user_message_event_from_event(&event);
-                    let compare_key =
-                        Self::pending_steer_compare_key_from_items(&user_message.content);
-                    if self
-                        .pending_steers
-                        .front()
-                        .is_some_and(|pending| pending.compare_key == compare_key)
-                    {
-                        if let Some(pending) = self.pending_steers.pop_front() {
-                            self.refresh_pending_input_preview();
-                            let pending_event = UserMessageEvent {
-                                message: pending.user_message.text,
-                                images: Some(pending.user_message.remote_image_urls),
-                                local_images: pending
-                                    .user_message
-                                    .local_images
-                                    .into_iter()
-                                    .map(|image| image.path)
-                                    .collect(),
-                                text_elements: pending.user_message.text_elements,
-                            };
-                            self.on_user_message_event(pending_event);
-                        } else if self.last_rendered_user_message_event.as_ref() != Some(&rendered)
-                        {
-                            tracing::warn!(
-                                "pending steer matched compare key but queue was empty when rendering committed user message"
-                            );
-                            self.on_user_message_event(event);
-                        }
-                    } else if self.last_rendered_user_message_event.as_ref() != Some(&rendered) {
-                        self.on_user_message_event(event);
-                    }
-                }
+                self.on_committed_user_message(&user_message, from_replay);
             }
             ThreadItem::AgentMessage {
                 id,
@@ -6494,7 +6620,13 @@ impl ChatWidget {
                 self.refresh_skills_for_current_cwd(/*force_reload*/ true);
             }
             ServerNotification::ModelRerouted(_) => {}
+            ServerNotification::ModelVerification(notification) => {
+                self.on_app_server_model_verification(&notification.verifications)
+            }
             ServerNotification::Warning(notification) => self.on_warning(notification.message),
+            ServerNotification::GuardianWarning(notification) => {
+                self.on_warning(notification.message)
+            }
             ServerNotification::DeprecationNotice(notification) => {
                 self.on_deprecation_notice(DeprecationNoticeEvent {
                     summary: notification.summary,
@@ -6599,6 +6731,7 @@ impl ChatWidget {
             | ServerNotification::ThreadUnarchived(_)
             | ServerNotification::RawResponseItemCompleted(_)
             | ServerNotification::CommandExecOutputDelta(_)
+            | ServerNotification::FileChangePatchUpdated(_)
             | ServerNotification::McpToolCallProgress(_)
             | ServerNotification::McpServerOauthLoginCompleted(_)
             | ServerNotification::AppListUpdated(_)
@@ -6991,9 +7124,13 @@ impl ChatWidget {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
-            EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
+            EventMsg::Warning(WarningEvent { message })
+            | EventMsg::GuardianWarning(WarningEvent { message }) => self.on_warning(message),
             EventMsg::GuardianAssessment(ev) => self.on_guardian_assessment(ev),
             EventMsg::ModelReroute(_) => {}
+            EventMsg::ModelVerification(event) => {
+                self.on_core_model_verification(&event.verifications)
+            }
             EventMsg::Error(ErrorEvent {
                 message,
                 codex_error_info,
@@ -7002,6 +7139,11 @@ impl ChatWidget {
                     .as_ref()
                     .is_some_and(|info| self.handle_steer_rejected_error(info))
                 {
+                } else if codex_error_info
+                    .as_ref()
+                    .is_some_and(is_core_cyber_policy_error)
+                {
+                    self.on_cyber_policy_error();
                 } else if let Some(kind) = codex_error_info
                     .as_ref()
                     .and_then(core_rate_limit_error_kind)
@@ -7168,40 +7310,7 @@ impl ChatWidget {
             EventMsg::ItemCompleted(event) => {
                 let item = event.item;
                 if !from_replay && let codex_protocol::items::TurnItem::UserMessage(item) = &item {
-                    let EventMsg::UserMessage(event) = item.as_legacy_event() else {
-                        unreachable!("user message item should convert to a legacy user message");
-                    };
-                    let rendered = Self::rendered_user_message_event_from_event(&event);
-                    let compare_key = Self::pending_steer_compare_key_from_item(item);
-                    if self
-                        .pending_steers
-                        .front()
-                        .is_some_and(|pending| pending.compare_key == compare_key)
-                    {
-                        if let Some(pending) = self.pending_steers.pop_front() {
-                            self.refresh_pending_input_preview();
-                            let pending_event = UserMessageEvent {
-                                message: pending.user_message.text,
-                                images: Some(pending.user_message.remote_image_urls),
-                                local_images: pending
-                                    .user_message
-                                    .local_images
-                                    .into_iter()
-                                    .map(|image| image.path)
-                                    .collect(),
-                                text_elements: pending.user_message.text_elements,
-                            };
-                            self.on_user_message_event(pending_event);
-                        } else if self.last_rendered_user_message_event.as_ref() != Some(&rendered)
-                        {
-                            tracing::warn!(
-                                "pending steer matched compare key but queue was empty when rendering committed user message"
-                            );
-                            self.on_user_message_event(event);
-                        }
-                    } else if self.last_rendered_user_message_event.as_ref() != Some(&rendered) {
-                        self.on_user_message_event(event);
-                    }
+                    self.on_committed_user_message(item, from_replay);
                 }
                 if let codex_protocol::items::TurnItem::Plan(plan_item) = &item {
                     self.on_plan_item_completed(plan_item.text.clone());
@@ -7286,6 +7395,51 @@ impl ChatWidget {
         self.exit_review_mode_after_item();
     }
 
+    fn on_committed_user_message(&mut self, item: &UserMessageItem, from_replay: bool) {
+        let EventMsg::UserMessage(event) = item.as_legacy_event() else {
+            unreachable!("user message item should convert to a legacy user message");
+        };
+        if from_replay {
+            if !self.is_review_mode {
+                self.on_user_message_event(event);
+            }
+            return;
+        }
+
+        let rendered = Self::rendered_user_message_event_from_event(&event);
+        let compare_key = Self::pending_steer_compare_key_from_item(item);
+        if self
+            .pending_steers
+            .front()
+            .is_some_and(|pending| pending.compare_key == compare_key)
+        {
+            if let Some(pending) = self.pending_steers.pop_front() {
+                self.refresh_pending_input_preview();
+                let pending_event = UserMessageEvent {
+                    message: pending.user_message.text,
+                    images: Some(pending.user_message.remote_image_urls),
+                    local_images: pending
+                        .user_message
+                        .local_images
+                        .into_iter()
+                        .map(|image| image.path)
+                        .collect(),
+                    text_elements: pending.user_message.text_elements,
+                };
+                self.on_user_message_event(pending_event);
+            } else if self.last_rendered_user_message_event.as_ref() != Some(&rendered) {
+                tracing::warn!(
+                    "pending steer matched compare key but queue was empty when rendering committed user message"
+                );
+                self.on_user_message_event(event);
+            }
+        } else if !self.is_review_mode
+            && self.last_rendered_user_message_event.as_ref() != Some(&rendered)
+        {
+            self.on_user_message_event(event);
+        }
+    }
+
     fn on_user_message_event(&mut self, event: UserMessageEvent) {
         self.last_rendered_user_message_event =
             Some(Self::rendered_user_message_event_from_event(&event));
@@ -7294,6 +7448,7 @@ impl ChatWidget {
             || !event.text_elements.is_empty()
             || !remote_image_urls.is_empty()
         {
+            self.record_visible_user_turn_for_copy();
             self.add_to_history(history_cell::new_user_prompt(
                 event.message,
                 event.text_elements,
@@ -7402,6 +7557,15 @@ impl ChatWidget {
 
     pub(super) fn is_user_turn_pending_or_running(&self) -> bool {
         self.user_turn_pending_start || self.bottom_pane.is_task_running()
+    }
+
+    fn only_user_shell_commands_running(&self) -> bool {
+        self.agent_turn_running
+            && !self.running_commands.is_empty()
+            && self
+                .running_commands
+                .values()
+                .all(|command| command.source == ExecCommandSource::UserShell)
     }
 
     /// Rebuild and update the bottom-pane pending-input preview.
@@ -7547,10 +7711,7 @@ impl ChatWidget {
         let configured_status_line_items = self.configured_status_line_items();
         let view = StatusLineSetupView::new(
             Some(configured_status_line_items.as_slice()),
-            StatusLinePreviewData::from_iter(StatusLineItem::iter().filter_map(|item| {
-                self.status_line_value_for_item(&item)
-                    .map(|value| (item, value))
-            })),
+            self.status_surface_preview_data(),
             self.app_event_tx.clone(),
         );
         self.bottom_pane.show_view(Box::new(view));
@@ -7561,11 +7722,33 @@ impl ChatWidget {
         self.terminal_title_setup_original_items = Some(self.config.tui_terminal_title.clone());
         let view = TerminalTitleSetupView::new(
             Some(configured_terminal_title_items.as_slice()),
+            self.terminal_title_preview_data(),
             self.app_event_tx.clone(),
         );
         self.bottom_pane.show_view(Box::new(view));
     }
 
+    fn status_surface_preview_data(&mut self) -> StatusSurfacePreviewData {
+        StatusSurfacePreviewData::from_iter(StatusSurfacePreviewItem::iter().filter_map(|item| {
+            self.status_surface_preview_value_for_item(item)
+                .map(|value| (item, value))
+        }))
+    }
+
+    fn terminal_title_preview_data(&mut self) -> StatusSurfacePreviewData {
+        let mut preview_data = self.status_surface_preview_data();
+        let now = Instant::now();
+        for item in TerminalTitleItem::iter() {
+            let Some(preview_item) = item.preview_item() else {
+                continue;
+            };
+            let Some(value) = self.terminal_title_value_for_item(item, now) else {
+                continue;
+            };
+            preview_data.set_live(preview_item, value);
+        }
+        preview_data
+    }
     fn open_theme_picker(&mut self) {
         let codex_home = crate::legacy_core::config::find_codex_home().ok();
         let terminal_width = self
@@ -8921,7 +9104,7 @@ impl ChatWidget {
                             "Same workspace-write permissions as Default, but eligible `on-request` approvals are routed through the auto-reviewer subagent."
                                 .to_string(),
                         ),
-                        is_current: current_review_policy == ApprovalsReviewer::GuardianSubagent
+                        is_current: current_review_policy == ApprovalsReviewer::AutoReview
                             && Self::preset_matches_current(
                                 current_approval,
                                 current_sandbox,
@@ -8931,7 +9114,7 @@ impl ChatWidget {
                             preset.approval,
                             preset.sandbox.clone(),
                             "Auto-review".to_string(),
-                            ApprovalsReviewer::GuardianSubagent,
+                            ApprovalsReviewer::AutoReview,
                         ),
                         dismiss_on_select: true,
                         disabled_reason: approval_disabled_reason
@@ -9728,10 +9911,19 @@ impl ChatWidget {
     /// Set Fast mode in the widget's config copy.
     pub(crate) fn set_service_tier(&mut self, service_tier: Option<ServiceTier>) {
         self.config.service_tier = service_tier;
+        self.effective_service_tier = service_tier;
     }
 
     pub(crate) fn current_service_tier(&self) -> Option<ServiceTier> {
+        self.effective_service_tier
+    }
+
+    pub(crate) fn configured_service_tier(&self) -> Option<ServiceTier> {
         self.config.service_tier
+    }
+
+    pub(crate) fn fast_default_opt_out(&self) -> Option<bool> {
+        self.config.notices.fast_default_opt_out
     }
 
     pub(crate) fn status_account_display(&self) -> Option<&StatusAccountDisplay> {
@@ -9810,6 +10002,9 @@ impl ChatWidget {
     }
 
     fn set_service_tier_selection(&mut self, service_tier: Option<ServiceTier>) {
+        if service_tier.is_none() {
+            self.config.notices.fast_default_opt_out = Some(true);
+        }
         self.set_service_tier(service_tier);
         self.app_event_tx.send(AppEvent::CodexOp(
             AppCommand::override_turn_context(
@@ -10240,7 +10435,7 @@ impl ChatWidget {
     ///
     /// The spinner lives in `active_cell` and is cleared by
     /// [`clear_mcp_inventory_loading`] once the result arrives.
-    pub(crate) fn add_mcp_output(&mut self) {
+    pub(crate) fn add_mcp_output(&mut self, detail: McpServerStatusDetail) {
         self.flush_answer_stream_with_separator();
         self.flush_active_cell();
         self.active_cell = Some(Box::new(history_cell::new_mcp_inventory_loading(
@@ -10248,7 +10443,8 @@ impl ChatWidget {
         )));
         self.bump_active_cell_revision();
         self.request_redraw();
-        self.app_event_tx.send(AppEvent::FetchMcpInventory);
+        self.app_event_tx
+            .send(AppEvent::FetchMcpInventory { detail });
     }
 
     /// Remove the MCP loading spinner if it is still the active cell.

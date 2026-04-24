@@ -17,7 +17,7 @@ use crate::engine::dispatcher;
 use crate::engine::output_parser;
 use crate::schema::SessionStartCommandInput;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStartSource {
     Startup,
     Resume,
@@ -356,6 +356,7 @@ mod tests {
     fn handler() -> ConfiguredHandler {
         ConfiguredHandler {
             event_name: HookEventName::SessionStart,
+            is_managed: false,
             matcher: None,
             command: "echo hook".to_string(),
             timeout_sec: 600,

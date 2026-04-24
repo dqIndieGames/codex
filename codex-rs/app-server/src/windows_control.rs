@@ -380,16 +380,12 @@ async fn list_effective_providers(
         })
         .unwrap_or(false);
 
-    let mut providers = effective_config
-        .model_providers
-        .iter()
-        .map(|(provider_id, provider)| EffectiveProviderEntry {
-            provider_id: provider_id.clone(),
-            display_name: provider.name.clone(),
-            has_base_url: provider.base_url.is_some(),
-            has_experimental_bearer_token: provider.experimental_bearer_token.is_some(),
-        })
-        .collect::<Vec<_>>();
+    let mut providers = read_response
+        .layers
+        .as_ref()
+        .and_then(|layers| find_user_layer(layers))
+        .and_then(user_model_provider_entries)
+        .unwrap_or_default();
     providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
 
     Ok(EffectiveProvidersResponse {
@@ -430,44 +426,6 @@ async fn apply_provider_runtime_from_effective_provider(
         }
     };
     let current_model_provider_id = effective_config.model_provider_id.clone();
-    let Some(source_provider) = effective_config.model_providers.get(source_provider_id) else {
-        return apply_failure_response(
-            "provider_parse_failed",
-            Some(source_provider_id.to_string()),
-            Some(current_model_provider_id),
-            format!(
-                "source provider `{source_provider_id}` was not found in the current effective config"
-            ),
-        );
-    };
-    let mut missing_fields = Vec::new();
-    if source_provider
-        .base_url
-        .as_ref()
-        .map(|value| value.trim().is_empty())
-        .unwrap_or(true)
-    {
-        missing_fields.push("base_url");
-    }
-    if source_provider
-        .experimental_bearer_token
-        .as_ref()
-        .map(|value| value.trim().is_empty())
-        .unwrap_or(true)
-    {
-        missing_fields.push("experimental_bearer_token");
-    }
-    if !missing_fields.is_empty() {
-        return apply_failure_response(
-            "provider_field_missing",
-            Some(source_provider_id.to_string()),
-            Some(current_model_provider_id),
-            format!(
-                "source provider `{source_provider_id}` is missing required fields: {}",
-                missing_fields.join(", ")
-            ),
-        );
-    }
 
     let read_response = match config_api
         .read(ConfigReadParams {
@@ -499,6 +457,37 @@ async fn apply_provider_runtime_from_effective_provider(
                 .to_string(),
         );
     };
+
+    let Some(source_provider) = user_layer_model_provider(&user_layer.config, source_provider_id)
+    else {
+        return apply_failure_response(
+            "provider_parse_failed",
+            Some(source_provider_id.to_string()),
+            Some(current_model_provider_id),
+            format!("source provider `{source_provider_id}` was not found in the user config"),
+        );
+    };
+    let source_base_url = provider_field_as_non_empty_str(source_provider, "base_url");
+    let source_experimental_bearer_token =
+        provider_field_as_non_empty_str(source_provider, "experimental_bearer_token");
+    let mut missing_fields = Vec::new();
+    if source_base_url.is_none() {
+        missing_fields.push("base_url");
+    }
+    if source_experimental_bearer_token.is_none() {
+        missing_fields.push("experimental_bearer_token");
+    }
+    if !missing_fields.is_empty() {
+        return apply_failure_response(
+            "provider_field_missing",
+            Some(source_provider_id.to_string()),
+            Some(current_model_provider_id),
+            format!(
+                "source provider `{source_provider_id}` is missing required fields: {}",
+                missing_fields.join(", ")
+            ),
+        );
+    }
     if !json_path_exists(
         &user_layer.config,
         &["model_providers", current_model_provider_id.as_str()],
@@ -516,14 +505,14 @@ async fn apply_provider_runtime_from_effective_provider(
             edits: vec![
                 ConfigEdit {
                     key_path: format!("model_providers.{current_model_provider_id}.base_url"),
-                    value: json!(source_provider.base_url),
+                    value: json!(source_base_url),
                     merge_strategy: MergeStrategy::Replace,
                 },
                 ConfigEdit {
                     key_path: format!(
                         "model_providers.{current_model_provider_id}.experimental_bearer_token"
                     ),
-                    value: json!(source_provider.experimental_bearer_token),
+                    value: json!(source_experimental_bearer_token),
                     merge_strategy: MergeStrategy::Replace,
                 },
             ],
@@ -602,6 +591,41 @@ fn json_path_exists(root: &Value, segments: &[&str]) -> bool {
         current = next;
     }
     true
+}
+
+#[cfg(windows)]
+fn user_model_provider_entries(user_layer: &ConfigLayer) -> Option<Vec<EffectiveProviderEntry>> {
+    let providers = user_layer.config.get("model_providers")?.as_object()?;
+    Some(
+        providers
+            .iter()
+            .map(|(provider_id, provider)| EffectiveProviderEntry {
+                provider_id: provider_id.clone(),
+                display_name: provider_field_as_non_empty_str(provider, "name")
+                    .unwrap_or(provider_id)
+                    .to_string(),
+                has_base_url: provider_field_as_non_empty_str(provider, "base_url").is_some(),
+                has_experimental_bearer_token: provider_field_as_non_empty_str(
+                    provider,
+                    "experimental_bearer_token",
+                )
+                .is_some(),
+            })
+            .collect(),
+    )
+}
+
+#[cfg(windows)]
+fn user_layer_model_provider<'a>(root: &'a Value, provider_id: &str) -> Option<&'a Value> {
+    root.get("model_providers")?.as_object()?.get(provider_id)
+}
+
+#[cfg(windows)]
+fn provider_field_as_non_empty_str<'a>(provider: &'a Value, field: &str) -> Option<&'a str> {
+    provider
+        .get(field)?
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn timestamp_now() -> String {

@@ -1,9 +1,8 @@
-use std::sync::Arc;
-
 use super::AuthRequestTelemetryContext;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::RequestRouteTelemetry;
+use super::TransportError;
 use super::UnauthorizedRecoveryExecution;
 use super::WebsocketSession;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
@@ -11,19 +10,12 @@ use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use super::build_live_api_auth;
 use super::format_retry_transport_error_details;
 use super::should_emit_websocket_connect_or_request_log_trace;
 use super::should_emit_websocket_event_log_trace;
 use crate::Prompt;
-use crate::ResponseEvent;
-use crate::agent_identity::AgentIdentityManager;
-use crate::agent_identity::RegisteredAgentTask;
-use crate::agent_identity::StoredAgentIdentity;
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_app_server_protocol::AuthMode;
-use codex_login::AuthManager;
-use codex_login::CodexAuth;
 use codex_model_provider::BearerAuthProvider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
@@ -33,20 +25,14 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::models::BaseInstructions;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use core_test_support::responses;
-use ed25519_dalek::Signature;
-use ed25519_dalek::Verifier as _;
-use futures::StreamExt;
 use http::StatusCode;
 use pretty_assertions::assert_eq;
-use serde::Deserialize;
 use serde_json::json;
-use tempfile::TempDir;
+use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 
 fn test_model_client(session_source: SessionSource) -> ModelClient {
     let provider = create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
@@ -118,6 +104,7 @@ fn test_request_prompt() -> Prompt {
         },
         personality: None,
         output_schema: None,
+        output_schema_strict: true,
     }
 }
 
@@ -159,118 +146,6 @@ fn build_test_responses_request_with_priority_fallback(
             service_tier,
         )
         .expect("responses request")
-}
-
-fn test_prompt(text: &str) -> Prompt {
-    Prompt {
-        input: vec![ResponseItem::Message {
-            id: None,
-            role: "user".into(),
-            content: vec![ContentItem::InputText {
-                text: text.to_string(),
-            }],
-            end_turn: None,
-            phase: None,
-        }],
-        ..Prompt::default()
-    }
-}
-
-async fn drain_stream_to_completion(stream: &mut crate::ResponseStream) -> anyhow::Result<()> {
-    while let Some(event) = stream.next().await {
-        if matches!(event?, ResponseEvent::Completed { .. }) {
-            break;
-        }
-    }
-    Ok(())
-}
-
-async fn model_client_with_agent_task(
-    provider: ModelProviderInfo,
-) -> (
-    TempDir,
-    ModelClient,
-    RegisteredAgentTask,
-    StoredAgentIdentity,
-) {
-    let codex_home = tempfile::tempdir().expect("tempdir");
-    let auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
-    let agent_identity_manager = Arc::new(AgentIdentityManager::new_for_tests(
-        Arc::clone(&auth_manager),
-        /*feature_enabled*/ true,
-        "https://chatgpt.com/backend-api/".to_string(),
-        SessionSource::Cli,
-    ));
-    let stored_identity = agent_identity_manager
-        .seed_generated_identity_for_tests("agent-123")
-        .await
-        .expect("seed test identity");
-    let agent_task = RegisteredAgentTask {
-        agent_runtime_id: stored_identity.agent_runtime_id.clone(),
-        task_id: "task-123".to_string(),
-        registered_at: "2026-03-23T12:00:00Z".to_string(),
-    };
-    let client = ModelClient::new(
-        Some(auth_manager),
-        ThreadId::new(),
-        /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
-        provider,
-        SessionSource::Cli,
-        /*model_verbosity*/ None,
-        /*enable_request_compression*/ false,
-        /*include_timing_metrics*/ false,
-        /*beta_features_header*/ None,
-    );
-    (codex_home, client, agent_task, stored_identity)
-}
-
-#[derive(Debug, Deserialize)]
-struct AgentAssertionEnvelope {
-    agent_runtime_id: String,
-    task_id: String,
-    timestamp: String,
-    signature: String,
-}
-
-fn assert_agent_assertion_header(
-    authorization_header: &str,
-    stored_identity: &StoredAgentIdentity,
-    expected_agent_runtime_id: &str,
-    expected_task_id: &str,
-) {
-    let token = authorization_header
-        .strip_prefix("AgentAssertion ")
-        .expect("agent assertion authorization scheme");
-    let envelope: AgentAssertionEnvelope = serde_json::from_slice(
-        &URL_SAFE_NO_PAD
-            .decode(token)
-            .expect("base64url-encoded agent assertion"),
-    )
-    .expect("valid agent assertion envelope");
-
-    assert_eq!(envelope.agent_runtime_id, expected_agent_runtime_id);
-    assert_eq!(envelope.task_id, expected_task_id);
-
-    let signature = Signature::from_slice(
-        &base64::engine::general_purpose::STANDARD
-            .decode(&envelope.signature)
-            .expect("base64 signature"),
-    )
-    .expect("signature bytes");
-    stored_identity
-        .signing_key()
-        .expect("signing key")
-        .verifying_key()
-        .verify(
-            format!(
-                "{}:{}:{}",
-                envelope.agent_runtime_id, envelope.task_id, envelope.timestamp
-            )
-            .as_bytes(),
-            &signature,
-        )
-        .expect("signature should verify");
 }
 
 #[test]
@@ -428,9 +303,8 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
 
 #[test]
 fn refresh_provider_runtime_updates_only_runtime_fields_and_clears_cached_websocket_session() {
-    let provider = ModelProviderInfo::create_openai_provider(Some(
-        "https://old.example.com/v1".to_string(),
-    ));
+    let provider =
+        ModelProviderInfo::create_openai_provider(Some("https://old.example.com/v1".to_string()));
     let client = ModelClient::new(
         /*auth_manager*/ None,
         ThreadId::new(),
@@ -488,6 +362,43 @@ fn refresh_provider_runtime_updates_only_runtime_fields_and_clears_cached_websoc
     let cached_websocket_session = client.take_cached_websocket_session();
     assert!(!cached_websocket_session.connection_reused());
     assert!(cached_websocket_session.last_request.is_none());
+}
+
+#[test]
+fn live_api_auth_reads_refreshed_bearer_token() {
+    let live_provider = Arc::new(StdRwLock::new(ModelProviderInfo {
+        experimental_bearer_token: Some("old-token".to_string()),
+        ..ModelProviderInfo::create_openai_provider(Some("https://old.example.com/v1".to_string()))
+    }));
+    let auth =
+        build_live_api_auth(/*auth*/ None, Arc::clone(&live_provider)).expect("build live auth");
+
+    let mut headers = http::HeaderMap::new();
+    auth.add_auth_headers_result(&mut headers)
+        .expect("add old auth header");
+    assert_eq!(
+        headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer old-token")
+    );
+
+    {
+        let mut provider = live_provider
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        provider.experimental_bearer_token = Some("new-token".to_string());
+    }
+
+    let mut headers = http::HeaderMap::new();
+    auth.add_auth_headers_result(&mut headers)
+        .expect("add new auth header");
+    assert_eq!(
+        headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer new-token")
+    );
 }
 
 #[test]
@@ -643,129 +554,4 @@ fn websocket_event_log_trace_is_suppressed_for_retryable_responses_unauthorized(
         RequestRouteTelemetry::for_endpoint("/responses"),
         &result,
     ));
-#[tokio::test]
-async fn responses_http_uses_agent_assertion_when_agent_task_is_present() {
-    core_test_support::skip_if_no_network!();
-
-    let server = responses::start_mock_server().await;
-    let request_recorder = responses::mount_sse_once(
-        &server,
-        responses::sse(vec![
-            responses::ev_response_created("resp-1"),
-            responses::ev_completed("resp-1"),
-        ]),
-    )
-    .await;
-    let provider =
-        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
-    let (_codex_home, client, agent_task, stored_identity) =
-        model_client_with_agent_task(provider).await;
-    let model_info = test_model_info();
-    let session_telemetry = test_session_telemetry();
-    let mut client_session = client.new_session_with_agent_task(Some(agent_task.clone()));
-
-    let mut stream = client_session
-        .stream(
-            &test_prompt("hello"),
-            &model_info,
-            &session_telemetry,
-            /*effort*/ None,
-            ReasoningSummary::Auto,
-            /*service_tier*/ None,
-            /*turn_metadata_header*/ None,
-        )
-        .await
-        .expect("stream request should succeed");
-    drain_stream_to_completion(&mut stream)
-        .await
-        .expect("stream should complete");
-
-    let request = request_recorder.single_request();
-    let authorization = request
-        .header("authorization")
-        .expect("authorization header should be present");
-    assert_agent_assertion_header(
-        &authorization,
-        &stored_identity,
-        &agent_task.agent_runtime_id,
-        &agent_task.task_id,
-    );
-    assert_eq!(request.header("chatgpt-account-id"), None);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn websocket_agent_task_bypasses_cached_bearer_prewarm() {
-    core_test_support::skip_if_no_network!();
-
-    let server = responses::start_websocket_server(vec![
-        vec![vec![
-            responses::ev_response_created("resp-prewarm"),
-            responses::ev_completed("resp-prewarm"),
-        ]],
-        vec![vec![
-            responses::ev_response_created("resp-1"),
-            responses::ev_completed("resp-1"),
-        ]],
-    ])
-    .await;
-    let mut provider =
-        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
-    provider.supports_websockets = true;
-    provider.websocket_connect_timeout_ms = Some(5_000);
-    let (_codex_home, client, agent_task, stored_identity) =
-        model_client_with_agent_task(provider).await;
-    let model_info = test_model_info();
-    let session_telemetry = test_session_telemetry();
-    let prompt = test_prompt("hello");
-
-    let mut prewarm_session = client.new_session();
-    prewarm_session
-        .prewarm_websocket(
-            &prompt,
-            &model_info,
-            &session_telemetry,
-            /*effort*/ None,
-            ReasoningSummary::Auto,
-            /*service_tier*/ None,
-            /*turn_metadata_header*/ None,
-        )
-        .await
-        .expect("bearer prewarm should succeed");
-    drop(prewarm_session);
-
-    let mut agent_task_session = client.new_session_with_agent_task(Some(agent_task.clone()));
-    let mut stream = agent_task_session
-        .stream(
-            &prompt,
-            &model_info,
-            &session_telemetry,
-            /*effort*/ None,
-            ReasoningSummary::Auto,
-            /*service_tier*/ None,
-            /*turn_metadata_header*/ None,
-        )
-        .await
-        .expect("agent task stream should succeed");
-    drain_stream_to_completion(&mut stream)
-        .await
-        .expect("agent task websocket stream should complete");
-
-    let handshakes = server.handshakes();
-    assert_eq!(handshakes.len(), 2);
-    assert_eq!(
-        handshakes[0].header("authorization"),
-        Some("Bearer Access Token".to_string())
-    );
-    let agent_authorization = handshakes[1]
-        .header("authorization")
-        .expect("agent handshake should include authorization");
-    assert_agent_assertion_header(
-        &agent_authorization,
-        &stored_identity,
-        &agent_task.agent_runtime_id,
-        &agent_task.task_id,
-    );
-    assert_eq!(handshakes[1].header("chatgpt-account-id"), None);
-
-    server.shutdown().await;
 }

@@ -48,9 +48,29 @@ pub fn responses_http_status_is_retryable(status: StatusCode) -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestRetryRoute {
+    Responses,
+    Other,
+}
+
+impl RequestRetryRoute {
+    pub fn from_endpoint(endpoint: &str) -> Self {
+        if endpoint.trim_start_matches('/') == "responses" {
+            Self::Responses
+        } else {
+            Self::Other
+        }
+    }
+
+    pub fn is_responses(self) -> bool {
+        matches!(self, Self::Responses)
+    }
+}
+
 pub fn should_retry_request_error(
     policy: &RetryPolicy,
-    request: &Request,
+    route: RequestRetryRoute,
     err: &TransportError,
     attempt: u64,
 ) -> bool {
@@ -59,11 +79,8 @@ pub fn should_retry_request_error(
     }
 
     match err {
-        TransportError::Http {
-            status, url, body, ..
-        } => {
-            let effective_url = url.as_deref().unwrap_or(&request.url);
-            if request_targets_responses_endpoint(effective_url) {
+        TransportError::Http { status, body, .. } => {
+            if route.is_responses() {
                 if status.as_u16() == 429 && body_is_usage_limit(body.as_deref()) {
                     return false;
                 }
@@ -89,12 +106,6 @@ fn body_is_usage_limit(body: Option<&str>) -> bool {
     normalized.contains("usage_limit_reached")
         || normalized.contains("usage limit reached")
         || normalized.contains("daily spending limit reached")
-}
-
-fn request_targets_responses_endpoint(url: &str) -> bool {
-    Url::parse(url)
-        .map(|parsed| parsed.path().ends_with("/responses"))
-        .unwrap_or_else(|_| url.contains("/responses"))
 }
 
 /// HTTP endpoint configuration used to talk to a concrete API deployment.
@@ -260,18 +271,19 @@ mod tests {
                 retry_transport: false,
             },
         };
-        let request = Request::new(
-            Method::POST,
-            "https://chatgpt.com/backend-api/codex/responses".to_string(),
-        );
         let err = TransportError::Http {
             status: StatusCode::FORBIDDEN,
-            url: Some(request.url.clone()),
+            url: Some("https://proxy.example.com/no-route-hint".to_string()),
             headers: None,
             body: Some(r#"{"detail":"forbidden"}"#.to_string()),
         };
 
-        assert!(should_retry_request_error(&policy, &request, &err, 0));
+        assert!(should_retry_request_error(
+            &policy,
+            RequestRetryRoute::Responses,
+            &err,
+            0
+        ));
     }
 
     #[test]
@@ -286,18 +298,19 @@ mod tests {
                 retry_transport: true,
             },
         };
-        let request = Request::new(
-            Method::POST,
-            "https://chatgpt.com/backend-api/codex/responses".to_string(),
-        );
         let err = TransportError::Http {
             status: StatusCode::UNAUTHORIZED,
-            url: Some(request.url.clone()),
+            url: Some("https://proxy.example.com/no-route-hint".to_string()),
             headers: None,
             body: Some(r#"{"detail":"Unauthorized"}"#.to_string()),
         };
 
-        assert!(should_retry_request_error(&policy, &request, &err, 0));
+        assert!(should_retry_request_error(
+            &policy,
+            RequestRetryRoute::Responses,
+            &err,
+            0
+        ));
     }
 
     #[test]
@@ -312,13 +325,9 @@ mod tests {
                 retry_transport: true,
             },
         };
-        let request = Request::new(
-            Method::POST,
-            "https://chatgpt.com/backend-api/codex/responses".to_string(),
-        );
         let err = TransportError::Http {
             status: StatusCode::TOO_MANY_REQUESTS,
-            url: Some(request.url.clone()),
+            url: Some("https://proxy.example.com/no-route-hint".to_string()),
             headers: None,
             body: Some(
                 r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}"#
@@ -326,7 +335,12 @@ mod tests {
             ),
         };
 
-        assert!(!should_retry_request_error(&policy, &request, &err, 0));
+        assert!(!should_retry_request_error(
+            &policy,
+            RequestRetryRoute::Responses,
+            &err,
+            0
+        ));
     }
 
     #[test]
@@ -341,32 +355,28 @@ mod tests {
                 retry_transport: false,
             },
         };
-        let request = Request::new(
-            Method::GET,
-            "https://chatgpt.com/backend-api/codex/models".to_string(),
-        );
         let usage_limit_err = TransportError::Http {
             status: StatusCode::PAYMENT_REQUIRED,
-            url: Some(request.url.clone()),
+            url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
             headers: None,
             body: Some("Daily spending limit reached".to_string()),
         };
         let non_usage_limit_err = TransportError::Http {
             status: StatusCode::PAYMENT_REQUIRED,
-            url: Some(request.url.clone()),
+            url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
             headers: None,
             body: Some(r#"{"error":{"type":"usage_not_included"}}"#.to_string()),
         };
 
         assert!(should_retry_request_error(
             &policy,
-            &request,
+            RequestRetryRoute::Other,
             &usage_limit_err,
             0
         ));
         assert!(!should_retry_request_error(
             &policy,
-            &request,
+            RequestRetryRoute::Other,
             &non_usage_limit_err,
             0
         ));

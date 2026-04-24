@@ -4,10 +4,10 @@ use std::time::Instant;
 use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
-use crate::util::retry_delay_for_error;
 use crate::session::session::Session;
 use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
+use crate::util::retry_delay_for_error;
 use codex_analytics::CodexCompactionEvent;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
@@ -29,6 +29,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
+use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
@@ -544,6 +545,9 @@ async fn drain_to_completed(
             turn_context.reasoning_summary,
             turn_context.config.service_tier,
             turn_metadata_header,
+            // Rollout tracing currently models remote compaction only; local compaction streams
+            // are left untraced until the reducer has a first-class local compaction lifecycle.
+            &InferenceTraceContext::disabled(),
         )
         .await?;
     loop {

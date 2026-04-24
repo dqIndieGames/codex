@@ -7518,7 +7518,7 @@ async fn emit_retryable_stream_error(
     // Keep intermediate websocket reconnect churn internal until the retry that
     // is about to trigger fallback. Surfacing every step regresses the
     // websocket fallback UX and pollutes retry history.
-    if websocket_retry_chain_active && retry_number < fallback_retry_threshold {
+    if websocket_retry_chain_active && retry_number > 1 && retry_number < fallback_retry_threshold {
         return;
     }
 

@@ -172,7 +172,7 @@ impl ChatWidget {
                 self.open_model_popup();
             }
             SlashCommand::Fast => {
-                let next_tier = if matches!(self.config.service_tier, Some(ServiceTier::Fast)) {
+                let next_tier = if matches!(self.current_service_tier(), Some(ServiceTier::Fast)) {
                     None
                 } else {
                     Some(ServiceTier::Fast)
@@ -359,7 +359,7 @@ impl ChatWidget {
                 self.add_app_server_stub_message("Memory maintenance");
             }
             SlashCommand::Mcp => {
-                self.add_mcp_output();
+                self.add_mcp_output(McpServerStatusDetail::ToolsAndAuthOnly);
             }
             SlashCommand::Apps => {
                 self.add_connectors_output();
@@ -527,12 +527,12 @@ impl ChatWidget {
                     "on" => self.set_service_tier_selection(Some(ServiceTier::Fast)),
                     "off" => self.set_service_tier_selection(/*service_tier*/ None),
                     "status" => {
-                        let status = if matches!(self.config.service_tier, Some(ServiceTier::Fast))
-                        {
-                            "on"
-                        } else {
-                            "off"
-                        };
+                        let status =
+                            if matches!(self.current_service_tier(), Some(ServiceTier::Fast)) {
+                                "on"
+                            } else {
+                                "off"
+                            };
                         self.add_info_message(
                             format!("Fast mode is {status}."),
                             /*hint*/ None,
@@ -543,6 +543,10 @@ impl ChatWidget {
                     }
                 }
             }
+            SlashCommand::Mcp => match trimmed.to_ascii_lowercase().as_str() {
+                "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),
+                _ => self.add_error_message("Usage: /mcp [verbose]".to_string()),
+            },
             SlashCommand::Rename if !trimmed.is_empty() => {
                 if !self.ensure_thread_rename_allowed() {
                     return;

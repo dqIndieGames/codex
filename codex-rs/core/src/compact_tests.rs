@@ -4,6 +4,8 @@ use codex_model_provider_info::WireApi;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use pretty_assertions::assert_eq;
 
+use crate::session::PreviousTurnSettings;
+
 async fn process_compacted_history_with_test_session(
     compacted_history: Vec<ResponseItem>,
     previous_turn_settings: Option<&PreviousTurnSettings>,
@@ -198,6 +200,7 @@ fn should_use_remote_compact_task_for_azure_provider() {
         env_key_instructions: None,
         experimental_bearer_token: None,
         auth: None,
+        aws: None,
         wire_api: WireApi::Responses,
         query_params: None,
         http_headers: None,

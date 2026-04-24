@@ -31,11 +31,11 @@ const TURN_0_FORK_PROMPT: &str = "seed fork context";
 const TURN_1_PROMPT: &str = "spawn a child and continue";
 const TURN_2_NO_WAIT_PROMPT: &str = "follow up without wait";
 const CHILD_PROMPT: &str = "child: do work";
-const INHERITED_MODEL: &str = "gpt-5.2-codex";
+const INHERITED_MODEL: &str = "gpt-5.3-codex";
 const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::XHigh;
-const REQUESTED_MODEL: &str = "gpt-5.1";
+const REQUESTED_MODEL: &str = "gpt-5.4";
 const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
-const ROLE_MODEL: &str = "gpt-5.1-codex-max";
+const ROLE_MODEL: &str = "gpt-5.4";
 const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
 const SPAWNED_AGENT_DEVELOPER_INSTRUCTIONS: &str = "You are a newly spawned agent in a team of agents collaborating to complete a task. You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents. You are responsible for returning the response to your assigned task in the final channel. When you give your response, the contents of your response in the final channel will be immediately delivered back to your parent agent. The prior conversation history was forked from your parent agent. Treat the next user message as your assigned task, and use the forked history only as background context.";
 
@@ -447,7 +447,7 @@ async fn spawned_multi_agent_v2_child_receives_xml_tagged_developer_context() ->
     let _child_request_log = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
-            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+            body_contains(req, CHILD_PROMPT) && body_contains(req, "<spawned_agent_context>")
         },
         sse(vec![
             ev_response_created("resp-child-1"),
@@ -458,7 +458,11 @@ async fn spawned_multi_agent_v2_child_receives_xml_tagged_developer_context() ->
 
     let _turn1_followup = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        |req: &wiremock::Request| {
+            body_contains(req, "function_call_output")
+                && body_contains(req, "/root/worker")
+                && !body_contains(req, "<spawned_agent_context>")
+        },
         sse(vec![
             ev_response_created("resp-turn1-2"),
             ev_assistant_message("msg-turn1-2", "parent done"),
@@ -493,7 +497,6 @@ async fn spawned_multi_agent_v2_child_receives_xml_tagged_developer_context() ->
                 body_contains(request, CHILD_PROMPT)
                     && body_contains(request, "<spawned_agent_context>")
                     && body_contains(request, SPAWNED_AGENT_DEVELOPER_INSTRUCTIONS)
-                    && !body_contains(request, SPAWN_CALL_ID)
             })
         {
             break request;
@@ -540,7 +543,7 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
     let _child_request_log = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
-            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+            body_contains(req, CHILD_PROMPT) && body_contains(req, "<spawned_agent_context>")
         },
         sse(vec![
             ev_response_created("resp-child-1"),
@@ -551,7 +554,11 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
 
     let _turn1_followup = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        |req: &wiremock::Request| {
+            body_contains(req, "function_call_output")
+                && body_contains(req, "/root/worker")
+                && !body_contains(req, "<spawned_agent_context>")
+        },
         sse(vec![
             ev_response_created("resp-turn1-2"),
             ev_assistant_message("msg-turn1-2", "parent done"),
@@ -594,7 +601,6 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
             .find(|request| {
                 body_contains(request, CHILD_PROMPT)
                     && body_contains(request, "<spawned_agent_context>")
-                    && !body_contains(request, SPAWN_CALL_ID)
             })
         {
             break request;
@@ -701,7 +707,7 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
         role_block(&agent_type_description, "custom").expect("custom role description");
     assert_eq!(
         custom_role_description,
-        "custom: {\nCustom role\n- This role's model is set to `gpt-5.1-codex-max` and its reasoning effort is set to `high`. These settings cannot be changed.\n}"
+        "custom: {\nCustom role\n- This role's model is set to `gpt-5.4` and its reasoning effort is set to `high`. These settings cannot be changed.\n}"
     );
 
     Ok(())
