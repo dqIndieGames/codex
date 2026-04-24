@@ -1524,8 +1524,8 @@ fn column_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::legacy_core::config::ConfigBuilder;
     use chrono::Duration;
-    use codex_core::config::ConfigBuilder;
     use codex_protocol::ThreadId;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;

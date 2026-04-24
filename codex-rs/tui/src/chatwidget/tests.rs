@@ -2130,7 +2130,7 @@ async fn helpers_are_available_and_do_not_panic() {
     let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
     let tx = AppEventSender::new(tx_raw);
     let cfg = test_config().await;
-    let resolved_model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
+    let resolved_model = crate::legacy_core::test_support::get_model_offline(cfg.model.as_deref());
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let init = ChatWidgetInit {
         config: cfg.clone(),
@@ -2157,7 +2157,7 @@ async fn helpers_are_available_and_do_not_panic() {
 }
 
 fn test_session_telemetry(config: &Config, model: &str) -> SessionTelemetry {
-    let model_info = codex_core::test_support::construct_model_info_offline(model, config);
+    let model_info = crate::legacy_core::test_support::construct_model_info_offline(model, config);
     SessionTelemetry::new(
         ThreadId::new(),
         model,
@@ -2179,7 +2179,7 @@ fn test_model_catalog(config: &Config) -> Arc<ModelCatalog> {
             .enabled(Feature::DefaultModeRequestUserInput),
     };
     Arc::new(ModelCatalog::new(
-        codex_core::test_support::all_model_presets().clone(),
+        crate::legacy_core::test_support::all_model_presets().clone(),
         collaboration_modes_config,
     ))
 }
@@ -2196,9 +2196,9 @@ async fn make_chatwidget_manual(
     let app_event_tx = AppEventSender::new(tx_raw);
     let (op_tx, op_rx) = unbounded_channel::<Op>();
     let mut cfg = test_config().await;
-    let resolved_model = model_override
-        .map(str::to_owned)
-        .unwrap_or_else(|| codex_core::test_support::get_model_offline(cfg.model.as_deref()));
+    let resolved_model = model_override.map(str::to_owned).unwrap_or_else(|| {
+        crate::legacy_core::test_support::get_model_offline(cfg.model.as_deref())
+    });
     if let Some(model) = model_override {
         cfg.model = Some(model.to_string());
     }
@@ -5706,16 +5706,15 @@ async fn submit_user_message_emits_structured_plugin_mentions_from_bindings() {
         msg: EventMsg::SessionConfigured(configured),
     });
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
-    chat.bottom_pane.set_plugin_mentions(Some(vec![
-        codex_core::plugins::PluginCapabilitySummary {
+    chat.bottom_pane
+        .set_plugin_mentions(Some(vec![codex_plugin::PluginCapabilitySummary {
             config_name: "sample@test".to_string(),
             display_name: "Sample Plugin".to_string(),
             description: None,
             has_skills: true,
             mcp_server_names: Vec::new(),
             app_connector_ids: Vec::new(),
-        },
-    ]));
+        }]));
 
     chat.submit_user_message(UserMessage {
         text: "$sample".to_string(),
@@ -7073,7 +7072,7 @@ async fn collaboration_modes_defaults_to_code_on_startup() {
         .build()
         .await
         .expect("config");
-    let resolved_model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
+    let resolved_model = crate::legacy_core::test_support::get_model_offline(cfg.model.as_deref());
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let init = ChatWidgetInit {
         config: cfg.clone(),
@@ -7118,7 +7117,7 @@ async fn experimental_mode_plan_is_ignored_on_startup() {
         .build()
         .await
         .expect("config");
-    let resolved_model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
+    let resolved_model = crate::legacy_core::test_support::get_model_offline(cfg.model.as_deref());
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let init = ChatWidgetInit {
         config: cfg.clone(),
