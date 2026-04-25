@@ -89,7 +89,7 @@ jobs:
       - resolve-windows-targets
     name: Build Windows binaries - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }}
     runs-on: ${{ matrix.runs_on }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     permissions:
       contents: read
     defaults:
@@ -160,7 +160,7 @@ jobs:
       - build-windows-binaries
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runs_on }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     permissions:
       contents: read
       id-token: write
