@@ -246,6 +246,7 @@ impl LiveBearerAuthProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl AuthProvider for LiveBearerAuthProvider {
     fn add_auth_headers(&self, headers: &mut ApiHeaderMap) {
         if let Ok(auth) = self.snapshot_bearer_auth() {
