@@ -5676,28 +5676,29 @@ async fn ensure_task_for_pending_inputs_uses_latest_provider_runtime_after_activ
         )
         .await;
 
-    let active = session.active_turn.lock().await;
-    let active_turn = active.as_ref().expect("regular turn should start");
-    let (_, running_task) = active_turn.tasks.first().expect("running task");
-    assert_eq!(
-        running_task
-            .turn_context
-            .provider
-            .info()
-            .base_url
-            .as_deref(),
-        Some("https://new.example.com/v1")
-    );
-    assert_eq!(
-        running_task
-            .turn_context
-            .provider
-            .info()
-            .experimental_bearer_token
-            .as_deref(),
-        Some("new-token")
-    );
-    drop(active);
+    {
+        let active = session.active_turn.lock().await;
+        let active_turn = active.as_ref().expect("regular turn should start");
+        let (_, running_task) = active_turn.tasks.first().expect("running task");
+        assert_eq!(
+            running_task
+                .turn_context
+                .provider
+                .info()
+                .base_url
+                .as_deref(),
+            Some("https://new.example.com/v1")
+        );
+        assert_eq!(
+            running_task
+                .turn_context
+                .provider
+                .info()
+                .experimental_bearer_token
+                .as_deref(),
+            Some("new-token")
+        );
+    }
 
     assert!(
         session

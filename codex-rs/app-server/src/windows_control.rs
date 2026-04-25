@@ -1,4 +1,4 @@
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
 use crate::config_api::ConfigApi;
 use codex_app_server_protocol::ConfigBatchWriteParams;
