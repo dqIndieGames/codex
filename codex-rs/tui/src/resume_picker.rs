@@ -105,6 +105,7 @@ struct PageLoadRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ProviderFilter {
     Any,
+    #[allow(dead_code)]
     MatchDefault(String),
 }
 
@@ -282,6 +283,7 @@ fn default_provider_filter_for_picker(
     }
 }
 
+#[allow(dead_code)]
 fn rollout_provider_filter_and_fallback(
     config: &Config,
     provider_filter: ProviderFilter,

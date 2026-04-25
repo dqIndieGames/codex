@@ -602,6 +602,7 @@ async fn lookup_latest_session_target_with_app_server(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LatestSessionProviderFilter {
     Any,
+    #[allow(dead_code)]
     MatchCurrent,
 }
 
