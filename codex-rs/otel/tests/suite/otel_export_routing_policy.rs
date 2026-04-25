@@ -132,7 +132,7 @@ fn runtime_metrics_client() -> MetricsClient {
         )
         .with_runtime_reader(),
     )
-    .expect("runtime metrics client")
+    .unwrap_or_else(|err| panic!("runtime metrics client: {err}"))
 }
 
 #[test]
