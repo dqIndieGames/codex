@@ -82,17 +82,20 @@ jobs:
   argument_comment_lint_prebuilt:
     name: Argument comment lint - ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Linux
             runner: ubuntu-24.04
+            timeout_minutes: 60
           - name: macOS
             runner: macos-15
+            timeout_minutes: 30
           - name: Windows
             runner: windows-latest
+            timeout_minutes: 30
     steps:
       - name: Skip macOS argument comment lint in forks
         if: ${{ github.repository != 'openai/codex' && runner.os == 'macOS' }}
