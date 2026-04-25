@@ -20,11 +20,41 @@ The local1 layer keeps these user-visible behaviors:
 - The `/responses` main request path keeps broader retry handling for transient HTTP failures, including local1 handling around `401` recovery and retry-chain log suppression.
 - Provider runtime refresh keeps the current provider sticky while refreshing only `base_url` and `experimental_bearer_token`; Windows tray provider copy support remains connected to the same refresh path.
 - Resume history discovery defaults to cross-provider visibility, while fork flows keep the current provider filter where that matters.
-- `gpt-5.4` keeps the local1 priority fallback by default; setting `force_gpt54_priority_fallback = false` disables both the priority fallback and Fast passthrough for that model.
+- `gpt-5.4` keeps the local1 priority fallback by default; setting top-level `force_gpt54_priority_fallback = false` in `config.toml` disables both the priority fallback and Fast passthrough for that model.
 - Windows app-server and TUI startup logging stay quieter by default when `RUST_LOG` is not explicitly set.
 - A brand-new or cleared regular thread whose first plain text input is exactly the documented Chinese greeting `U+4F60 U+597D` still injects the local1 checklist into the first visible assistant response; resumed, forked, subagent, reviewer, guardian, and non-matching first turns do not trigger it.
 
 For the Chinese introduction, see [README.zh-CN.md](README.zh-CN.md).
+
+---
+
+## GitHub-Built Windows Release Exe
+
+This fork is maintained with GitHub-built Windows release artifacts. Local compilation is intentionally not required for the local1 Windows handoff.
+
+To build the x64 Windows release exe from the current `main` branch with GitHub Actions:
+
+```shell
+gh workflow run rust-release-windows.yml --repo dqIndieGames/codex --ref main -f release-lto=fat -f target=x86_64-pc-windows-msvc
+```
+
+After the run completes successfully, download the x64 Windows artifact. Use a `run-id` whose `status` is completed and whose `conclusion` is success:
+
+```shell
+gh run list --repo dqIndieGames/codex --workflow rust-release-windows.yml --branch main --event workflow_dispatch --status success --limit 1
+gh run download <run-id> --repo dqIndieGames/codex -n x86_64-pc-windows-msvc -D dist/windows-x64
+```
+
+The downloaded directory contains `codex-x86_64-pc-windows-msvc.exe` plus compressed copies. The workflow smoke-tests the staged `codex.exe` before upload by running `--version` and `--help`, and it asserts that the version output contains `0.124.0-local1`. This smoke test confirms that the exe starts and reports the expected identity; it is not a full business-flow regression.
+
+You can also smoke-test the downloaded exe on Windows:
+
+```powershell
+.\dist\windows-x64\codex-x86_64-pc-windows-msvc.exe --version
+.\dist\windows-x64\codex-x86_64-pc-windows-msvc.exe --help
+```
+
+Expected version output includes `0.124.0-local1`.
 
 ---
 

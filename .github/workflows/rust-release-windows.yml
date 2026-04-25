@@ -1,10 +1,33 @@
 name: rust-release-windows
 
 on:
+  workflow_dispatch:
+    inputs:
+      release-lto:
+        description: Release LTO mode for the Windows release binary.
+        required: false
+        default: fat
+        type: choice
+        options:
+          - fat
+          - thin
+      target:
+        description: Windows target to build.
+        required: false
+        default: x86_64-pc-windows-msvc
+        type: choice
+        options:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+          - all
   workflow_call:
     inputs:
       release-lto:
         required: true
+        type: string
+      target:
+        required: false
+        default: all
         type: string
     secrets:
       AZURE_TRUSTED_SIGNING_CLIENT_ID:
@@ -21,7 +44,49 @@ on:
         required: false
 
 jobs:
+  resolve-windows-targets:
+    name: Resolve Windows targets
+    runs-on: ubuntu-latest
+    outputs:
+      binary_matrix: ${{ steps.matrix.outputs.binary_matrix }}
+      release_matrix: ${{ steps.matrix.outputs.release_matrix }}
+    steps:
+      - name: Resolve matrix
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target="${{ inputs.target }}"
+          if [[ -z "$target" ]]; then
+            target="all"
+          fi
+
+          case "$target" in
+            x86_64-pc-windows-msvc)
+              binary_matrix='{"include":[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"primary","build_args":"--bin codex --bin codex-responses-api-proxy","runs_on":"windows-latest"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"helpers","build_args":"--bin codex-windows-sandbox-setup --bin codex-command-runner","runs_on":"windows-latest"}]}'
+              release_matrix='{"include":[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","runs_on":"windows-latest"}]}'
+              ;;
+            aarch64-pc-windows-msvc)
+              binary_matrix='{"include":[{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"primary","build_args":"--bin codex --bin codex-responses-api-proxy","runs_on":"windows-11-arm"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"helpers","build_args":"--bin codex-windows-sandbox-setup --bin codex-command-runner","runs_on":"windows-11-arm"}]}'
+              release_matrix='{"include":[{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","runs_on":"windows-11-arm"}]}'
+              ;;
+            all)
+              binary_matrix='{"include":[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"primary","build_args":"--bin codex --bin codex-responses-api-proxy","runs_on":"windows-latest"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"primary","build_args":"--bin codex --bin codex-responses-api-proxy","runs_on":"windows-11-arm"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"helpers","build_args":"--bin codex-windows-sandbox-setup --bin codex-command-runner","runs_on":"windows-latest"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"helpers","build_args":"--bin codex-windows-sandbox-setup --bin codex-command-runner","runs_on":"windows-11-arm"}]}'
+              release_matrix='{"include":[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","runs_on":"windows-latest"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","runs_on":"windows-11-arm"}]}'
+              ;;
+            *)
+              echo "Unsupported target: $target" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "binary_matrix=$binary_matrix" >> "$GITHUB_OUTPUT"
+          echo "release_matrix=$release_matrix" >> "$GITHUB_OUTPUT"
+
   build-windows-binaries:
+    needs:
+      - resolve-windows-targets
     name: Build Windows binaries - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }}
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 60
@@ -35,28 +100,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            bundle: primary
-            build_args: --bin codex --bin codex-responses-api-proxy
-            runs_on: windows-latest
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            bundle: primary
-            build_args: --bin codex --bin codex-responses-api-proxy
-            runs_on: windows-11-arm
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            bundle: helpers
-            build_args: --bin codex-windows-sandbox-setup --bin codex-command-runner
-            runs_on: windows-latest
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            bundle: helpers
-            build_args: --bin codex-windows-sandbox-setup --bin codex-command-runner
-            runs_on: windows-11-arm
+      matrix: ${{ fromJSON(needs.resolve-windows-targets.outputs.binary_matrix) }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -112,6 +156,7 @@ jobs:
 
   build-windows:
     needs:
+      - resolve-windows-targets
       - build-windows-binaries
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runs_on }}
@@ -125,14 +170,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            runs_on: windows-latest
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            runs_on: windows-11-arm
+      matrix: ${{ fromJSON(needs.resolve-windows-targets.outputs.release_matrix) }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -180,6 +218,24 @@ jobs:
           cp target/${{ matrix.target }}/release/codex-responses-api-proxy.exe "$dest/codex-responses-api-proxy-${{ matrix.target }}.exe"
           cp target/${{ matrix.target }}/release/codex-windows-sandbox-setup.exe "$dest/codex-windows-sandbox-setup-${{ matrix.target }}.exe"
           cp target/${{ matrix.target }}/release/codex-command-runner.exe "$dest/codex-command-runner-${{ matrix.target }}.exe"
+
+      - name: Smoke test staged codex.exe
+        shell: powershell
+        run: |
+          $exe = "dist/${{ matrix.target }}/codex-${{ matrix.target }}.exe"
+          $version = & $exe --version
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          Write-Host $version
+          if ($version -notmatch '0\.124\.0-local1') {
+            throw "Expected 0.124.0-local1 version output from $exe, got: $version"
+          }
+
+          & $exe --help | Select-Object -First 30
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
       - name: Install DotSlash
         uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2

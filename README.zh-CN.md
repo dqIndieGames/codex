@@ -21,3 +21,31 @@
 ## 发布说明
 
 本次发布通过 GitHub 仓库与 GitHub Release 记录完成，不使用本机系统打包二进制产物。远端编译与检查以 GitHub Actions 结果为准。
+
+## GitHub 编译 Windows release exe
+
+本仓库的 Windows release exe 以 GitHub Actions 产物为准，本地不需要、也不建议为了发布交付执行编译。这里的 release exe 指发布类型的 Windows 可执行文件，不是固定文件名；实际 x64 文件名为 `codex-x86_64-pc-windows-msvc.exe`。GitHub Actions 是 GitHub 托管的自动化流水线；对使用者来说，它会在云端 Windows runner 上编译并上传 exe，避免把本机环境差异带进发布产物。
+
+从当前 `main` 分支触发 x64 Windows release exe 编译：
+
+```shell
+gh workflow run rust-release-windows.yml --repo dqIndieGames/codex --ref main -f release-lto=fat -f target=x86_64-pc-windows-msvc
+```
+
+工作流成功完成后，下载 x64 Windows 产物。请选择 `status` 已完成且 `conclusion` 为成功的 `run-id`，否则可能下载不到产物或拿到错误构建：
+
+```shell
+gh run list --repo dqIndieGames/codex --workflow rust-release-windows.yml --branch main --event workflow_dispatch --status success --limit 1
+gh run download <run-id> --repo dqIndieGames/codex -n x86_64-pc-windows-msvc -D dist/windows-x64
+```
+
+下载目录会包含 `codex-x86_64-pc-windows-msvc.exe` 和对应压缩包。工作流在上传前会对暂存的 `codex.exe` 执行冒烟测试：运行 `--version` 和 `--help`，并断言版本输出包含 `0.124.0-local1`。冒烟测试的意思是先确认 exe 能启动、能输出版本和帮助；它不等于完整业务回归。
+
+在 Windows 本机下载后，也可以只运行 exe 做冒烟验证，不涉及本地编译：
+
+```powershell
+.\dist\windows-x64\codex-x86_64-pc-windows-msvc.exe --version
+.\dist\windows-x64\codex-x86_64-pc-windows-msvc.exe --help
+```
+
+预期版本输出应包含 `0.124.0-local1`。
