@@ -17,7 +17,7 @@ async fn exits_non_zero_when_server_reports_error() -> anyhow::Result<()> {
         "type": "response.failed",
         "response": {
             "id": "resp_err_1",
-            "error": {"code": "rate_limit_exceeded", "message": "synthetic server error"}
+            "error": {"code": "invalid_prompt", "message": "synthetic server error"}
         }
     })]);
     responses::mount_sse_once(&server, body).await;

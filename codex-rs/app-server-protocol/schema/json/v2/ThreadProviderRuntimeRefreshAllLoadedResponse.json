@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadProviderRuntimeRefreshFailure": {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message",
+        "threadId"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "appliedThreadIds": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "failedThreads": {
+      "items": {
+        "$ref": "#/definitions/ThreadProviderRuntimeRefreshFailure"
+      },
+      "type": "array"
+    },
+    "queuedThreadIds": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "totalThreads": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "appliedThreadIds",
+    "failedThreads",
+    "queuedThreadIds",
+    "totalThreads"
+  ],
+  "title": "ThreadProviderRuntimeRefreshAllLoadedResponse",
+  "type": "object"
+}

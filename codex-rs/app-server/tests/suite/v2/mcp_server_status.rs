@@ -227,6 +227,8 @@ async fn mcp_server_status_list_tools_and_auth_only_skips_slow_inventory_calls()
     let mut config_toml = std::fs::read_to_string(&config_path)?;
     config_toml.push_str(&format!(
         r#"
+mcp_oauth_credentials_store = "file"
+
 [mcp_servers.some-server]
 url = "{mcp_server_url}/mcp"
 "#

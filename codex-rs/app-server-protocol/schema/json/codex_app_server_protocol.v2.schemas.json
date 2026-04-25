@@ -1242,6 +1242,54 @@
             },
             "method": {
               "enum": [
+                "thread/providerRuntime/refresh"
+              ],
+              "title": "Thread/providerRuntime/refreshRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadProviderRuntimeRefreshParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/providerRuntime/refreshRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/providerRuntime/refreshAllLoaded"
+              ],
+              "title": "Thread/providerRuntime/refreshAllLoadedRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadProviderRuntimeRefreshAllLoadedParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/providerRuntime/refreshAllLoadedRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/read"
               ],
               "title": "Thread/readRequestMethod",
@@ -13351,6 +13399,99 @@
       "title": "ThreadNameUpdatedNotification",
       "type": "object"
     },
+    "ThreadProviderRuntimeRefreshAllLoadedParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ThreadProviderRuntimeRefreshAllLoadedParams",
+      "type": "object"
+    },
+    "ThreadProviderRuntimeRefreshAllLoadedResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "appliedThreadIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "failedThreads": {
+          "items": {
+            "$ref": "#/definitions/ThreadProviderRuntimeRefreshFailure"
+          },
+          "type": "array"
+        },
+        "queuedThreadIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "totalThreads": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "appliedThreadIds",
+        "failedThreads",
+        "queuedThreadIds",
+        "totalThreads"
+      ],
+      "title": "ThreadProviderRuntimeRefreshAllLoadedResponse",
+      "type": "object"
+    },
+    "ThreadProviderRuntimeRefreshFailure": {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadProviderRuntimeRefreshParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadProviderRuntimeRefreshParams",
+      "type": "object"
+    },
+    "ThreadProviderRuntimeRefreshResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "status": {
+          "$ref": "#/definitions/ThreadProviderRuntimeRefreshStatus"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "threadId"
+      ],
+      "title": "ThreadProviderRuntimeRefreshResponse",
+      "type": "object"
+    },
+    "ThreadProviderRuntimeRefreshStatus": {
+      "enum": [
+        "applied",
+        "queued"
+      ],
+      "type": "string"
+    },
     "ThreadReadParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -14163,13 +14304,6 @@
       ],
       "title": "ThreadStartResponse",
       "type": "object"
-    },
-    "ThreadStartSource": {
-      "enum": [
-        "startup",
-        "clear"
-      ],
-      "type": "string"
     },
     "ThreadStartedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",

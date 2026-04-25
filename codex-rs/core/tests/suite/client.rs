@@ -795,7 +795,7 @@ async fn provider_auth_command_supplies_bearer_token() {
     .await;
     let auth_fixture = ProviderAuthCommandFixture::new(&["command-token"]).unwrap();
 
-    send_provider_auth_request(&server, auth_fixture.auth()).await;
+    send_provider_auth_request(&server, auth_fixture.auth(), /*request_max_retries*/ 0).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -827,7 +827,7 @@ async fn provider_auth_command_refreshes_after_401() {
         .mount(&server)
         .await;
 
-    send_provider_auth_request(&server, auth_fixture.auth()).await;
+    send_provider_auth_request(&server, auth_fixture.auth(), /*request_max_retries*/ 1).await;
 }
 
 /// Issues one streamed Responses request through a provider configured with command-backed auth.
@@ -835,7 +835,11 @@ async fn provider_auth_command_refreshes_after_401() {
 /// The caller owns the server-side assertions, so this helper only validates that the request
 /// reaches `Completed` without surfacing an auth or transport error to the client.
 #[expect(clippy::expect_used, clippy::unwrap_used)]
-async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuthInfo) {
+async fn send_provider_auth_request(
+    server: &MockServer,
+    auth: ModelProviderAuthInfo,
+    request_max_retries: u64,
+) {
     let provider = ModelProviderInfo {
         name: "corp".into(),
         base_url: Some(format!("{}/v1", server.uri())),
@@ -848,7 +852,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         query_params: None,
         http_headers: None,
         env_http_headers: None,
-        request_max_retries: Some(0),
+        request_max_retries: Some(request_max_retries),
         stream_max_retries: Some(0),
         stream_idle_timeout_ms: Some(5_000),
         websocket_connect_timeout_ms: None,

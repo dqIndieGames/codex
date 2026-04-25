@@ -136,7 +136,12 @@ async fn cyber_policy_response_emits_typed_error_without_retry() -> Result<()> {
     }));
     let mock = mount_response_once(&server, response).await;
 
-    let mut builder = test_codex().with_model(REQUESTED_MODEL);
+    let mut builder = test_codex()
+        .with_model(REQUESTED_MODEL)
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+        });
     let test = builder.build(&server).await?;
 
     test.codex

@@ -3570,6 +3570,20 @@
       ],
       "type": "object"
     },
+    "ThreadProviderRuntimeRefreshAllLoadedParams": {
+      "type": "object"
+    },
+    "ThreadProviderRuntimeRefreshParams": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadReadParams": {
       "properties": {
         "includeTurns": {
@@ -4749,6 +4763,54 @@
         "params"
       ],
       "title": "Thread/loaded/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/providerRuntime/refresh"
+          ],
+          "title": "Thread/providerRuntime/refreshRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadProviderRuntimeRefreshParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/providerRuntime/refreshRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/providerRuntime/refreshAllLoaded"
+          ],
+          "title": "Thread/providerRuntime/refreshAllLoadedRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadProviderRuntimeRefreshAllLoadedParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/providerRuntime/refreshAllLoadedRequest",
       "type": "object"
     },
     {
