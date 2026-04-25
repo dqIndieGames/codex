@@ -555,7 +555,7 @@ pub struct RealtimeWebsocketClient {
 impl RealtimeWebsocketClient {
     pub fn new(provider: Provider) -> Self {
         Self {
-            provider: provider.with_retry_max_attempts(1),
+            provider: provider.with_retry_max_attempts(/*max_attempts*/ 1),
         }
     }
 

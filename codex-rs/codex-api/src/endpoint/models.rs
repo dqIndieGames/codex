@@ -18,7 +18,11 @@ pub struct ModelsClient<T: HttpTransport> {
 impl<T: HttpTransport> ModelsClient<T> {
     pub fn new(transport: T, provider: Provider, auth: SharedAuthProvider) -> Self {
         Self {
-            session: EndpointSession::new(transport, provider.with_retry_max_attempts(1), auth),
+            session: EndpointSession::new(
+                transport,
+                provider.with_retry_max_attempts(/*max_attempts*/ 1),
+                auth,
+            ),
         }
     }
 

@@ -118,7 +118,7 @@ where
 
         match result {
             Ok(resp) => return Ok(resp),
-            Err(err) if should_retry => {
+            Err(_err) if should_retry => {
                 sleep(backoff(policy.base_delay, attempt + 1)).await;
             }
             Err(err) => return Err(err),

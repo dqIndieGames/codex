@@ -19,7 +19,11 @@ pub struct MemoriesClient<T: HttpTransport> {
 impl<T: HttpTransport> MemoriesClient<T> {
     pub fn new(transport: T, provider: Provider, auth: SharedAuthProvider) -> Self {
         Self {
-            session: EndpointSession::new(transport, provider.with_retry_max_attempts(1), auth),
+            session: EndpointSession::new(
+                transport,
+                provider.with_retry_max_attempts(/*max_attempts*/ 1),
+                auth,
+            ),
         }
     }
 
