@@ -47,6 +47,7 @@ use codex_api::RawMemory as ApiRawMemory;
 use codex_api::RealtimeCallClient as ApiRealtimeCallClient;
 use codex_api::RealtimeSessionConfig as ApiRealtimeSessionConfig;
 use codex_api::Reasoning;
+use codex_api::Request as ApiRequest;
 use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
 use codex_api::ResponseCreateWsRequest;
@@ -209,29 +210,39 @@ impl ApiProviderSource for LiveApiProviderSource {
 
 fn build_live_api_auth(
     auth: Option<CodexAuth>,
+    model_provider: SharedModelProvider,
     live_provider: Arc<StdRwLock<ModelProviderInfo>>,
 ) -> Result<SharedAuthProvider> {
     let provider = LiveBearerAuthProvider {
-        auth,
+        auth_snapshot: StdMutex::new(auth),
+        model_provider,
         live_provider,
     };
     provider.snapshot_bearer_auth()?;
     Ok(Arc::new(provider))
 }
 
-#[derive(Clone)]
 struct LiveBearerAuthProvider {
-    auth: Option<CodexAuth>,
+    auth_snapshot: StdMutex<Option<CodexAuth>>,
+    model_provider: SharedModelProvider,
     live_provider: Arc<StdRwLock<ModelProviderInfo>>,
 }
 
 impl LiveBearerAuthProvider {
     fn snapshot_bearer_auth(&self) -> Result<BearerAuthProvider> {
+        let auth = self
+            .auth_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.bearer_auth_for(auth.as_ref())
+    }
+
+    fn bearer_auth_for(&self, auth: Option<&CodexAuth>) -> Result<BearerAuthProvider> {
         let provider = self
             .live_provider
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        bearer_auth_for_provider(self.auth.as_ref(), &provider)
+        bearer_auth_for_provider(auth, &provider)
     }
 }
 
@@ -250,6 +261,23 @@ impl AuthProvider for LiveBearerAuthProvider {
             .map_err(|err| AuthError::Build(err.to_string()))?
             .add_auth_headers(headers);
         Ok(())
+    }
+
+    async fn apply_auth(&self, request: ApiRequest) -> std::result::Result<ApiRequest, AuthError> {
+        let auth = self
+            .auth_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let auth = match auth {
+            Some(auth) => Some(auth),
+            None => self.model_provider.auth().await,
+        };
+        let mut request = request;
+        self.bearer_auth_for(auth.as_ref())
+            .map_err(|err| AuthError::Build(err.to_string()))?
+            .add_auth_headers(&mut request.headers);
+        Ok(request)
     }
 }
 
@@ -994,7 +1022,11 @@ impl ModelClient {
         let api_auth = if provider.is_amazon_bedrock() {
             self.state.provider.api_auth().await?
         } else {
-            build_live_api_auth(auth.clone(), Arc::clone(&self.state.live_provider))?
+            build_live_api_auth(
+                auth.clone(),
+                Arc::clone(&self.state.provider),
+                Arc::clone(&self.state.live_provider),
+            )?
         };
         Ok(CurrentClientSetup {
             auth,

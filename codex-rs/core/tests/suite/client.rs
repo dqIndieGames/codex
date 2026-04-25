@@ -804,6 +804,8 @@ async fn provider_auth_command_refreshes_after_401() {
 
     let server = MockServer::start().await;
     let auth_fixture = ProviderAuthCommandFixture::new(&["first-token", "second-token"]).unwrap();
+    let mut auth = auth_fixture.auth();
+    auth.refresh_interval_ms = 0;
 
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
@@ -827,7 +829,7 @@ async fn provider_auth_command_refreshes_after_401() {
         .mount(&server)
         .await;
 
-    send_provider_auth_request(&server, auth_fixture.auth(), /*request_max_retries*/ 1).await;
+    send_provider_auth_request(&server, auth, /*request_max_retries*/ 1).await;
 }
 
 /// Issues one streamed Responses request through a provider configured with command-backed auth.

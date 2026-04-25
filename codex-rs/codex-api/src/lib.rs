@@ -71,5 +71,6 @@ pub use crate::sse::responses::process_responses_event;
 pub use crate::sse::stream_from_fixture;
 pub use crate::telemetry::SseTelemetry;
 pub use crate::telemetry::WebsocketTelemetry;
+pub use codex_client::Request;
 pub use codex_protocol::protocol::RealtimeAudioFrame;
 pub use codex_protocol::protocol::RealtimeEvent;
