@@ -1,3 +1,5 @@
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use crate::config_api::ConfigApi;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigEdit;
@@ -716,7 +718,7 @@ mod tests {
         write_registration_atomically(&registry_path, &registration).expect("write registration");
         let updated_registration = AppServerInstanceRegistration {
             heartbeat_at: "2026-04-02T00:00:10Z".to_string(),
-            ..registration.clone()
+            ..registration
         };
         write_registration_atomically(&registry_path, &updated_registration)
             .expect("rewrite registration");

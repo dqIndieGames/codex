@@ -680,7 +680,6 @@ pub async fn run_main_with_transport(
 
     let processor_handle = tokio::spawn({
         let outbound_control_tx = outbound_control_tx;
-        let app_server_control_plane = app_server_control_plane;
         let processor = Arc::clone(&processor);
         let mut connections = HashMap::<ConnectionId, ConnectionState>::new();
         let transport_shutdown_token = transport_shutdown_token.clone();
