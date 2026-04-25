@@ -151,7 +151,7 @@ jobs:
             timeout_minutes: 30
           - name: Windows
             runner: windows-latest
-            timeout_minutes: 30
+            timeout_minutes: 60
     steps:
       - name: Check whether argument comment lint should run
         id: argument_comment_lint_gate

@@ -95,7 +95,7 @@ jobs:
             timeout_minutes: 30
           - name: Windows
             runner: windows-latest
-            timeout_minutes: 30
+            timeout_minutes: 60
     steps:
       - name: Skip macOS argument comment lint in forks
         if: ${{ github.repository != 'openai/codex' && runner.os == 'macOS' }}
