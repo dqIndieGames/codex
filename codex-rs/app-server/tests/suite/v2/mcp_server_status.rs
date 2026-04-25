@@ -36,6 +36,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const SLOW_INVENTORY_DELAY: Duration = Duration::from_secs(15);
+const TOOLS_AND_AUTH_ONLY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::test]
 async fn mcp_server_status_list_returns_raw_server_and_tool_names() -> Result<()> {
@@ -186,7 +188,7 @@ impl ServerHandler for SlowInventoryServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListResourcesResult, rmcp::ErrorData> {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(SLOW_INVENTORY_DELAY).await;
         Ok(ListResourcesResult {
             resources: Vec::new(),
             next_cursor: None,
@@ -199,7 +201,7 @@ impl ServerHandler for SlowInventoryServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListResourceTemplatesResult, rmcp::ErrorData> {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(SLOW_INVENTORY_DELAY).await;
         Ok(ListResourceTemplatesResult {
             resource_templates: Vec::new(),
             next_cursor: None,
@@ -249,7 +251,7 @@ url = "{mcp_server_url}/mcp"
         })
         .await?;
     let response = timeout(
-        Duration::from_millis(500),
+        TOOLS_AND_AUTH_ONLY_READ_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
     )
     .await??;
