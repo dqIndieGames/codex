@@ -52,7 +52,6 @@ fn with_now_override<T>(now: DateTime<Utc>, f: impl FnOnce() -> T) -> T {
 #[test]
 fn usage_limit_reached_error_formats_plus_plan() {
     let err = UsageLimitReachedError {
-        status: None,
         plan_type: Some(PlanType::Known(KnownPlan::Plus)),
         resets_at: None,
         rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -174,7 +173,6 @@ fn sandbox_denied_reports_exit_code_when_no_output_available() {
 #[test]
 fn usage_limit_reached_error_formats_free_plan() {
     let err = UsageLimitReachedError {
-        status: None,
         plan_type: Some(PlanType::Known(KnownPlan::Free)),
         resets_at: None,
         rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -189,7 +187,6 @@ fn usage_limit_reached_error_formats_free_plan() {
 #[test]
 fn usage_limit_reached_error_formats_go_plan() {
     let err = UsageLimitReachedError {
-        status: None,
         plan_type: Some(PlanType::Known(KnownPlan::Go)),
         resets_at: None,
         rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -204,7 +201,6 @@ fn usage_limit_reached_error_formats_go_plan() {
 #[test]
 fn usage_limit_reached_error_formats_default_when_none() {
     let err = UsageLimitReachedError {
-        status: None,
         plan_type: None,
         resets_at: None,
         rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -223,7 +219,6 @@ fn usage_limit_reached_error_formats_team_plan() {
     with_now_override(base, move || {
         let expected_time = format_retry_timestamp(&resets_at);
         let err = UsageLimitReachedError {
-            status: None,
             plan_type: Some(PlanType::Known(KnownPlan::Team)),
             resets_at: Some(resets_at),
             rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -239,7 +234,6 @@ fn usage_limit_reached_error_formats_team_plan() {
 #[test]
 fn usage_limit_reached_error_formats_business_plan_without_reset() {
     let err = UsageLimitReachedError {
-        status: None,
         plan_type: Some(PlanType::Known(KnownPlan::Business)),
         resets_at: None,
         rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -254,7 +248,6 @@ fn usage_limit_reached_error_formats_business_plan_without_reset() {
 #[test]
 fn usage_limit_reached_error_formats_self_serve_business_usage_based_plan() {
     let err = UsageLimitReachedError {
-        status: None,
         plan_type: Some(PlanType::Known(KnownPlan::SelfServeBusinessUsageBased)),
         resets_at: None,
         rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -269,7 +262,6 @@ fn usage_limit_reached_error_formats_self_serve_business_usage_based_plan() {
 #[test]
 fn usage_limit_reached_error_formats_enterprise_cbp_usage_based_plan() {
     let err = UsageLimitReachedError {
-        status: None,
         plan_type: Some(PlanType::Known(KnownPlan::EnterpriseCbpUsageBased)),
         resets_at: None,
         rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -284,7 +276,6 @@ fn usage_limit_reached_error_formats_enterprise_cbp_usage_based_plan() {
 #[test]
 fn usage_limit_reached_error_formats_default_for_other_plans() {
     let err = UsageLimitReachedError {
-        status: None,
         plan_type: Some(PlanType::Known(KnownPlan::Enterprise)),
         resets_at: None,
         rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -303,7 +294,6 @@ fn usage_limit_reached_error_formats_pro_plan_with_reset() {
     with_now_override(base, move || {
         let expected_time = format_retry_timestamp(&resets_at);
         let err = UsageLimitReachedError {
-            status: None,
             plan_type: Some(PlanType::Known(KnownPlan::Pro)),
             resets_at: Some(resets_at),
             rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -323,7 +313,6 @@ fn usage_limit_reached_error_hides_upsell_for_non_codex_limit_name() {
     with_now_override(base, move || {
         let expected_time = format_retry_timestamp(&resets_at);
         let err = UsageLimitReachedError {
-            status: None,
             plan_type: Some(PlanType::Known(KnownPlan::Plus)),
             resets_at: Some(resets_at),
             rate_limits: Some(Box::new(RateLimitSnapshot {
@@ -350,7 +339,6 @@ fn usage_limit_reached_includes_minutes_when_available() {
     with_now_override(base, move || {
         let expected_time = format_retry_timestamp(&resets_at);
         let err = UsageLimitReachedError {
-            status: None,
             plan_type: None,
             resets_at: Some(resets_at),
             rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -372,7 +360,6 @@ fn unexpected_status_cloudflare_html_is_simplified() {
         request_id: None,
         identity_authorization_error: None,
         identity_error_code: None,
-        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::FORBIDDEN.to_string();
     let url = "http://example.com/blocked";
@@ -392,7 +379,6 @@ fn unexpected_status_non_html_is_unchanged() {
         request_id: None,
         identity_authorization_error: None,
         identity_error_code: None,
-        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::FORBIDDEN.to_string();
     let url = "http://example.com/plain";
@@ -413,7 +399,6 @@ fn unexpected_status_prefers_error_message_when_present() {
         request_id: Some("req-123".to_string()),
         identity_authorization_error: None,
         identity_error_code: None,
-        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::UNAUTHORIZED.to_string();
     assert_eq!(
@@ -435,7 +420,6 @@ fn unexpected_status_truncates_long_body_with_ellipsis() {
         request_id: Some("req-long".to_string()),
         identity_authorization_error: None,
         identity_error_code: None,
-        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::BAD_GATEWAY.to_string();
     let expected_body = format!("{}...", "x".repeat(UNEXPECTED_RESPONSE_BODY_MAX_BYTES));
@@ -457,7 +441,6 @@ fn unexpected_status_includes_cf_ray_and_request_id() {
         request_id: Some("req-xyz".to_string()),
         identity_authorization_error: None,
         identity_error_code: None,
-        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::UNAUTHORIZED.to_string();
     assert_eq!(
@@ -478,7 +461,6 @@ fn unexpected_status_includes_identity_auth_details() {
         request_id: Some("req-auth".to_string()),
         identity_authorization_error: Some("missing_authorization_header".to_string()),
         identity_error_code: Some("token_expired".to_string()),
-        retry_source: UnexpectedResponseRetrySource::Turn,
     };
     let status = StatusCode::UNAUTHORIZED.to_string();
     assert_eq!(
@@ -490,82 +472,12 @@ fn unexpected_status_includes_identity_auth_details() {
 }
 
 #[test]
-fn request_layer_http_statuses_are_not_turn_retryable_after_request_retries() {
-    for status in [
-        StatusCode::UNAUTHORIZED,
-        StatusCode::PAYMENT_REQUIRED,
-        StatusCode::BAD_REQUEST,
-        StatusCode::FORBIDDEN,
-        StatusCode::NOT_FOUND,
-    ] {
-        let err = CodexErr::UnexpectedStatus(UnexpectedResponseError {
-            status,
-            body: "plain text error".to_string(),
-            url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
-            cf_ray: None,
-            request_id: None,
-            identity_authorization_error: None,
-            identity_error_code: None,
-            retry_source: UnexpectedResponseRetrySource::RequestLayer,
-        });
-
-        assert!(
-            !err.is_retryable(),
-            "request-layer status {status} should not turn-retry"
-        );
-    }
-}
-
-#[test]
-fn turn_level_unexpected_status_retries_including_401() {
-    for status in [
-        StatusCode::BAD_REQUEST,
-        StatusCode::FORBIDDEN,
-        StatusCode::PAYMENT_REQUIRED,
-        StatusCode::TOO_MANY_REQUESTS,
-        StatusCode::NOT_FOUND,
-        StatusCode::UNAUTHORIZED,
-    ] {
-        let err = CodexErr::UnexpectedStatus(UnexpectedResponseError {
-            status,
-            body: "plain text error".to_string(),
-            url: None,
-            cf_ray: None,
-            request_id: None,
-            identity_authorization_error: None,
-            identity_error_code: None,
-            retry_source: UnexpectedResponseRetrySource::Turn,
-        });
-
-        assert!(
-            err.is_retryable(),
-            "turn-level status {status} should retry"
-        );
-    }
-}
-
-#[test]
-fn usage_limit_reached_preserves_http_status_code_without_turn_retry() {
-    let err = CodexErr::UsageLimitReached(UsageLimitReachedError {
-        status: Some(StatusCode::PAYMENT_REQUIRED),
-        plan_type: None,
-        resets_at: None,
-        rate_limits: Some(Box::new(rate_limit_snapshot())),
-        promo_message: None,
-    });
-
-    assert!(!err.is_retryable());
-    assert_eq!(err.http_status_code_value(), Some(402));
-}
-
-#[test]
 fn usage_limit_reached_includes_hours_and_minutes() {
     let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resets_at = base + ChronoDuration::hours(3) + ChronoDuration::minutes(32);
     with_now_override(base, move || {
         let expected_time = format_retry_timestamp(&resets_at);
         let err = UsageLimitReachedError {
-            status: None,
             plan_type: Some(PlanType::Known(KnownPlan::Plus)),
             resets_at: Some(resets_at),
             rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -586,7 +498,6 @@ fn usage_limit_reached_includes_days_hours_minutes() {
     with_now_override(base, move || {
         let expected_time = format_retry_timestamp(&resets_at);
         let err = UsageLimitReachedError {
-            status: None,
             plan_type: None,
             resets_at: Some(resets_at),
             rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -604,7 +515,6 @@ fn usage_limit_reached_less_than_minute() {
     with_now_override(base, move || {
         let expected_time = format_retry_timestamp(&resets_at);
         let err = UsageLimitReachedError {
-            status: None,
             plan_type: None,
             resets_at: Some(resets_at),
             rate_limits: Some(Box::new(rate_limit_snapshot())),
@@ -622,7 +532,6 @@ fn usage_limit_reached_with_promo_message() {
     with_now_override(base, move || {
         let expected_time = format_retry_timestamp(&resets_at);
         let err = UsageLimitReachedError {
-            status: None,
             plan_type: None,
             resets_at: Some(resets_at),
             rate_limits: Some(Box::new(rate_limit_snapshot())),

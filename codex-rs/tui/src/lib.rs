@@ -1904,7 +1904,10 @@ mod tests {
         );
 
         assert_eq!(params.model_providers, None);
-        assert_eq!(params.cwd, Some(cwd.to_string_lossy().to_string()));
+        assert_eq!(
+            params.cwd,
+            Some(ThreadListCwdFilter::One(cwd.to_string_lossy().to_string()))
+        );
         Ok(())
     }
 

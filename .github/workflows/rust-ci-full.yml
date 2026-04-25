@@ -94,8 +94,13 @@ jobs:
           - name: Windows
             runner: windows-latest
     steps:
+      - name: Skip macOS argument comment lint in forks
+        if: ${{ github.repository != 'openai/codex' && runner.os == 'macOS' }}
+        run: echo "Skipping macOS argument-comment lint in forks because fork runners do not have OpenAI BuildBuddy and Apple SDK access."
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: ${{ github.repository == 'openai/codex' || runner.os != 'macOS' }}
       - uses: ./.github/actions/setup-bazel-ci
+        if: ${{ github.repository == 'openai/codex' || runner.os != 'macOS' }}
         with:
           target: ${{ runner.os }}
           install-test-prereqs: true
@@ -106,7 +111,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
       - name: Run argument comment lint on codex-rs via Bazel
-        if: ${{ runner.os != 'Windows' }}
+        if: ${{ runner.os != 'Windows' && (github.repository == 'openai/codex' || runner.os != 'macOS') }}
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         shell: bash
