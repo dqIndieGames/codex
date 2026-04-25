@@ -17,6 +17,7 @@ use super::should_emit_websocket_event_log_trace;
 use crate::Prompt;
 use codex_app_server_protocol::AuthMode;
 use codex_model_provider::BearerAuthProvider;
+use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
@@ -366,12 +367,18 @@ fn refresh_provider_runtime_updates_only_runtime_fields_and_clears_cached_websoc
 
 #[test]
 fn live_api_auth_reads_refreshed_bearer_token() {
-    let live_provider = Arc::new(StdRwLock::new(ModelProviderInfo {
+    let provider_info = ModelProviderInfo {
         experimental_bearer_token: Some("old-token".to_string()),
         ..ModelProviderInfo::create_openai_provider(Some("https://old.example.com/v1".to_string()))
-    }));
-    let auth =
-        build_live_api_auth(/*auth*/ None, Arc::clone(&live_provider)).expect("build live auth");
+    };
+    let model_provider = create_model_provider(provider_info.clone(), /*auth_manager*/ None);
+    let live_provider = Arc::new(StdRwLock::new(provider_info));
+    let auth = build_live_api_auth(
+        /*auth*/ None,
+        model_provider,
+        Arc::clone(&live_provider),
+    )
+    .expect("build live auth");
 
     let mut headers = http::HeaderMap::new();
     auth.add_auth_headers_result(&mut headers)
