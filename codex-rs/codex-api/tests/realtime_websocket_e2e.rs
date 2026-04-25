@@ -280,8 +280,8 @@ async fn try_realtime_ws_connect_webrtc_sideband_retry() -> Result<(), String> {
     });
 
     let mut provider = test_provider(format!("http://{addr}"));
-    provider.retry.max_attempts = 5;
-    provider.retry.base_delay = Duration::from_millis(20);
+    provider.retry.max_attempts = 1;
+    provider.retry.base_delay = Duration::from_millis(150);
 
     let client = RealtimeWebsocketClient::new(provider);
     let connection = match client
