@@ -1,10 +1,10 @@
 use codex_otel::AuthEnvTelemetryMetadata;
+use codex_otel::MetricsClient;
+use codex_otel::MetricsConfig;
 use codex_otel::OtelProvider;
 use codex_otel::RuntimeMetricTotals;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
-use codex_otel::metrics::MetricsClient;
-use codex_otel::metrics::MetricsConfig;
 use opentelemetry::KeyValue;
 use opentelemetry::logs::AnyValue;
 use opentelemetry::trace::TracerProvider as _;
