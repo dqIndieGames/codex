@@ -1345,10 +1345,10 @@ async fn remote_compact_and_resume_refresh_stale_developer_instructions() -> Res
             responsesapi_client_metadata: None,
         })
         .await?;
-    wait_for_event(&initial.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    wait_for_turn_complete(&initial.codex).await;
 
     initial.codex.submit(Op::Compact).await?;
-    wait_for_event(&initial.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    wait_for_turn_complete(&initial.codex).await;
 
     initial
         .codex
@@ -1362,7 +1362,7 @@ async fn remote_compact_and_resume_refresh_stale_developer_instructions() -> Res
             responsesapi_client_metadata: None,
         })
         .await?;
-    wait_for_event(&initial.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    wait_for_turn_complete(&initial.codex).await;
 
     initial.codex.submit(Op::Shutdown).await?;
     wait_for_event(&initial.codex, |ev| {
@@ -1386,7 +1386,7 @@ async fn remote_compact_and_resume_refresh_stale_developer_instructions() -> Res
             responsesapi_client_metadata: None,
         })
         .await?;
-    wait_for_event(&resumed.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    wait_for_turn_complete(&resumed.codex).await;
 
     assert_eq!(compact_mock.requests().len(), 1);
     let requests = responses_mock.requests();

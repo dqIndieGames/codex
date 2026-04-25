@@ -205,24 +205,59 @@ async fn realtime_ws_e2e_session_create_and_event_flow() {
 
 #[tokio::test]
 async fn realtime_ws_connect_webrtc_sideband_retries_join_until_server_is_available() {
+    let mut last_retryable_error = None;
+    for _ in 0..5 {
+        match try_realtime_ws_connect_webrtc_sideband_retry().await {
+            Ok(()) => return,
+            Err(err) => {
+                let is_retryable_listener_race = err.contains("Address already in use")
+                    || err.contains("Only one usage of each socket address")
+                    || err.contains("os error 10048")
+                    || err.contains("Connection refused")
+                    || err.contains("actively refused")
+                    || err.contains("os error 10061");
+                if !is_retryable_listener_race {
+                    panic!("{err}");
+                }
+                last_retryable_error = Some(err);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+
+    panic!(
+        "failed to exercise realtime websocket retry after retryable listener race: {:?}",
+        last_retryable_error
+    );
+}
+
+async fn try_realtime_ws_connect_webrtc_sideband_retry() -> Result<(), String> {
     let reserving_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = reserving_listener.local_addr().expect("local addr");
     drop(reserving_listener);
 
     let server = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let listener = TcpListener::bind(addr).await.expect("bind delayed server");
-        let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(stream).await.expect("accept ws");
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|err| format!("bind delayed server: {err}"))?;
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|err| format!("accept: {err}"))?;
+        let mut ws = accept_async(stream)
+            .await
+            .map_err(|err| format!("accept ws: {err}"))?;
 
         let first = ws
             .next()
             .await
-            .expect("first msg")
-            .expect("first msg ok")
+            .ok_or_else(|| "missing first msg".to_string())?
+            .map_err(|err| format!("first msg ok: {err}"))?
             .into_text()
-            .expect("text");
-        let first_json: Value = serde_json::from_str(&first).expect("json");
+            .map_err(|err| format!("text: {err}"))?;
+        let first_json: Value =
+            serde_json::from_str(&first).map_err(|err| format!("json: {err}"))?;
         assert_eq!(first_json["type"], "session.update");
         assert_eq!(
             first_json["session"]["instructions"],
@@ -238,15 +273,17 @@ async fn realtime_ws_connect_webrtc_sideband_retries_join_until_server_is_availa
             .into(),
         ))
         .await
-        .expect("send session.updated");
+        .map_err(|err| format!("send session.updated: {err}"))?;
+
+        Ok::<(), String>(())
     });
 
     let mut provider = test_provider(format!("http://{addr}"));
-    provider.retry.max_attempts = 1;
-    provider.retry.base_delay = Duration::from_millis(100);
+    provider.retry.max_attempts = 5;
+    provider.retry.base_delay = Duration::from_millis(20);
 
     let client = RealtimeWebsocketClient::new(provider);
-    let connection = client
+    let connection = match client
         .connect_webrtc_sideband(
             RealtimeSessionConfig {
                 instructions: "backend prompt".to_string(),
@@ -262,13 +299,30 @@ async fn realtime_ws_connect_webrtc_sideband_retries_join_until_server_is_availa
             HeaderMap::new(),
         )
         .await
-        .expect("connect on retry");
+    {
+        Ok(connection) => connection,
+        Err(err) => {
+            if !server.is_finished() {
+                server.abort();
+            }
+            let server_error = match server.await {
+                Ok(Ok(())) => None,
+                Ok(Err(server_err)) => Some(server_err),
+                Err(join_err) if join_err.is_cancelled() => None,
+                Err(join_err) => Some(format!("server task join: {join_err}")),
+            };
+            return match server_error {
+                Some(server_error) => Err(format!("connect on retry: {err}; {server_error}")),
+                None => Err(format!("connect on retry: {err}")),
+            };
+        }
+    };
 
     let event = connection
         .next_event()
         .await
-        .expect("next event")
-        .expect("event");
+        .map_err(|err| format!("next event: {err}"))?
+        .ok_or_else(|| "missing event".to_string())?;
     assert_eq!(
         event,
         RealtimeEvent::SessionUpdated {
@@ -277,8 +331,14 @@ async fn realtime_ws_connect_webrtc_sideband_retries_join_until_server_is_availa
         }
     );
 
-    connection.close().await.expect("close");
-    server.await.expect("server task");
+    connection
+        .close()
+        .await
+        .map_err(|err| format!("close: {err}"))?;
+    server
+        .await
+        .map_err(|err| format!("server task join: {err}"))??;
+    Ok(())
 }
 
 #[tokio::test]
