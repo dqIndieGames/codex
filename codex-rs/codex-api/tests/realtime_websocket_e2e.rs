@@ -216,9 +216,7 @@ async fn realtime_ws_connect_webrtc_sideband_retries_join_until_server_is_availa
                     || err.contains("Connection refused")
                     || err.contains("actively refused")
                     || err.contains("os error 10061");
-                if !is_retryable_listener_race {
-                    panic!("{err}");
-                }
+                assert!(is_retryable_listener_race, "{err}");
                 last_retryable_error = Some(err);
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -226,14 +224,17 @@ async fn realtime_ws_connect_webrtc_sideband_retries_join_until_server_is_availa
     }
 
     panic!(
-        "failed to exercise realtime websocket retry after retryable listener race: {:?}",
-        last_retryable_error
+        "failed to exercise realtime websocket retry after retryable listener race: {last_retryable_error:?}"
     );
 }
 
 async fn try_realtime_ws_connect_webrtc_sideband_retry() -> Result<(), String> {
-    let reserving_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = reserving_listener.local_addr().expect("local addr");
+    let reserving_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| format!("bind reserving listener: {err}"))?;
+    let addr = reserving_listener
+        .local_addr()
+        .map_err(|err| format!("local addr: {err}"))?;
     drop(reserving_listener);
 
     let server = tokio::spawn(async move {
