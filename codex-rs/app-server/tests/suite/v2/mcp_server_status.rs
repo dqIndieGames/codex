@@ -226,8 +226,8 @@ async fn mcp_server_status_list_tools_and_auth_only_skips_slow_inventory_calls()
     let config_path = codex_home.path().join("config.toml");
     let mut config_toml = std::fs::read_to_string(&config_path)?;
     config_toml = config_toml.replacen(
-        "\n[model_providers.",
-        "\nmcp_oauth_credentials_store = \"file\"\n\n[model_providers.",
+        "\n[features]\n",
+        "\nmcp_oauth_credentials_store = \"file\"\n\n[features]\n",
         1,
     );
     config_toml.push_str(&format!(

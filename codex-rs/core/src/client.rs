@@ -272,7 +272,30 @@ impl AuthProvider for LiveBearerAuthProvider {
             .take();
         let auth = match auth {
             Some(auth) => Some(auth),
-            None => self.model_provider.auth().await,
+            None => {
+                let should_refresh_provider_auth = {
+                    let provider = self
+                        .live_provider
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    provider
+                        .auth
+                        .as_ref()
+                        .is_some_and(|auth| auth.refresh_interval_ms == 0)
+                };
+                if should_refresh_provider_auth
+                    && let Some(auth_manager) = self.model_provider.auth_manager()
+                {
+                    let mut recovery = auth_manager.unauthorized_recovery();
+                    if recovery.has_next() {
+                        recovery
+                            .next()
+                            .await
+                            .map_err(|err| AuthError::Build(err.to_string()))?;
+                    }
+                }
+                self.model_provider.auth().await
+            }
         };
         let mut request = request;
         self.bearer_auth_for(auth.as_ref())
