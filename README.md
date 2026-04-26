@@ -21,7 +21,7 @@ The local1 layer keeps these user-visible behaviors:
 - Provider runtime refresh keeps the current provider sticky while refreshing only `base_url` and `experimental_bearer_token`; Windows tray provider copy support remains connected to the same refresh path.
 - Resume history discovery defaults to cross-provider visibility, while fork flows keep the current provider filter where that matters.
 - `gpt-5.4` keeps the local1 priority fallback by default; setting top-level `force_gpt54_priority_fallback = false` in `config.toml` disables both the priority fallback and Fast passthrough for that model.
-- Windows app-server and TUI startup logging stay quieter by default when `RUST_LOG` is not explicitly set.
+- Windows app-server and TUI startup logging stay quiet by default when `RUST_LOG` is not explicitly set, reducing log output, SQLite/file write overhead, and background I/O so normal startup and interactive use feel lighter and faster.
 - A brand-new or cleared regular thread whose first plain text input is exactly the documented Chinese greeting `U+4F60 U+597D` still injects the local1 checklist into the first visible assistant response; resumed, forked, subagent, reviewer, guardian, and non-matching first turns do not trigger it.
 
 For the Chinese introduction, see [README.zh-CN.md](README.zh-CN.md).
