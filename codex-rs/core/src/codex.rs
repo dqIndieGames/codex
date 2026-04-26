@@ -1915,8 +1915,7 @@ impl Session {
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),
                 );
-                model_client
-                    .set_force_gpt54_priority_fallback(config.force_gpt54_priority_fallback);
+                model_client.set_force_service_tier_priority(config.force_service_tier_priority);
                 model_client
             },
             code_mode_service: crate::tools::code_mode::CodeModeService::new(

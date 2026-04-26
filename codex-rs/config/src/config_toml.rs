@@ -275,9 +275,10 @@ pub struct ConfigToml {
     /// Optional explicit service tier preference for new turns (`fast` or `flex`).
     pub service_tier: Option<ServiceTier>,
 
-    /// Whether `gpt-5.4` should keep forcing the priority fallback at the
-    /// request-construction hook. Defaults to `true` when omitted.
-    pub force_gpt54_priority_fallback: Option<bool>,
+    /// Whether every Responses API request should force `service_tier =
+    /// "priority"` at the request-construction hook. Defaults to `true` when
+    /// omitted.
+    pub force_service_tier_priority: Option<bool>,
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,

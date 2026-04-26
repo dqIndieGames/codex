@@ -2740,8 +2740,8 @@
       ],
       "description": "Optional URI-based file opener. If set, citations to files in the model output will be hyperlinked using the specified URI scheme."
     },
-    "force_gpt54_priority_fallback": {
-      "description": "Whether `gpt-5.4` should keep forcing the priority fallback at the request-construction hook. Defaults to `true` when omitted.",
+    "force_service_tier_priority": {
+      "description": "Whether every Responses API request should force `service_tier = \"priority\"` at the request-construction hook. Defaults to `true` when omitted. When set to `false`, the upstream mapping is restored: `Fast -> priority`, `Flex -> flex`, and unset remains unset.",
       "type": "boolean"
     },
     "forced_chatgpt_workspace_id": {

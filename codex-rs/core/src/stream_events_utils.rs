@@ -41,7 +41,7 @@ pub(crate) const LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW: &str = "Provider re
 
 pub(crate) fn local1_first_turn_checklist_prefix() -> String {
     format!(
-        "local1 定制功能已启用：\n\n- 版本显示统一保留 `-local1`。\n- {LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW}\n- Provider runtime 热刷新仍只覆盖 `base_url` 与 `experimental_bearer_token` 两字段。\n- {LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW}\n- 历史与 resume 默认支持跨 provider 发现，并继续保留 provider 身份信息。\n- `gpt-5.4` 默认继续走 `service_tier=priority`；顶层 `force_gpt54_priority_fallback = false` 会同时关闭 priority 兜底与 Fast 透传。\n- 未显式设置 `RUST_LOG` 时，Windows app 与 TUI 默认日志继续降噪。\n\n"
+        "local1 定制功能已启用：\n\n- 版本显示统一保留 `-local1`。\n- {LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW}\n- Provider runtime 热刷新仍只覆盖 `base_url` 与 `experimental_bearer_token` 两字段。\n- {LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW}\n- 历史与 resume 默认支持跨 provider 发现，并继续保留 provider 身份信息。\n- 顶层 `force_service_tier_priority` 默认开启，所有 `/responses` 请求在最底层构造时强制走 `service_tier=priority`。\n- 未显式设置 `RUST_LOG` 时，Windows app 与 TUI 默认日志继续降噪。\n\n"
     )
 }
 

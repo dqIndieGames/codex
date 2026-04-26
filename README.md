@@ -20,7 +20,7 @@ The local1 layer keeps these user-visible behaviors:
 - The `/responses` main request path keeps broader retry handling for transient HTTP failures, including local1 handling around `401` recovery and retry-chain log suppression.
 - Provider runtime refresh keeps the current provider sticky while refreshing only `base_url` and `experimental_bearer_token`; Windows tray provider copy support remains connected to the same refresh path.
 - Resume history discovery defaults to cross-provider visibility, while fork flows keep the current provider filter where that matters.
-- `gpt-5.4` keeps the local1 priority fallback by default; setting top-level `force_gpt54_priority_fallback = false` in `config.toml` disables both the priority fallback and Fast passthrough for that model.
+- The top-level `force_service_tier_priority` hook defaults to `true`; when enabled, every `/responses` request is forced to send `service_tier = "priority"` at the lowest request-construction layer, regardless of the configured `service_tier` value or model. Setting it to `false` restores the upstream mapping: `Fast -> priority`, `Flex -> flex`, and unset remains unset.
 - Windows app-server and TUI startup logging stay quiet by default when `RUST_LOG` is not explicitly set, reducing log output, SQLite/file write overhead, and background I/O so normal startup and interactive use feel lighter and faster.
 - A brand-new or cleared regular thread whose first plain text input is exactly the documented Chinese greeting `U+4F60 U+597D` still injects the local1 checklist into the first visible assistant response; resumed, forked, subagent, reviewer, guardian, and non-matching first turns do not trigger it.
 

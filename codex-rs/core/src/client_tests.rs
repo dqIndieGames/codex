@@ -114,21 +114,21 @@ fn build_test_responses_request(
     service_tier: Option<ServiceTier>,
 ) -> codex_api::ResponsesApiRequest {
     let client = test_model_client(SessionSource::Cli);
-    build_test_responses_request_with_priority_fallback(
+    build_test_responses_request_with_priority_hook(
         client,
         model_slug,
         service_tier,
-        /*force_gpt54_priority_fallback*/ true,
+        /*force_service_tier_priority*/ true,
     )
 }
 
-fn build_test_responses_request_with_priority_fallback(
+fn build_test_responses_request_with_priority_hook(
     client: ModelClient,
     model_slug: &str,
     service_tier: Option<ServiceTier>,
-    force_gpt54_priority_fallback: bool,
+    force_service_tier_priority: bool,
 ) -> codex_api::ResponsesApiRequest {
-    client.set_force_gpt54_priority_fallback(force_gpt54_priority_fallback);
+    client.set_force_service_tier_priority(force_service_tier_priority);
     let session = client.new_session();
     let provider = client
         .provider_snapshot()
@@ -162,63 +162,69 @@ fn build_subagent_headers_sets_other_subagent_label() {
 }
 
 #[test]
-fn build_responses_request_forces_priority_for_gpt_5_4_without_service_tier() {
-    let request = build_test_responses_request("gpt-5.4", /*service_tier*/ None);
+fn build_responses_request_forces_priority_without_service_tier_when_hook_enabled() {
+    let request = build_test_responses_request("gpt-test", /*service_tier*/ None);
     assert_eq!(request.service_tier.as_deref(), Some("priority"));
 }
 
 #[test]
-fn build_responses_request_forces_priority_for_gpt_5_4_flex_tier() {
-    let request = build_test_responses_request("gpt-5.4", Some(ServiceTier::Flex));
+fn build_responses_request_forces_priority_for_gpt_5_5_when_hook_enabled() {
+    let request = build_test_responses_request("gpt-5.5", Some(ServiceTier::Flex));
     assert_eq!(request.service_tier.as_deref(), Some("priority"));
 }
 
 #[test]
-fn build_responses_request_disables_gpt_5_4_priority_when_fallback_is_false() {
-    let request = build_test_responses_request_with_priority_fallback(
+fn build_responses_request_forces_priority_for_flex_tier_when_hook_enabled() {
+    let request = build_test_responses_request("gpt-test", Some(ServiceTier::Flex));
+    assert_eq!(request.service_tier.as_deref(), Some("priority"));
+}
+
+#[test]
+fn build_responses_request_forces_priority_for_fast_tier_when_hook_enabled() {
+    let request = build_test_responses_request("gpt-test", Some(ServiceTier::Fast));
+    assert_eq!(request.service_tier.as_deref(), Some("priority"));
+}
+
+#[test]
+fn build_responses_request_omits_service_tier_when_hook_disabled_and_no_tier() {
+    let request = build_test_responses_request_with_priority_hook(
         test_model_client(SessionSource::Cli),
-        "gpt-5.4",
+        "gpt-test",
         /*service_tier*/ None,
-        /*force_gpt54_priority_fallback*/ false,
+        /*force_service_tier_priority*/ false,
     );
     assert_eq!(request.service_tier, None);
 }
 
 #[test]
-fn build_responses_request_disables_fast_passthrough_for_gpt_5_4_when_fallback_is_false() {
-    let request = build_test_responses_request_with_priority_fallback(
+fn build_responses_request_maps_fast_to_priority_when_hook_is_false() {
+    let request = build_test_responses_request_with_priority_hook(
         test_model_client(SessionSource::Cli),
-        "gpt-5.4",
+        "gpt-test",
         Some(ServiceTier::Fast),
-        /*force_gpt54_priority_fallback*/ false,
+        /*force_service_tier_priority*/ false,
     );
-    assert_eq!(request.service_tier, None);
+    assert_eq!(request.service_tier.as_deref(), Some("priority"));
 }
 
 #[test]
-fn build_responses_request_preserves_flex_for_gpt_5_4_when_fallback_is_false() {
-    let request = build_test_responses_request_with_priority_fallback(
+fn build_responses_request_preserves_flex_when_hook_is_false() {
+    let request = build_test_responses_request_with_priority_hook(
         test_model_client(SessionSource::Cli),
-        "gpt-5.4",
+        "gpt-test",
         Some(ServiceTier::Flex),
-        /*force_gpt54_priority_fallback*/ false,
+        /*force_service_tier_priority*/ false,
     );
     assert_eq!(request.service_tier.as_deref(), Some("flex"));
 }
 
 #[test]
-fn build_responses_request_preserves_flex_for_non_gpt_5_4() {
-    let request = build_test_responses_request("gpt-5.1", Some(ServiceTier::Flex));
-    assert_eq!(request.service_tier.as_deref(), Some("flex"));
-}
-
-#[test]
-fn build_responses_request_keeps_non_gpt_5_4_fast_mapping_when_fallback_is_false() {
-    let request = build_test_responses_request_with_priority_fallback(
+fn build_responses_request_gpt_5_4_uses_normal_fast_mapping_when_hook_is_false() {
+    let request = build_test_responses_request_with_priority_hook(
         test_model_client(SessionSource::Cli),
-        "gpt-5.1",
+        "gpt-5.4",
         Some(ServiceTier::Fast),
-        /*force_gpt54_priority_fallback*/ false,
+        /*force_service_tier_priority*/ false,
     );
     assert_eq!(request.service_tier.as_deref(), Some("priority"));
 }

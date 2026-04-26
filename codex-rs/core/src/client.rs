@@ -171,7 +171,7 @@ struct ModelClientState {
     include_timing_metrics: bool,
     beta_features_header: Option<String>,
     disable_websockets: AtomicBool,
-    force_gpt54_priority_fallback: AtomicBool,
+    force_service_tier_priority: AtomicBool,
     cached_websocket_session: StdMutex<WebsocketSession>,
 }
 
@@ -634,7 +634,7 @@ impl ModelClient {
                 include_timing_metrics,
                 beta_features_header,
                 disable_websockets: AtomicBool::new(false),
-                force_gpt54_priority_fallback: AtomicBool::new(true),
+                force_service_tier_priority: AtomicBool::new(true),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
             }),
         }
@@ -703,9 +703,9 @@ impl ModelClient {
         self.store_cached_websocket_session(WebsocketSession::default());
     }
 
-    pub(crate) fn set_force_gpt54_priority_fallback(&self, enabled: bool) {
+    pub(crate) fn set_force_service_tier_priority(&self, enabled: bool) {
         self.state
-            .force_gpt54_priority_fallback
+            .force_service_tier_priority
             .store(enabled, Ordering::Relaxed);
     }
 
@@ -1275,21 +1275,13 @@ impl ModelClientSession {
             prompt.output_schema_strict,
         );
         let prompt_cache_key = Some(self.client.state.conversation_id.to_string());
-        let service_tier = if model_info.slug == "gpt-5.4" {
-            if self
-                .client
-                .state
-                .force_gpt54_priority_fallback
-                .load(Ordering::Relaxed)
-            {
-                Some("priority".to_string())
-            } else {
-                match service_tier {
-                    Some(ServiceTier::Fast) => None,
-                    Some(service_tier) => Some(service_tier.to_string()),
-                    None => None,
-                }
-            }
+        let service_tier = if self
+            .client
+            .state
+            .force_service_tier_priority
+            .load(Ordering::Relaxed)
+        {
+            Some("priority".to_string())
         } else {
             match service_tier {
                 Some(ServiceTier::Fast) => Some("priority".to_string()),

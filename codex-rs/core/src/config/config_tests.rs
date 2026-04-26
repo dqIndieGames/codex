@@ -5168,7 +5168,7 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             model_context_window: None,
             model_auto_compact_token_limit: None,
             service_tier: None,
-            force_gpt54_priority_fallback: true,
+            force_service_tier_priority: true,
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
             permissions: Permissions {
@@ -5365,7 +5365,7 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         model_context_window: None,
         model_auto_compact_token_limit: None,
         service_tier: None,
-        force_gpt54_priority_fallback: true,
+        force_service_tier_priority: true,
         model_provider_id: "openai-custom".to_string(),
         model_provider: fixture.openai_custom_provider.clone(),
         permissions: Permissions {
@@ -5516,7 +5516,7 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         model_context_window: None,
         model_auto_compact_token_limit: None,
         service_tier: None,
-        force_gpt54_priority_fallback: true,
+        force_service_tier_priority: true,
         model_provider_id: "openai".to_string(),
         model_provider: fixture.openai_provider.clone(),
         permissions: Permissions {
@@ -5652,7 +5652,7 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         model_context_window: None,
         model_auto_compact_token_limit: None,
         service_tier: None,
-        force_gpt54_priority_fallback: true,
+        force_service_tier_priority: true,
         model_provider_id: "openai".to_string(),
         model_provider: fixture.openai_provider.clone(),
         permissions: Permissions {
@@ -6337,6 +6337,27 @@ allow_login_shell = false
     .await?;
 
     assert!(!config.permissions.allow_login_shell);
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_loads_force_service_tier_priority_from_toml() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+force_service_tier_priority = false
+"#,
+    )
+    .expect("TOML deserialization should succeed for service tier priority hook");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert!(!config.force_service_tier_priority);
     Ok(())
 }
 

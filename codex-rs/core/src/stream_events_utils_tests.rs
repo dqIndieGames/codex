@@ -198,6 +198,7 @@ fn local1_first_turn_checklist_prefix_contains_expected_sections() {
 
     assert!(prefix.starts_with("local1 定制功能已启用：\n\n- 版本显示统一保留 `-local1`。"));
     assert!(prefix.contains("Provider refresh/retry 与 Windows tray 联动"));
+    assert!(prefix.contains("force_service_tier_priority"));
     assert!(prefix.ends_with("\n\n"));
 }
 
