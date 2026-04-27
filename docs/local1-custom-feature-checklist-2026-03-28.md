@@ -4,7 +4,14 @@
 
 - 本文用于冻结你希望长期保留在个人分支里的定制功能。
 - 这不是官方需求文档，而是你自己的长期维护基线。
-- 本轮同步 `rust-v0.121.0` 与后续继续追更高正式 release 或 `upstream/main` 时，都应以本文作为合并后的回归核对清单。
+- 本文保留 `rust-v0.121.0` 历史同步基线，同时记录当前 `0.124.0-local1` 状态；后续继续追更高正式 release 或 `upstream/main` 时，都应以本文作为合并后的回归核对清单。
+
+## 当前同步状态（2026-04-27）
+
+- 当前仓库版本真值为 `codex-rs/Cargo.toml` 中的 `version = "0.124.0"`；CLI/TUI 展示链继续以 `-local1` 后缀表达本地构建身份。
+- 当前发布说明已写入 `docs/local1-release-rust-v0.124.0-2026-04-24.md`，用于说明 `rust-v0.124.0` 同步后的 local1 保留结果。
+- 下方 `121 同步基线` 是历史基线与风险来源记录，不再是当前唯一同步边界；后续复核必须同时看“当前同步状态”“定制功能主清单”“归档项主清单”“当前承载面补充”“推荐验证矩阵”。
+- 若后续继续同步到更高 release，应新增对应的当前状态记录，不要覆盖或删除 `121` 历史基线。
 
 ## 121 同步基线（2026-04-17）
 
@@ -22,7 +29,7 @@
 
 ## 当前推断范围
 
-- 基于当前仓库静态源码/脚本/文档与前序对话，先把你的个人定制目标明确为六条主线：`local1` 显示链、`Responses` 主链重试增强链、Provider runtime 热刷新链、跨 Provider 历史发现链、全局 `service_tier=priority` 底层 hook 链、Windows/TUI 默认日志降噪链。
+- 基于当前仓库静态源码/脚本/文档与前序对话，把你的个人定制目标明确为六条主线加两条归档项：`local1` 显示链、`Responses` 主链重试增强链、Provider runtime 热刷新链、跨 Provider 历史发现链、全局 `service_tier=priority` 底层 hook 链、Windows/TUI 默认日志降噪链，以及归档项 `A1` 首次对话统一首段清单普通文本化展示、`A2` 顶层 `force_service_tier_priority` 开关。
 - 本轮先不把“临时调试代码”“脏工作区噪音”“与定制目标无关的依赖更新”写进功能范围。
 - 若后续你还有新的私人功能，再继续追加到本文，不和本轮目标混写。
 
@@ -75,6 +82,54 @@
 | F14 | Windows app / app-server 默认日志降噪                     | 未设置 `RUST_LOG` 时，Windows app 主链不再默认以高详细度写入 sqlite 日志；显式 `RUST_LOG` 时仍可恢复详细调试日志。该能力只改默认日志过滤，不改变 app-server 协议、线程生命周期或状态持久化语义。                                                                                                                                                                                                                                                                                                                                                    | `codex-rs/app-server/src/lib.rs` 当前默认过滤器已固定为 `warn`（`DEFAULT_APP_SERVER_LOG_FILTER = "warn"`）；Windows app 实际链路会走到该 app-server 路径。                                                                                                                                                                                                                                                                                                                                                                                                             | 同步官方后，Windows app 主链默认不再硬编码高详细度落盘；显式 `RUST_LOG` 覆盖能力仍在；线程、turn、review、approval、subagent 语义不发生回归。                                                                                                                                                                                                                                                                                                                          |
 | F15 | TUI 默认日志降噪                                          | `codex-tui.log` 与 TUI sqlite log layer 在未设置 `RUST_LOG` 时默认降噪；显式 `RUST_LOG` 时仍可恢复详细日志。该能力属于默认观测口径收敛，不删除文件日志或 sqlite 日志能力。                                                                                                                                                                                                                                                                                                                                                                          | `codex-rs/tui/src/lib.rs` 当前默认过滤器已固定为 `warn`（`DEFAULT_TUI_LOG_FILTER = "warn"`），并把文件日志写入 `codex-tui.log`；`docs/install.md` 也明确写成同一默认口径。                                                                                                                                                                                                                                                                                                                                                                                             | 同步官方后，`codex-tui.log` 与 TUI sqlite 日志默认不再按旧高噪声基线持续写盘；显式 `RUST_LOG` 覆盖能力仍可用。                                                                                                                                                                                                                                                                                                                                                         |
 
+## 归档项主清单
+
+| ID | 功能项 | 明确定义 | 当前代码迹象 | 后续验收口径 |
+|---|---|---|---|---|
+| A1 | 首次对话统一首段清单普通文本化展示 | 只有 brand-new thread 与 `Clear` 新线程的首个 regular user input 恰好只有一个纯文本 `UserInput::Text`、其 `text_elements` 为空、且 `text.trim() == "你好"` 时，首个普通 assistant 主消息第一段才携带固定 local1 清单；该能力是用户可见的首轮消息内容，不是旁路 banner、status、计划事件或 TUI 专用 history cell。 | 当前主逻辑在 `codex-rs/core/src/stream_events_utils.rs` 提供首段前缀与前缀注入工具，并由 `codex-rs/core/src/session/turn.rs` 与 legacy `codex-rs/core/src/codex.rs` 的消息消费链调用；静态测试位于 `codex-rs/core/src/stream_events_utils_tests.rs` 与 `codex-rs/core/src/session/tests.rs`。 | 后续同步官方后，`AgentMessageDelta`、`ItemCompleted(ThreadItem::AgentMessage)` 与 legacy `AgentMessage` 三条消费链看到同一份首段前缀；`commentary`、`update_plan`、reasoning summary 不承担主显示职责；`SessionSource::SubAgent(...)` 不得 arm；同一线程后续轮次、resume、continue、fork、历史线程重开与 MCP `codex-reply` 不得重复插入。 |
+| A2 | `force_service_tier_priority` 顶层开关归档别名 | A2 是 F13 的归档别名，不是独立的第二套配置语义；该字段只允许写在顶层 `config.toml`，省略与显式 `true` 等价，默认让所有 `/responses` 请求强制序列化 `service_tier=priority`；显式 `false` 时恢复官方原始映射。 | `codex-rs/core/src/config/mod.rs`、`codex-rs/config/src/config_toml.rs`、`codex-rs/core/src/client.rs`、`codex-rs/core/config.schema.json` 与 `codex-rs/core/src/client_tests.rs` 共同承载该配置、schema 与请求体 hook。 | 后续维护只允许更新 F13/A2 的同一套事实；不得让 `[profiles.*].force_service_tier_priority` 生效；不得重新绑定到某个具体模型名；不得把 A2 写成与 F13 冲突的独立功能。 |
+
+## A1 完整可见清单冻结口径
+
+固定 local1 首段清单的可见文案应保持以下语义；如果代码中的前缀常量或测试需要更新，以本节为长期文档真值：
+
+```text
+local1 定制功能已启用：
+
+- 版本显示统一保留 `-local1`。
+- `/responses` 的远端 HTTP 错误会统一自动重试，包含 `401`；重试中间态只更新状态，不写入历史。
+- Provider runtime 热刷新仍只覆盖 `base_url` 与 `experimental_bearer_token` 两字段。
+- Provider refresh/retry 与 Windows tray 联动：active thread 在 refresh 后的后续自动 retry 会切到最新 `base_url` / `experimental_bearer_token`；Windows tray 新增退出入口，并支持从 user `config.toml` 的 source provider 下拉复制两字段到当前 `model_provider` 对应 provider 条目；写入成功后再尝试 refresh，无 live instance 也视为成功。
+- 历史与 resume 默认跨 provider 可发现；继续旧线程时执行用当前 provider；Fork 在需要时保留 provider 身份；不承诺 `thread/list` 历史 provider provenance 保真。
+- 顶层 `force_service_tier_priority` 默认开启，所有 `/responses` 请求在最底层构造时强制走 `service_tier=priority`。
+- 未显式设置 `RUST_LOG` 时，Windows app 与 TUI 默认日志继续降噪。
+```
+
+## 当前承载面补充（2026-04-27）
+
+本节补充主清单中“当前代码迹象”的现时索引。后续静态复核时，本节与主表同等有效，不能只看旧路径。
+
+| 功能组 | 当前承载面 | 复核影响 |
+|---|---|---|
+| F5/F6/F8/F9/F12 retry 与 telemetry | `codex-rs/codex-api/src/provider.rs`、`codex-rs/codex-api/src/telemetry.rs`、`codex-rs/codex-api/src/endpoint/session.rs`、`codex-rs/core/src/client.rs`、`codex-rs/core/src/session/turn.rs`、legacy `codex-rs/core/src/codex.rs`、`codex-rs/otel/src/events/session_telemetry.rs` | retry 分类、websocket retry chain、request retry notifier、历史区不写中间错误、OTEL log/trace suppress 与 metrics 保留必须一起复核。 |
+| F10 Provider runtime refresh 与 Windows tray | `scripts/windows_app_server_refresh_tray.py`、`codex-rs/app-server/src/windows_control.rs`、`codex-rs/app-server/src/codex_message_processor.rs`、`codex-rs/core/src/thread_manager.rs`、`codex-rs/core/src/session/mod.rs`、`codex-rs/core/src/session/session.rs`、`codex-rs/app-server/README.md`、`codex-rs/app-server/tests/suite/v2/thread_provider_runtime_refresh.rs` | 不能只检查 Python tray；named pipe 控制面、app-server RPC handler、thread manager、session 配置刷新、README 和 v2 测试也属于同一承载面。 |
+| F11 历史默认跨 provider 发现 | `codex-rs/exec/src/lib.rs`、`codex-rs/exec/src/lib_tests.rs`、`codex-rs/tui/src/resume_picker.rs`、`codex-rs/tui/src/app_server_session.rs`、`codex-rs/tui/src/lib.rs` | 本条只按“默认跨 provider 可发现”和“继续旧线程时执行用当前 provider”收口，不把 `thread/list` 历史 provider provenance 保真混入通过条件。 |
+| A1 首次对话统一首段清单 | `codex-rs/core/src/stream_events_utils.rs`、`codex-rs/core/src/stream_events_utils_tests.rs`、`codex-rs/core/src/session/turn.rs`、`codex-rs/core/src/session/tests.rs`、legacy `codex-rs/core/src/codex.rs` | 后续如果修改首段清单可见文案，必须同时检查三条消息消费链和 `SessionSource::SubAgent(...)` 排除规则。 |
+| F13/A2 service tier hook | `codex-rs/config/src/config_toml.rs`、`codex-rs/core/src/config/mod.rs`、`codex-rs/core/config.schema.json`、`codex-rs/core/src/client.rs`、`codex-rs/core/src/session/session.rs`、legacy `codex-rs/core/src/codex.rs`、`codex-rs/core/src/client_tests.rs` | `force_service_tier_priority` 只允许顶层生效，默认 `true`，显式 `false` 恢复官方映射；不能把 A2 和 F13 分裂成两套口径。 |
+
+## 推荐验证矩阵（不自动执行）
+
+本节只定义后续验收推荐路径；除非用户明确要求执行，否则仍遵守“默认不编译、不构建、不测试”的审查边界。
+
+| 功能组 | 静态证据 | 推荐验证命令或检查 | 说明 |
+|---|---|---|---|
+| F1-F4 版本显示与快照 | `codex-rs/cli/src/main.rs`、`codex-rs/tui/src/version.rs`、`codex-rs/tui/src/snapshots/*`、`codex-rs/tui/src/history_cell.rs`、`codex-rs/tui/src/app/tests.rs` | `cargo test -p codex-tui local1` 或 `cargo test -p codex-tui` | 会触发编译；仅在用户允许测试时执行。 |
+| F5-F9/F12 retry 主链 | `codex-rs/codex-api/src/provider.rs`、`codex-rs/core/src/client.rs`、`codex-rs/core/src/session/turn.rs`、`codex-rs/core/src/client_tests.rs`、`codex-rs/app-server/tests/suite/v2/account.rs` | `cargo test -p codex-core 401`、`cargo test -p codex-app-server account` 或更精确筛选 | 会触发编译；主要覆盖 `/responses` HTTP 状态、`401` 普通 retry、非 `/responses` whitelist 与 auth recovery 不回退。 |
+| F10 Provider refresh | `scripts/windows_app_server_refresh_tray.py`、`codex-rs/app-server/src/windows_control.rs`、`codex-rs/app-server/tests/suite/v2/thread_provider_runtime_refresh.rs` | `cargo test -p codex-app-server thread_provider_runtime_refresh` | 会触发编译；必须覆盖 idle/active refresh、provider missing、invalid config、all loaded、relative agent config、zero loaded threads。 |
+| F11 跨 provider 历史发现 | `codex-rs/exec/src/lib.rs`、`codex-rs/exec/src/lib_tests.rs`、`codex-rs/tui/src/resume_picker.rs` | `cargo test -p codex-exec resume_lookup_model_providers`、`cargo test -p codex-tui provider_filter` | 会触发编译；只验证默认可发现和继续旧线程用当前 provider，不验证 provider provenance 保真。 |
+| A1 首段清单 | `codex-rs/core/src/stream_events_utils.rs`、`codex-rs/core/src/stream_events_utils_tests.rs`、`codex-rs/core/src/session/tests.rs` | `cargo test -p codex-core local1_first_turn` | 会触发编译；建议后续把完整可见清单改成等值断言，避免单行文案漂移。 |
+| F13/A2 service tier hook | `codex-rs/core/src/client_tests.rs`、`codex-rs/core/src/config/config_tests.rs`、`codex-rs/core/config.schema.json` | `cargo test -p codex-core force_service_tier_priority` | 会触发编译；覆盖默认 `true`、显式 `false`、schema 与 profiles 不生效。 |
+
 ## 同步官方后的必查清单
 
 - [ ] CLI 主入口帮助/版本输出与 TUI 用户可见版本链仍都带 `-local1` 后缀；即使 CLI 与 TUI 仍是两条常量链，也没有发生漂移。
@@ -122,13 +177,22 @@
 
 - 以后每次你要同步官方更新前，先看本文，确认哪些功能必须保留。
 - 每次合并或 rebase 官方更新后，按“同步官方后的必查清单”逐项复核。
-- 若后续你新增别的私人功能，直接往本文追加新的 `F16`、`F17` 等条目，不要把功能定义散落到聊天记录里。
+- 若后续你新增别的私人功能，直接往本文追加新的 `F16`、`F17` 等条目，或追加新的归档项主清单条目，不要把功能定义散落到聊天记录里。
+
+## 后续同步记录索引
+
+| 日期 | 同步/发布对象 | 状态证据 | 说明 |
+|---|---|---|---|
+| 2026-04-17 | `rust-v0.121.0` checklist 同步 | `.codexflow/临时/local1清单同步121_2026-04-17/local1清单同步到rust-v0.121.0_TASK_2026-04-17.md`、`.codexflow/临时/local1清单同步121_2026-04-17/local1_F11口径去歧义与复核清单_2026-04-17.md` | 作为 121 历史同步证据和 F11 去 provider provenance 歧义证据。 |
+| 2026-04-22 | `rust-v0.122.0` 升级并保留 local1 | `.codexflow/临时/升级到upstream_rust-v0.122.0并保留local1_2026-04-22/升级到upstream_rust-v0.122.0并保留local1_最终状态矩阵_2026-04-22.md`、`.codexflow/临时/升级到upstream_rust-v0.122.0并保留local1_2026-04-22/升级到upstream_rust-v0.122.0并保留local1_最终代码复核结论_2026-04-23.md` | 作为 122 后续状态证据，不新增独立 local1 功能定义。 |
+| 2026-04-24 | `rust-v0.124.0` local1 release note | `docs/local1-release-rust-v0.124.0-2026-04-24.md` | 作为当前 `0.124.0-local1` 发布说明与用户可见变更摘要。 |
 
 ## 2026-04-10 归档补充：首次对话清单与全局 priority 开关
 
 - 本节用于归档 2026-04-10 新增并冻结的两项 local1 私有能力；它们已纳入后续同步官方与回归核对范围。
 - 归档项 A1：首次对话统一首段清单普通文本化展示。
   口径：只有 brand-new thread 与 `Clear` 新线程的首个 regular user input 恰好只有一个纯文本 `UserInput::Text`、其 `text_elements` 为空、且 `text.trim() == "你好"` 时，第一次产出的可见 assistant 主消息才允许把固定 local1 清单收敛到同一条普通 assistant 主消息的第一段文本里，作为跨 CLI / app-server / VS Code / MCP 的统一口径；brand-new 首轮 `hello`、`hi`、`你好啊`、`你好。`、多输入项、文本加图片、带富文本 span 的 `你好` 都不得触发，`SessionSource::Mcp` 也不得对非 `你好` prompt 返回该清单；每个新对话只出现一次；同线程后续轮次、`resume`、`continue`、`fork`、历史线程重开与 MCP `codex-reply` 均不得重复插入；`reviewer`、`guardian`、`thread spawn subagent` 等 `SessionSource::SubAgent(...)` 会话不得 arm 这段首轮清单；实现路线固定为共享后端主逻辑注入，不走 hook、启动 banner、TUI 专用 `HistoryCell`、外层包装器或客户端专用旁路通道。`commentary`、`update_plan`、reasoning summary 可继续保留，但只作辅助显示，不再承担首段清单主显示职责。`AgentMessageDelta`、`ItemCompleted(ThreadItem::AgentMessage)` 与 legacy `AgentMessage` 三条消费链必须看到同一份首段前缀，不允许 streamed/completed/legacy 口径漂移。该固定清单中还必须新增且只新增 1 条 refresh/retry + Windows tray 联动概述项，文案固定为：`- Provider refresh/retry 与 Windows tray 联动：active thread 在 refresh 后的后续自动 retry 会切到最新 \`base_url\` / \`experimental_bearer_token\`；Windows tray 新增退出入口，并支持从 user \`config.toml\` 的 source provider 下拉复制两字段到当前 \`model_provider\` 对应 provider 条目；写入成功后再尝试 refresh，无 live instance 也视为成功。`
+  完整可见清单文案以本文 `A1 完整可见清单冻结口径` 为准；其中历史/provider 行只承诺“默认跨 provider 可发现、继续旧线程用当前 provider、Fork 在需要时保留 provider 身份”，不承诺 `thread/list` 历史 provider provenance 保真。
 - 归档项 A2：`force_service_tier_priority` 顶层开关。
-  口径：该字段只允许写在顶层 `config.toml`；省略与显式 `true` 等价，默认让所有 `/responses` 请求在当前请求构造 hook 位置强制序列化 `service_tier=priority`；显式写 `force_service_tier_priority = false` 时恢复官方原始映射，即 `Fast -> priority`、`Flex -> flex`、`None -> unset`；任何 `[profiles.*]` 下的同名字段都不支持，也不得覆盖顶层配置。
+  口径：A2 是 F13 的归档别名；该字段只允许写在顶层 `config.toml`；省略与显式 `true` 等价，默认让所有 `/responses` 请求在当前请求构造 hook 位置强制序列化 `service_tier=priority`；显式写 `force_service_tier_priority = false` 时恢复官方原始映射，即 `Fast -> priority`、`Flex -> flex`、`None -> unset`；任何 `[profiles.*]` 下的同名字段都不支持，也不得覆盖顶层配置。
 - 归档要求：本节是这两项能力在基线 checklist 中的正式归档记录；后续若实现、回归或同步官方时出现口径冲突，以本节与对应 TASK 文档的冻结口径为准。
