@@ -34,14 +34,12 @@ use tracing::instrument;
 
 const GENERATED_IMAGE_ARTIFACTS_DIR: &str = "generated_images";
 
-pub(crate) const LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW: &str =
+pub(crate) const LOCAL2_RESPONSES_401_DIRECT_RETRY_OVERVIEW: &str =
     "`/responses` 的远端 HTTP 错误会统一自动重试，包含 `401`；重试中间态只更新状态，不写入历史。";
-
-pub(crate) const LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW: &str = "Provider refresh/retry 与 Windows tray 联动：active thread 在 refresh 后的后续自动 retry 会切到最新 `base_url` / `experimental_bearer_token`；Windows tray 新增退出入口，并支持从 user `config.toml` 的 source provider 下拉复制两字段到当前 `model_provider` 对应 provider 条目；写入成功后再尝试 refresh，无 live instance 也视为成功。";
 
 pub(crate) fn local1_first_turn_checklist_prefix() -> String {
     format!(
-        "local1 定制功能已启用：\n\n- 版本显示统一保留 `-local1`。\n- {LOCAL1_RESPONSES_401_DIRECT_RETRY_OVERVIEW}\n- Provider runtime 热刷新仍只覆盖 `base_url` 与 `experimental_bearer_token` 两字段。\n- {LOCAL1_REFRESH_RETRY_WINDOWS_TRAY_OVERVIEW}\n- 历史与 resume 默认跨 provider 可发现；继续旧线程时执行用当前 provider；Fork 在需要时保留 provider 身份；不承诺 `thread/list` 历史 provider provenance 保真。\n- 顶层 `force_service_tier_priority` 默认开启，所有 `/responses` 请求在最底层构造时强制走 `service_tier=priority`。\n- 未显式设置 `RUST_LOG` 时，Windows app 与 TUI 默认日志继续降噪。\n\n"
+        "local2 定制功能已启用：\n\n- 版本显示统一保留 `-local2`。\n- {LOCAL2_RESPONSES_401_DIRECT_RETRY_OVERVIEW}\n- 单次 retry 等待上限保持为 `10s`，retry 中间态不写入历史。\n- 历史与 resume 默认跨 provider 可发现；继续旧线程时执行用当前 provider；不承诺 `thread/list` 历史 provider provenance 保真。\n- 顶层 `force_service_tier_priority` 默认开启，所有 `/responses` 请求在最底层构造时强制走 `service_tier=priority`。\n- 未显式设置 `RUST_LOG` 时，Windows app 与 TUI 默认日志继续降噪。\n\n"
     )
 }
 

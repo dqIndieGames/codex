@@ -44,6 +44,13 @@ pub trait AuthProvider: Send + Sync {
         Ok(())
     }
 
+    /// Returns any auth headers that are available without request body access.
+    fn to_auth_headers(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        self.add_auth_headers(&mut headers);
+        headers
+    }
+
     /// Applies auth to a complete outbound request and returns the request to send.
     ///
     /// The input `request` is moved into this method. Implementations may mutate

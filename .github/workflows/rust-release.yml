@@ -30,7 +30,7 @@ jobs:
           # 1. Must be a tag and match the regex
           [[ "${GITHUB_REF_TYPE}" == "tag" ]] \
             || { echo "❌  Not a tag push"; exit 1; }
-          [[ "${GITHUB_REF_NAME}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?|-local1)?$ ]] \
+          [[ "${GITHUB_REF_NAME}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?|-local2)?$ ]] \
             || { echo "❌  Tag '${GITHUB_REF_NAME}' doesn't match expected format"; exit 1; }
 
           # 2. Extract versions
@@ -38,7 +38,7 @@ jobs:
           cargo_ver="$(grep -m1 '^version' codex-rs/Cargo.toml \
                         | sed -E 's/version *= *"([^"]+)".*/\1/')"
           cargo_compare_ver="${tag_ver}"
-          if [[ "${tag_ver}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-local1$ ]]; then
+          if [[ "${tag_ver}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-local2$ ]]; then
             cargo_compare_ver="${BASH_REMATCH[1]}"
           fi
 

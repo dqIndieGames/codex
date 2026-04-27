@@ -196,8 +196,9 @@ fn last_assistant_message_from_item_returns_none_for_plan_only_hidden_message() 
 fn local1_first_turn_checklist_prefix_contains_expected_sections() {
     let prefix = local1_first_turn_checklist_prefix();
 
-    assert!(prefix.starts_with("local1 定制功能已启用：\n\n- 版本显示统一保留 `-local1`。"));
-    assert!(prefix.contains("Provider refresh/retry 与 Windows tray 联动"));
+    assert!(prefix.starts_with("local2 定制功能已启用：\n\n- 版本显示统一保留 `-local2`。"));
+    assert!(!prefix.contains("Provider refresh/retry 与 Windows tray 联动"));
+    assert!(!prefix.contains("Provider runtime 热刷新"));
     assert!(prefix.contains("force_service_tier_priority"));
     assert!(prefix.ends_with("\n\n"));
 }

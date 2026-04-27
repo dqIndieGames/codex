@@ -228,8 +228,8 @@ jobs:
             exit $LASTEXITCODE
           }
           Write-Host $version
-          if ($version -notmatch '0\.124\.0-local1') {
-            throw "Expected 0.124.0-local1 version output from $exe, got: $version"
+          if ($version -notmatch '0\.125\.0-local2') {
+            throw "Expected 0.125.0-local2 version output from $exe, got: $version"
           }
 
           & $exe --help | Select-Object -First 30

@@ -1540,7 +1540,7 @@ impl ModelClientSession {
     fn responses_request_compression(&self, auth: Option<&CodexAuth>) -> Compression {
         let provider = self.client.provider_snapshot();
         if self.client.state.enable_request_compression
-            && auth.is_some_and(CodexAuth::is_chatgpt_auth)
+            && auth.is_some_and(CodexAuth::uses_codex_backend)
             && provider.is_openai()
         {
             Compression::Zstd
