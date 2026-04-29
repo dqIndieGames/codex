@@ -124,6 +124,16 @@ enum NotificationRecipients {
     Connections(Vec<ConnectionId>),
 }
 
+impl NotificationRecipients {
+    fn from_connection_ids(connection_ids: &[ConnectionId]) -> Self {
+        if connection_ids.is_empty() {
+            Self::Broadcast
+        } else {
+            Self::Connections(connection_ids.to_vec())
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum CoalescingNotificationKind {
     CommandExecutionOutputDelta {
@@ -161,11 +171,7 @@ impl CoalescingKey {
         connection_ids: &[ConnectionId],
         notification: &ServerNotification,
     ) -> Option<Self> {
-        let recipients = if connection_ids.is_empty() {
-            NotificationRecipients::Broadcast
-        } else {
-            NotificationRecipients::Connections(connection_ids.to_vec())
-        };
+        let recipients = NotificationRecipients::from_connection_ids(connection_ids);
         let kind = match notification {
             ServerNotification::CommandExecutionOutputDelta(notification) => {
                 CoalescingNotificationKind::CommandExecutionOutputDelta {
@@ -230,12 +236,14 @@ impl PendingCoalescedNotification {
 #[derive(Clone)]
 struct NotificationCoalescer {
     pending: Arc<Mutex<HashMap<CoalescingKey, PendingCoalescedNotification>>>,
+    send_lock: Arc<Mutex<()>>,
 }
 
 impl Default for NotificationCoalescer {
     fn default() -> Self {
         Self {
             pending: Arc::new(Mutex::new(HashMap::new())),
+            send_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -262,8 +270,10 @@ impl NotificationCoalescer {
                     notification,
                 });
                 let pending_map = Arc::clone(&self.pending);
+                let send_lock = Arc::clone(&self.send_lock);
                 tokio::spawn(async move {
                     tokio::time::sleep(NOTIFICATION_COALESCING_WINDOW).await;
+                    let _send_guard = send_lock.lock().await;
                     let pending_notification = {
                         let mut pending = pending_map.lock().await;
                         pending.remove(&key)
@@ -280,6 +290,40 @@ impl NotificationCoalescer {
             }
         }
         true
+    }
+
+    async fn flush_pending_for_recipients(
+        &self,
+        sender: &mpsc::Sender<OutgoingEnvelope>,
+        connection_ids: &[ConnectionId],
+    ) {
+        let recipients = NotificationRecipients::from_connection_ids(connection_ids);
+        let _send_guard = self.send_lock.lock().await;
+        let pending_notifications = self.take_pending_for_recipients(recipients).await;
+
+        for pending_notification in pending_notifications {
+            send_outgoing_notification(
+                sender,
+                pending_notification.connection_ids.as_slice(),
+                pending_notification.notification,
+            )
+            .await;
+        }
+    }
+
+    async fn take_pending_for_recipients(
+        &self,
+        recipients: NotificationRecipients,
+    ) -> Vec<PendingCoalescedNotification> {
+        let mut pending = self.pending.lock().await;
+        let keys = pending
+            .keys()
+            .filter(|key| key.recipients == recipients)
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .filter_map(|key| pending.remove(&key))
+            .collect::<Vec<_>>()
     }
 }
 
@@ -519,6 +563,11 @@ impl OutgoingMessageSender {
         }
 
         let outgoing_message = OutgoingMessage::Request(request);
+        if self.notification_coalescing_enabled {
+            self.notification_coalescer
+                .flush_pending_for_recipients(&self.sender, connection_ids.unwrap_or(&[]))
+                .await;
+        }
         let send_result = match connection_ids {
             None => {
                 self.sender
@@ -746,6 +795,25 @@ impl OutgoingMessageSender {
         {
             return;
         }
+        if self.notification_coalescing_enabled {
+            let recipients = NotificationRecipients::from_connection_ids(connection_ids);
+            let _send_guard = self.notification_coalescer.send_lock.lock().await;
+            let pending_notifications = self
+                .notification_coalescer
+                .take_pending_for_recipients(recipients)
+                .await;
+
+            for pending_notification in pending_notifications {
+                send_outgoing_notification(
+                    &self.sender,
+                    pending_notification.connection_ids.as_slice(),
+                    pending_notification.notification,
+                )
+                .await;
+            }
+            send_outgoing_notification(&self.sender, connection_ids, notification).await;
+            return;
+        }
         send_outgoing_notification(&self.sender, connection_ids, notification).await;
     }
 
@@ -755,6 +823,12 @@ impl OutgoingMessageSender {
         notification: ServerNotification,
     ) {
         tracing::trace!("app-server event: {notification}");
+        if self.notification_coalescing_enabled {
+            let connection_ids = [connection_id];
+            self.notification_coalescer
+                .flush_pending_for_recipients(&self.sender, &connection_ids)
+                .await;
+        }
         let outgoing_message = OutgoingMessage::AppServerNotification(notification);
         let (write_complete_tx, write_complete_rx) = oneshot::channel();
         if let Err(err) = self
@@ -807,6 +881,12 @@ impl OutgoingMessageSender {
         message: OutgoingMessage,
         message_kind: &'static str,
     ) {
+        if self.notification_coalescing_enabled {
+            let connection_ids = [connection_id];
+            self.notification_coalescer
+                .flush_pending_for_recipients(&self.sender, &connection_ids)
+                .await;
+        }
         let send_fut = self.sender.send(OutgoingEnvelope::ToConnection {
             connection_id,
             message,
@@ -860,6 +940,7 @@ mod tests {
     use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
     use codex_app_server_protocol::ConfigWarningNotification;
     use codex_app_server_protocol::DynamicToolCallParams;
+    use codex_app_server_protocol::FileChangeOutputDeltaNotification;
     use codex_app_server_protocol::FileChangeRequestApprovalParams;
     use codex_app_server_protocol::GuardianWarningNotification;
     use codex_app_server_protocol::ModelRerouteReason;
@@ -868,7 +949,17 @@ mod tests {
     use codex_app_server_protocol::ModelVerificationNotification;
     use codex_app_server_protocol::RateLimitSnapshot;
     use codex_app_server_protocol::RateLimitWindow;
+    use codex_app_server_protocol::ThreadTokenUsage;
+    use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
     use codex_app_server_protocol::ToolRequestUserInputParams;
+    use codex_app_server_protocol::TokenUsageBreakdown;
+    use codex_app_server_protocol::Turn;
+    use codex_app_server_protocol::TurnCompletedNotification;
+    use codex_app_server_protocol::TurnDiffUpdatedNotification;
+    use codex_app_server_protocol::TurnPlanStep;
+    use codex_app_server_protocol::TurnPlanStepStatus;
+    use codex_app_server_protocol::TurnPlanUpdatedNotification;
+    use codex_app_server_protocol::TurnStatus;
     use codex_protocol::ThreadId;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -1293,6 +1384,300 @@ mod tests {
 
         let extra = timeout(Duration::from_millis(25), rx.recv()).await;
         assert!(extra.is_err(), "merged deltas should produce one outgoing message");
+    }
+
+    #[tokio::test]
+    async fn notification_coalescing_flushes_pending_delta_before_completion() {
+        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
+        let outgoing = OutgoingMessageSender::new_with_notification_coalescing(
+            tx,
+            NotificationCoalescing::Enabled,
+        );
+
+        outgoing
+            .send_server_notification(ServerNotification::CommandExecutionOutputDelta(
+                CommandExecutionOutputDeltaNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    item_id: "item-1".to_string(),
+                    delta: "last output".to_string(),
+                },
+            ))
+            .await;
+        outgoing
+            .send_server_notification(ServerNotification::TurnCompleted(
+                TurnCompletedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn: completed_turn("turn-1"),
+                },
+            ))
+            .await;
+
+        let first = recv_broadcast_notification(&mut rx).await;
+        let ServerNotification::CommandExecutionOutputDelta(delta) = first else {
+            panic!("expected pending output delta to flush first");
+        };
+        assert_eq!(delta.delta, "last output");
+
+        let second = recv_broadcast_notification(&mut rx).await;
+        assert!(matches!(second, ServerNotification::TurnCompleted(_)));
+    }
+
+    #[tokio::test]
+    async fn notification_coalescing_flushes_pending_targeted_delta_before_error() {
+        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
+        let outgoing = OutgoingMessageSender::new_with_notification_coalescing(
+            tx,
+            NotificationCoalescing::Enabled,
+        );
+        let connection_id = ConnectionId(7);
+
+        outgoing
+            .send_server_notification_to_connections(
+                &[connection_id],
+                ServerNotification::CommandExecutionOutputDelta(
+                    CommandExecutionOutputDeltaNotification {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        item_id: "item-1".to_string(),
+                        delta: "targeted output".to_string(),
+                    },
+                ),
+            )
+            .await;
+        outgoing
+            .send_error(
+                ConnectionRequestId {
+                    connection_id,
+                    request_id: RequestId::Integer(8),
+                },
+                JSONRPCErrorError {
+                    code: INTERNAL_ERROR_CODE,
+                    message: "boom".to_string(),
+                    data: None,
+                },
+            )
+            .await;
+
+        let first = recv_targeted_message(&mut rx, connection_id).await;
+        let OutgoingMessage::AppServerNotification(
+            ServerNotification::CommandExecutionOutputDelta(delta),
+        ) = first
+        else {
+            panic!("expected pending targeted output delta to flush first");
+        };
+        assert_eq!(delta.delta, "targeted output");
+
+        let second = recv_targeted_message(&mut rx, connection_id).await;
+        assert!(matches!(second, OutgoingMessage::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn notification_coalescing_merges_each_supported_notification_kind() {
+        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(8);
+        let outgoing = OutgoingMessageSender::new_with_notification_coalescing(
+            tx,
+            NotificationCoalescing::Enabled,
+        );
+
+        outgoing
+            .send_server_notification(ServerNotification::FileChangeOutputDelta(
+                FileChangeOutputDeltaNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    item_id: "patch-1".to_string(),
+                    delta: "diff".to_string(),
+                },
+            ))
+            .await;
+        outgoing
+            .send_server_notification(ServerNotification::FileChangeOutputDelta(
+                FileChangeOutputDeltaNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    item_id: "patch-1".to_string(),
+                    delta: " chunk".to_string(),
+                },
+            ))
+            .await;
+        outgoing
+            .send_server_notification(ServerNotification::ThreadTokenUsageUpdated(
+                ThreadTokenUsageUpdatedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    token_usage: thread_token_usage(/*total_tokens*/ 1),
+                },
+            ))
+            .await;
+        outgoing
+            .send_server_notification(ServerNotification::ThreadTokenUsageUpdated(
+                ThreadTokenUsageUpdatedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    token_usage: thread_token_usage(/*total_tokens*/ 2),
+                },
+            ))
+            .await;
+        outgoing
+            .send_server_notification(ServerNotification::TurnDiffUpdated(
+                TurnDiffUpdatedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    diff: "old diff".to_string(),
+                },
+            ))
+            .await;
+        outgoing
+            .send_server_notification(ServerNotification::TurnDiffUpdated(
+                TurnDiffUpdatedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    diff: "new diff".to_string(),
+                },
+            ))
+            .await;
+        outgoing
+            .send_server_notification(ServerNotification::TurnPlanUpdated(
+                TurnPlanUpdatedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    explanation: Some("old plan".to_string()),
+                    plan: vec![TurnPlanStep {
+                        step: "step".to_string(),
+                        status: TurnPlanStepStatus::Pending,
+                    }],
+                },
+            ))
+            .await;
+        outgoing
+            .send_server_notification(ServerNotification::TurnPlanUpdated(
+                TurnPlanUpdatedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    explanation: Some("new plan".to_string()),
+                    plan: vec![TurnPlanStep {
+                        step: "step".to_string(),
+                        status: TurnPlanStepStatus::Completed,
+                    }],
+                },
+            ))
+            .await;
+
+        let notifications = recv_broadcast_notifications(&mut rx, /*count*/ 4).await;
+
+        let file_delta = notifications.iter().find_map(|notification| match notification {
+            ServerNotification::FileChangeOutputDelta(notification) => Some(notification),
+            _ => None,
+        });
+        assert_eq!(
+            file_delta.expect("file delta should be emitted").delta,
+            "diff chunk"
+        );
+
+        let token_usage = notifications.iter().find_map(|notification| match notification {
+            ServerNotification::ThreadTokenUsageUpdated(notification) => {
+                Some(&notification.token_usage)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            token_usage
+                .expect("token usage should be emitted")
+                .total
+                .total_tokens,
+            2
+        );
+
+        let diff = notifications.iter().find_map(|notification| match notification {
+            ServerNotification::TurnDiffUpdated(notification) => Some(notification.diff.as_str()),
+            _ => None,
+        });
+        assert_eq!(diff, Some("new diff"));
+
+        let plan = notifications.iter().find_map(|notification| match notification {
+            ServerNotification::TurnPlanUpdated(notification) => Some(notification),
+            _ => None,
+        });
+        let plan = plan.expect("plan should be emitted");
+        assert_eq!(plan.explanation.as_deref(), Some("new plan"));
+        assert_eq!(plan.plan[0].status, TurnPlanStepStatus::Completed);
+
+        let extra = timeout(Duration::from_millis(25), rx.recv()).await;
+        assert!(extra.is_err(), "coalescing should emit only one notification per key");
+    }
+
+    fn completed_turn(id: &str) -> Turn {
+        Turn {
+            id: id.to_string(),
+            items: Vec::new(),
+            status: TurnStatus::Completed,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+        }
+    }
+
+    fn thread_token_usage(total_tokens: i64) -> ThreadTokenUsage {
+        let breakdown = TokenUsageBreakdown {
+            total_tokens,
+            input_tokens: total_tokens,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+        };
+        ThreadTokenUsage {
+            total: breakdown.clone(),
+            last: breakdown,
+            model_context_window: Some(100),
+        }
+    }
+
+    async fn recv_broadcast_notifications(
+        rx: &mut mpsc::Receiver<OutgoingEnvelope>,
+        count: usize,
+    ) -> Vec<ServerNotification> {
+        let mut notifications = Vec::with_capacity(count);
+        for _ in 0..count {
+            notifications.push(recv_broadcast_notification(rx).await);
+        }
+        notifications
+    }
+
+    async fn recv_broadcast_notification(
+        rx: &mut mpsc::Receiver<OutgoingEnvelope>,
+    ) -> ServerNotification {
+        let envelope = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("notification should arrive before timeout")
+            .expect("channel should contain an envelope");
+        let OutgoingEnvelope::Broadcast {
+            message: OutgoingMessage::AppServerNotification(notification),
+        } = envelope
+        else {
+            panic!("expected broadcast app-server notification envelope");
+        };
+        notification
+    }
+
+    async fn recv_targeted_message(
+        rx: &mut mpsc::Receiver<OutgoingEnvelope>,
+        expected_connection_id: ConnectionId,
+    ) -> OutgoingMessage {
+        let envelope = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("message should arrive before timeout")
+            .expect("channel should contain an envelope");
+        let OutgoingEnvelope::ToConnection {
+            connection_id,
+            message,
+            ..
+        } = envelope
+        else {
+            panic!("expected targeted envelope");
+        };
+        assert_eq!(connection_id, expected_connection_id);
+        message
     }
 
     #[tokio::test]

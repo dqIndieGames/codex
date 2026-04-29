@@ -144,6 +144,101 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
 }
 
 #[tokio::test]
+async fn batch_flush_enabled_materializes_on_barrier_flush() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = RolloutConfig {
+        rollout_batch_flush_enabled: true,
+        ..test_config(home.path())
+    };
+    let thread_id = ThreadId::new();
+    let recorder = RolloutRecorder::new(
+        &config,
+        RolloutRecorderParams::new(
+            thread_id,
+            /*forked_from_id*/ None,
+            SessionSource::Exec,
+            BaseInstructions::default(),
+            Vec::new(),
+            EventPersistenceMode::Limited,
+        ),
+        /*state_db_ctx*/ None,
+        /*state_builder*/ None,
+    )
+    .await?;
+
+    recorder
+        .record_items(&[RolloutItem::EventMsg(EventMsg::AgentMessage(
+            AgentMessageEvent {
+                message: "batch-flush-enabled-event".to_string(),
+                phase: None,
+                memory_citation: None,
+            },
+        ))])
+        .await?;
+    recorder.flush().await?;
+
+    let text = std::fs::read_to_string(recorder.rollout_path())?;
+    assert!(
+        text.contains("batch-flush-enabled-event"),
+        "explicit barrier flush should write pending rollout items when batch flush is enabled"
+    );
+
+    recorder.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn batch_flush_enabled_disables_per_line_flush_on_writer() {
+    let home = TempDir::new().expect("temp dir");
+    let enabled_rollout_path = home.path().join("rollout-enabled.jsonl");
+    let disabled_rollout_path = home.path().join("rollout-disabled.jsonl");
+
+    let enabled_file = File::create(&enabled_rollout_path).expect("create enabled writer file");
+    let enabled_state = RolloutWriterState::new(
+        Some(tokio::fs::File::from_std(enabled_file)),
+        /*deferred_log_file_info*/ None,
+        /*meta*/ None,
+        home.path().to_path_buf(),
+        enabled_rollout_path,
+        /*state_db_ctx*/ None,
+        /*state_builder*/ None,
+        "test-provider".to_string(),
+        /*generate_memories*/ true,
+        /*batch_flush_enabled*/ true,
+    );
+    assert!(
+        !enabled_state
+            .writer
+            .as_ref()
+            .expect("writer should be open")
+            .flush_each_line,
+        "batch flush should skip per-line flushes"
+    );
+
+    let disabled_file = File::create(&disabled_rollout_path).expect("create disabled writer file");
+    let disabled_state = RolloutWriterState::new(
+        Some(tokio::fs::File::from_std(disabled_file)),
+        /*deferred_log_file_info*/ None,
+        /*meta*/ None,
+        home.path().to_path_buf(),
+        disabled_rollout_path,
+        /*state_db_ctx*/ None,
+        /*state_builder*/ None,
+        "test-provider".to_string(),
+        /*generate_memories*/ true,
+        /*batch_flush_enabled*/ false,
+    );
+    assert!(
+        disabled_state
+            .writer
+            .as_ref()
+            .expect("writer should be open")
+            .flush_each_line,
+        "default mode should keep per-line flushes"
+    );
+}
+
+#[tokio::test]
 async fn persist_reports_filesystem_error_and_retries_buffered_items() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());

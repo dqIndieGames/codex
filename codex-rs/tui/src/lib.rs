@@ -80,6 +80,19 @@ const RUST_LOG_ENV_VAR: &str = "RUST_LOG";
 const DEFAULT_TUI_LOG_FILTER: &str = "warn";
 pub(crate) use codex_app_server_client::legacy_core;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TuiRuntimeLoadGates {
+    feedback: bool,
+    log_db: bool,
+}
+
+fn tui_runtime_load_gates(config: &Config) -> TuiRuntimeLoadGates {
+    TuiRuntimeLoadGates {
+        feedback: config.feedback_enabled,
+        log_db: config.log_db_enabled,
+    }
+}
+
 mod additional_dirs;
 mod app;
 mod app_backtrack;
@@ -945,9 +958,14 @@ pub async fn run_main(
         )
         .with_filter(env_filter());
 
+    let runtime_load_gates = tui_runtime_load_gates(&config);
     let feedback = codex_feedback::CodexFeedback::new();
-    let feedback_layer = feedback.logger_layer();
-    let feedback_metadata_layer = feedback.metadata_layer();
+    let feedback_layer = runtime_load_gates
+        .feedback
+        .then(|| feedback.logger_layer());
+    let feedback_metadata_layer = runtime_load_gates
+        .feedback
+        .then(|| feedback.metadata_layer());
 
     if cli.oss && model_provider_override.is_some() {
         // We're in the oss section, so provider_id should be Some
@@ -993,7 +1011,11 @@ pub async fn run_main(
 
     let otel_tracing_layer = otel.as_ref().and_then(|o| o.tracing_layer());
 
-    let log_db = get_state_db(&config).await.map(log_db::start);
+    let log_db = if runtime_load_gates.log_db {
+        get_state_db(&config).await.map(log_db::start)
+    } else {
+        None
+    };
     let log_db_layer = log_db.clone().map(|layer| layer.with_filter(env_filter()));
 
     let _ = tracing_subscriber::registry()
@@ -1799,6 +1821,32 @@ mod tests {
             Arc::new(EnvironmentManager::default_for_tests()),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn tui_runtime_load_gates_default_off_and_explicit_on() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut config = build_config(&temp_dir).await?;
+
+        assert_eq!(
+            tui_runtime_load_gates(&config),
+            TuiRuntimeLoadGates {
+                feedback: false,
+                log_db: false,
+            }
+        );
+
+        config.feedback_enabled = true;
+        config.log_db_enabled = true;
+
+        assert_eq!(
+            tui_runtime_load_gates(&config),
+            TuiRuntimeLoadGates {
+                feedback: true,
+                log_db: true,
+            }
+        );
+        Ok(())
     }
 
     #[test]
