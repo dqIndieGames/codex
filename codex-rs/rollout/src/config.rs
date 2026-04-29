@@ -8,6 +8,7 @@ pub trait RolloutConfigView {
     fn cwd(&self) -> &Path;
     fn model_provider_id(&self) -> &str;
     fn generate_memories(&self) -> bool;
+    fn rollout_batch_flush_enabled(&self) -> bool;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub struct RolloutConfig {
     pub cwd: PathBuf,
     pub model_provider_id: String,
     pub generate_memories: bool,
+    pub rollout_batch_flush_enabled: bool,
 }
 
 pub type Config = RolloutConfig;
@@ -29,6 +31,7 @@ impl RolloutConfig {
             cwd: view.cwd().to_path_buf(),
             model_provider_id: view.model_provider_id().to_string(),
             generate_memories: view.generate_memories(),
+            rollout_batch_flush_enabled: view.rollout_batch_flush_enabled(),
         }
     }
 }
@@ -53,6 +56,10 @@ impl RolloutConfigView for RolloutConfig {
     fn generate_memories(&self) -> bool {
         self.generate_memories
     }
+
+    fn rollout_batch_flush_enabled(&self) -> bool {
+        self.rollout_batch_flush_enabled
+    }
 }
 
 impl<T: RolloutConfigView + ?Sized> RolloutConfigView for &T {
@@ -75,6 +82,10 @@ impl<T: RolloutConfigView + ?Sized> RolloutConfigView for &T {
     fn generate_memories(&self) -> bool {
         (*self).generate_memories()
     }
+
+    fn rollout_batch_flush_enabled(&self) -> bool {
+        (*self).rollout_batch_flush_enabled()
+    }
 }
 
 impl<T: RolloutConfigView + ?Sized> RolloutConfigView for Arc<T> {
@@ -96,5 +107,9 @@ impl<T: RolloutConfigView + ?Sized> RolloutConfigView for Arc<T> {
 
     fn generate_memories(&self) -> bool {
         self.as_ref().generate_memories()
+    }
+
+    fn rollout_batch_flush_enabled(&self) -> bool {
+        self.as_ref().rollout_batch_flush_enabled()
     }
 }

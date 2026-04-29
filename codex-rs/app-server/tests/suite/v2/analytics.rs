@@ -82,6 +82,11 @@ async fn app_server_default_analytics_enabled_with_flag() -> Result<()> {
 pub(crate) async fn enable_analytics_capture(server: &MockServer, codex_home: &Path) -> Result<()> {
     let config_path = codex_home.join("config.toml");
     let config_toml = std::fs::read_to_string(&config_path)?;
+    let config_toml = if config_toml.contains("[analytics]") {
+        config_toml
+    } else {
+        format!("{config_toml}\n[analytics]\nenabled = true\n")
+    };
     if !config_toml.contains("[features]") {
         std::fs::write(
             &config_path,

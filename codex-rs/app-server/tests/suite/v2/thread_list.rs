@@ -710,6 +710,7 @@ sqlite = true
         cwd: codex_home.path().to_path_buf(),
         model_provider_id: "mock_provider".to_string(),
         generate_memories: false,
+        rollout_batch_flush_enabled: false,
     };
     let repaired_page = codex_core::RolloutRecorder::list_threads(
         &rollout_config,

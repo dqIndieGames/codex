@@ -88,7 +88,7 @@
       "description": "Analytics settings loaded from config.toml. Fields are optional so we can apply defaults.",
       "properties": {
         "enabled": {
-          "description": "When `false`, disables analytics across Codex product surfaces in this profile.",
+          "description": "When `true`, enables analytics across Codex product surfaces in this profile.",
           "type": "boolean"
         }
       },
@@ -716,7 +716,17 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {
-          "description": "When `false`, disables the feedback flow across Codex product surfaces.",
+          "description": "When `true`, enables the feedback flow across Codex product surfaces.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "LogDbConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "When `true`, enables the local SQLite log database layer.",
           "type": "boolean"
         }
       },
@@ -1945,6 +1955,20 @@
         }
       ]
     },
+    "RuntimeOptimizationsConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "app_server_notification_coalescing": {
+          "description": "When `true`, app-server batches high-frequency notification deltas briefly.",
+          "type": "boolean"
+        },
+        "rollout_batch_flush": {
+          "description": "When `true`, rollout JSONL writes skip per-line flushes and flush at batch barriers.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "SandboxMode": {
       "enum": [
         "read-only",
@@ -2369,7 +2393,7 @@
           "$ref": "#/definitions/AnalyticsConfigToml"
         }
       ],
-      "description": "When `false`, disables analytics across Codex product surfaces in this machine. Defaults to `true`."
+      "description": "When `true`, enables analytics across Codex product surfaces in this machine. Defaults to `false`."
     },
     "approval_policy": {
       "allOf": [
@@ -2731,7 +2755,7 @@
           "$ref": "#/definitions/FeedbackConfigToml"
         }
       ],
-      "description": "When `false`, disables feedback collection across Codex product surfaces. Defaults to `true`."
+      "description": "When `true`, enables feedback collection across Codex product surfaces. Defaults to `false`."
     },
     "file_opener": {
       "allOf": [
@@ -2827,6 +2851,14 @@
         }
       ],
       "description": "Directory where Codex writes log files, for example `codex-tui.log`. Defaults to `$CODEX_HOME/log`."
+    },
+    "log_db": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/LogDbConfigToml"
+        }
+      ],
+      "description": "When `true`, enables local SQLite log database collection. Defaults to `false`."
     },
     "marketplaces": {
       "additionalProperties": {
@@ -3042,6 +3074,14 @@
     "review_model": {
       "description": "Review model override used by the `/review` feature.",
       "type": "string"
+    },
+    "runtime_optimizations": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/RuntimeOptimizationsConfigToml"
+        }
+      ],
+      "description": "Optional runtime load-reduction features. Each optimization defaults to `false`."
     },
     "sandbox_mode": {
       "allOf": [

@@ -66,6 +66,7 @@ async fn has_recorded_sessions(codex_home: &Path, default_provider: &str) -> io:
         cwd: codex_home.to_path_buf(),
         model_provider_id: default_provider.to_string(),
         generate_memories: false,
+        rollout_batch_flush_enabled: false,
     });
     if has_threads(&store, /*archived*/ false).await? {
         return Ok(true);

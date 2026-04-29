@@ -2380,6 +2380,9 @@ chatgpt_base_url = "{chatgpt_base_url}"
 
 model_provider = "mock_provider"
 
+[analytics]
+enabled = true
+
 [features]
 personality = true
 {general_analytics_toml}

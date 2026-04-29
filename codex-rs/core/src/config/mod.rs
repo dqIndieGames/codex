@@ -612,13 +612,25 @@ pub struct Config {
     /// or placeholder replacement will occur for fast keypress bursts.
     pub disable_paste_burst: bool,
 
-    /// When `false`, disables analytics across Codex product surfaces in this machine.
-    /// Voluntarily left as Optional because the default value might depend on the client.
+    /// When `true`, enables analytics across Codex product surfaces in this machine.
+    /// Voluntarily left as Optional because some tests exercise client-supplied defaults directly.
     pub analytics_enabled: Option<bool>,
 
-    /// When `false`, disables feedback collection across Codex product surfaces.
-    /// Defaults to `true`.
+    /// When `true`, enables feedback collection across Codex product surfaces.
+    /// Defaults to `false`.
     pub feedback_enabled: bool,
+
+    /// When `true`, enables the local SQLite log database layer.
+    /// Defaults to `false`.
+    pub log_db_enabled: bool,
+
+    /// When `true`, rollout JSONL writes skip per-line flushes and flush at batch barriers.
+    /// Defaults to `false`.
+    pub rollout_batch_flush_enabled: bool,
+
+    /// When `true`, app-server batches high-frequency notification deltas briefly.
+    /// Defaults to `false`.
+    pub app_server_notification_coalescing_enabled: bool,
 
     /// Configured discoverable tools for tool suggestions.
     pub tool_suggest: ToolSuggestConfig,
@@ -2451,16 +2463,36 @@ impl Config {
             notices,
             check_for_update_on_startup,
             disable_paste_burst: cfg.disable_paste_burst.unwrap_or(false),
-            analytics_enabled: config_profile
-                .analytics
-                .as_ref()
-                .and_then(|a| a.enabled)
-                .or(cfg.analytics.as_ref().and_then(|a| a.enabled)),
+            analytics_enabled: Some(
+                config_profile
+                    .analytics
+                    .as_ref()
+                    .and_then(|a| a.enabled)
+                    .or(cfg.analytics.as_ref().and_then(|a| a.enabled))
+                    .unwrap_or(false),
+            ),
             feedback_enabled: cfg
                 .feedback
                 .as_ref()
                 .and_then(|feedback| feedback.enabled)
-                .unwrap_or(true),
+                .unwrap_or(false),
+            log_db_enabled: cfg
+                .log_db
+                .as_ref()
+                .and_then(|log_db| log_db.enabled)
+                .unwrap_or(false),
+            rollout_batch_flush_enabled: cfg
+                .runtime_optimizations
+                .as_ref()
+                .and_then(|runtime_optimizations| runtime_optimizations.rollout_batch_flush)
+                .unwrap_or(false),
+            app_server_notification_coalescing_enabled: cfg
+                .runtime_optimizations
+                .as_ref()
+                .and_then(|runtime_optimizations| {
+                    runtime_optimizations.app_server_notification_coalescing
+                })
+                .unwrap_or(false),
             tool_suggest,
             tui_notifications: cfg
                 .tui

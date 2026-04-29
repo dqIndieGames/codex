@@ -14,6 +14,7 @@ pub(super) fn test_config(codex_home: &Path) -> RolloutConfig {
         cwd: codex_home.to_path_buf(),
         model_provider_id: "test-provider".to_string(),
         generate_memories: true,
+        rollout_batch_flush_enabled: false,
     }
 }
 

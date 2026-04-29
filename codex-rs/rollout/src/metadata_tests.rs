@@ -31,6 +31,7 @@ fn test_config(codex_home: PathBuf) -> RolloutConfig {
         codex_home,
         model_provider_id: "test-provider".to_string(),
         generate_memories: true,
+        rollout_batch_flush_enabled: false,
     }
 }
 

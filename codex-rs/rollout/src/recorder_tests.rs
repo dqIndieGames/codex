@@ -27,6 +27,7 @@ fn test_config(codex_home: &Path) -> RolloutConfig {
         cwd: codex_home.to_path_buf(),
         model_provider_id: "test-provider".to_string(),
         generate_memories: true,
+        rollout_batch_flush_enabled: false,
     }
 }
 
@@ -214,6 +215,7 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
         /*state_builder*/ None,
         config.model_provider_id.clone(),
         config.generate_memories,
+        config.rollout_batch_flush_enabled,
     );
     state.add_items(vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
         AgentMessageEvent {

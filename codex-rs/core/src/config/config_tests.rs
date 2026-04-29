@@ -30,9 +30,11 @@ use codex_config::permissions_toml::PermissionsToml;
 use codex_config::profile_toml::ConfigProfile;
 use codex_config::types::AppToolApproval;
 use codex_config::types::ApprovalsReviewer;
+use codex_config::types::AnalyticsConfigToml;
 use codex_config::types::BundledSkillsConfig;
 use codex_config::types::FeedbackConfigToml;
 use codex_config::types::HistoryPersistence;
+use codex_config::types::LogDbConfigToml;
 use codex_config::types::McpServerEnvVar;
 use codex_config::types::McpServerToolConfig;
 use codex_config::types::McpServerTransportConfig;
@@ -43,6 +45,7 @@ use codex_config::types::Notice;
 use codex_config::types::NotificationCondition;
 use codex_config::types::NotificationMethod;
 use codex_config::types::Notifications;
+use codex_config::types::RuntimeOptimizationsConfigToml;
 use codex_config::types::SandboxWorkspaceWrite;
 use codex_config::types::SkillsConfig;
 use codex_config::types::ToolSuggestDiscoverableType;
@@ -1977,7 +1980,7 @@ fn local_dev_builds_force_file_mcp_oauth_store_modes() {
 }
 
 #[tokio::test]
-async fn feedback_enabled_defaults_to_true() -> std::io::Result<()> {
+async fn runtime_load_reduction_defaults_to_off() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         feedback: Some(FeedbackConfigToml::default()),
@@ -1991,7 +1994,47 @@ async fn feedback_enabled_defaults_to_true() -> std::io::Result<()> {
     )
     .await?;
 
+    assert_eq!(config.analytics_enabled, Some(false));
+    assert_eq!(config.feedback_enabled, false);
+    assert_eq!(config.log_db_enabled, false);
+    assert_eq!(config.rollout_batch_flush_enabled, false);
+    assert_eq!(config.app_server_notification_coalescing_enabled, false);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_load_reduction_can_be_enabled_explicitly() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        analytics: Some(AnalyticsConfigToml {
+            enabled: Some(true),
+        }),
+        feedback: Some(FeedbackConfigToml {
+            enabled: Some(true),
+        }),
+        log_db: Some(LogDbConfigToml {
+            enabled: Some(true),
+        }),
+        runtime_optimizations: Some(RuntimeOptimizationsConfigToml {
+            rollout_batch_flush: Some(true),
+            app_server_notification_coalescing: Some(true),
+        }),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.analytics_enabled, Some(true));
     assert_eq!(config.feedback_enabled, true);
+    assert_eq!(config.log_db_enabled, true);
+    assert_eq!(config.rollout_batch_flush_enabled, true);
+    assert_eq!(config.app_server_notification_coalescing_enabled, true);
 
     Ok(())
 }
@@ -5299,7 +5342,10 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             show_tooltips: true,
             model_availability_nux: ModelAvailabilityNuxConfig::default(),
             analytics_enabled: Some(true),
-            feedback_enabled: true,
+            feedback_enabled: false,
+            log_db_enabled: false,
+            rollout_batch_flush_enabled: false,
+            app_server_notification_coalescing_enabled: false,
             tool_suggest: ToolSuggestConfig::default(),
             tui_alternate_screen: AltScreenMode::Auto,
             tui_status_line: None,
@@ -5497,7 +5543,10 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         show_tooltips: true,
         model_availability_nux: ModelAvailabilityNuxConfig::default(),
         analytics_enabled: Some(true),
-        feedback_enabled: true,
+        feedback_enabled: false,
+        log_db_enabled: false,
+        rollout_batch_flush_enabled: false,
+        app_server_notification_coalescing_enabled: false,
         tool_suggest: ToolSuggestConfig::default(),
         tui_alternate_screen: AltScreenMode::Auto,
         tui_status_line: None,
@@ -5649,7 +5698,10 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         show_tooltips: true,
         model_availability_nux: ModelAvailabilityNuxConfig::default(),
         analytics_enabled: Some(false),
-        feedback_enabled: true,
+        feedback_enabled: false,
+        log_db_enabled: false,
+        rollout_batch_flush_enabled: false,
+        app_server_notification_coalescing_enabled: false,
         tool_suggest: ToolSuggestConfig::default(),
         tui_alternate_screen: AltScreenMode::Auto,
         tui_status_line: None,
@@ -5786,7 +5838,10 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         show_tooltips: true,
         model_availability_nux: ModelAvailabilityNuxConfig::default(),
         analytics_enabled: Some(true),
-        feedback_enabled: true,
+        feedback_enabled: false,
+        log_db_enabled: false,
+        rollout_batch_flush_enabled: false,
+        app_server_notification_coalescing_enabled: false,
         tool_suggest: ToolSuggestConfig::default(),
         tui_alternate_screen: AltScreenMode::Auto,
         tui_status_line: None,

@@ -44,6 +44,10 @@ impl codex_rollout::RolloutConfigView for Config {
     fn generate_memories(&self) -> bool {
         self.memories.generate_memories
     }
+
+    fn rollout_batch_flush_enabled(&self) -> bool {
+        self.rollout_batch_flush_enabled
+    }
 }
 
 pub(crate) mod list {

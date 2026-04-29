@@ -13,6 +13,7 @@ use crate::types::AppsConfigToml;
 use crate::types::AuthCredentialsStoreMode;
 use crate::types::FeedbackConfigToml;
 use crate::types::History;
+use crate::types::LogDbConfigToml;
 use crate::types::MarketplaceConfig;
 use crate::types::McpServerConfig;
 use crate::types::MemoriesToml;
@@ -20,6 +21,7 @@ use crate::types::Notice;
 use crate::types::OAuthCredentialsStoreMode;
 use crate::types::OtelConfigToml;
 use crate::types::PluginConfig;
+use crate::types::RuntimeOptimizationsConfigToml;
 use crate::types::SandboxWorkspaceWrite;
 use crate::types::ShellEnvironmentPolicyToml;
 use crate::types::SkillsConfig;
@@ -381,13 +383,20 @@ pub struct ConfigToml {
     /// or placeholder replacement will occur for fast keypress bursts.
     pub disable_paste_burst: Option<bool>,
 
-    /// When `false`, disables analytics across Codex product surfaces in this machine.
-    /// Defaults to `true`.
+    /// When `true`, enables analytics across Codex product surfaces in this machine.
+    /// Defaults to `false`.
     pub analytics: Option<AnalyticsConfigToml>,
 
-    /// When `false`, disables feedback collection across Codex product surfaces.
-    /// Defaults to `true`.
+    /// When `true`, enables feedback collection across Codex product surfaces.
+    /// Defaults to `false`.
     pub feedback: Option<FeedbackConfigToml>,
+
+    /// When `true`, enables local SQLite log database collection.
+    /// Defaults to `false`.
+    pub log_db: Option<LogDbConfigToml>,
+
+    /// Optional runtime load-reduction features. Each optimization defaults to `false`.
+    pub runtime_optimizations: Option<RuntimeOptimizationsConfigToml>,
 
     /// Settings for app-specific controls.
     #[serde(default)]

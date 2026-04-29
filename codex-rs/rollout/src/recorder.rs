@@ -66,7 +66,7 @@ use codex_state::ThreadMetadataBuilder;
 use codex_utils_path as path_utils;
 
 /// Records all [`ResponseItem`]s for a session and flushes them to disk after
-/// every update.
+/// every update unless the rollout batch flush runtime optimization is enabled.
 ///
 /// Rollouts are recorded as JSONL and can be inspected with tools such as:
 ///
@@ -723,6 +723,7 @@ impl RolloutRecorder {
         let rollout_path_for_spawn = rollout_path.clone();
         let default_provider = config.model_provider_id().to_string();
         let generate_memories = config.generate_memories();
+        let batch_flush_enabled = config.rollout_batch_flush_enabled();
         let state_db_ctx_for_spawn = state_db_ctx.clone();
         let handle = tokio::task::spawn(async move {
             let result = rollout_writer(
@@ -736,6 +737,7 @@ impl RolloutRecorder {
                 state_builder,
                 default_provider,
                 generate_memories,
+                batch_flush_enabled,
             )
             .await;
             if let Err(err) = result {
@@ -1379,6 +1381,7 @@ struct RolloutWriterState {
     state_builder: Option<ThreadMetadataBuilder>,
     default_provider: String,
     generate_memories: bool,
+    batch_flush_enabled: bool,
     last_logged_error: Option<String>,
 }
 
@@ -1394,12 +1397,16 @@ impl RolloutWriterState {
         mut state_builder: Option<ThreadMetadataBuilder>,
         default_provider: String,
         generate_memories: bool,
+        batch_flush_enabled: bool,
     ) -> Self {
         if let Some(builder) = state_builder.as_mut() {
             builder.rollout_path = rollout_path.clone();
         }
         Self {
-            writer: file.map(|file| JsonlWriter { file }),
+            writer: file.map(|file| JsonlWriter {
+                file,
+                flush_each_line: !batch_flush_enabled,
+            }),
             deferred_log_file_info,
             pending_items: Vec::new(),
             meta,
@@ -1409,6 +1416,7 @@ impl RolloutWriterState {
             state_builder,
             default_provider,
             generate_memories,
+            batch_flush_enabled,
             last_logged_error: None,
         }
     }
@@ -1500,6 +1508,7 @@ impl RolloutWriterState {
         let file = open_log_file(path)?;
         self.writer = Some(JsonlWriter {
             file: tokio::fs::File::from_std(file),
+            flush_each_line: !self.batch_flush_enabled,
         });
         self.deferred_log_file_info = None;
         Ok(())
@@ -1581,6 +1590,7 @@ async fn rollout_writer(
     state_builder: Option<ThreadMetadataBuilder>,
     default_provider: String,
     generate_memories: bool,
+    batch_flush_enabled: bool,
 ) -> std::io::Result<()> {
     let mut state = RolloutWriterState::new(
         file,
@@ -1592,6 +1602,7 @@ async fn rollout_writer(
         state_builder,
         default_provider,
         generate_memories,
+        batch_flush_enabled,
     );
 
     // Process rollout commands
@@ -1724,12 +1735,16 @@ pub async fn append_rollout_item_to_path(
         .append(true)
         .open(rollout_path)
         .await?;
-    let mut writer = JsonlWriter { file };
+    let mut writer = JsonlWriter {
+        file,
+        flush_each_line: true,
+    };
     writer.write_rollout_item(item).await
 }
 
 struct JsonlWriter {
     file: tokio::fs::File,
+    flush_each_line: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1758,7 +1773,9 @@ impl JsonlWriter {
         let mut json = serde_json::to_string(item)?;
         json.push('\n');
         self.file.write_all(json.as_bytes()).await?;
-        self.file.flush().await?;
+        if self.flush_each_line {
+            self.file.flush().await?;
+        }
         Ok(())
     }
 }

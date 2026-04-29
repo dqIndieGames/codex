@@ -23,6 +23,7 @@ use crate::config_manager::ConfigManager;
 use crate::message_processor::MessageProcessor;
 use crate::message_processor::MessageProcessorArgs;
 use crate::outgoing_message::ConnectionId;
+use crate::outgoing_message::NotificationCoalescing;
 use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::QueuedOutgoingMessage;
@@ -527,15 +528,18 @@ pub async fn run_main_with_transport(
             .boxed(),
     };
 
-    let feedback_layer = feedback.logger_layer();
-    let feedback_metadata_layer = feedback.metadata_layer();
+    let feedback_layer = config.feedback_enabled.then(|| feedback.logger_layer());
+    let feedback_metadata_layer = config.feedback_enabled.then(|| feedback.metadata_layer());
     let state_db = codex_state::StateRuntime::init(
         config.sqlite_home.clone(),
         config.model_provider_id.clone(),
     )
     .await
     .ok();
-    let log_db = state_db.clone().map(log_db::start);
+    let log_db = config
+        .log_db_enabled
+        .then(|| state_db.clone().map(log_db::start))
+        .flatten();
     let log_db_layer = log_db
         .clone()
         .map(|layer| layer.with_filter(app_server_env_filter()));
@@ -675,7 +679,15 @@ pub async fn run_main_with_transport(
         info!("outbound router task exited (channel closed)");
     });
 
-    let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(outgoing_tx));
+    let notification_coalescing = if config.app_server_notification_coalescing_enabled {
+        NotificationCoalescing::Enabled
+    } else {
+        NotificationCoalescing::Disabled
+    };
+    let outgoing_message_sender = Arc::new(OutgoingMessageSender::new_with_notification_coalescing(
+        outgoing_tx,
+        notification_coalescing,
+    ));
     let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
         outgoing: outgoing_message_sender,
         arg0_paths,

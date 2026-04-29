@@ -66,6 +66,41 @@ Codex stores the SQLite-backed state DB under `sqlite_home` (config key) or the
 `CODEX_SQLITE_HOME` environment variable. When unset, WorkspaceWrite sandbox
 sessions default to a temp directory; other modes default to `CODEX_HOME`.
 
+## Runtime Load Switches
+
+The local2 runtime-load switches default to off. Users do not see new UI for
+these switches; the visible effect is that Codex runs with less background
+analytics, feedback capture, and SQLite log work unless a user opts in.
+
+```toml
+[analytics]
+enabled = true
+
+[feedback]
+enabled = true
+
+[log_db]
+enabled = true
+
+[runtime_optimizations]
+rollout_batch_flush = true
+app_server_notification_coalescing = true
+```
+
+`analytics.enabled` controls product usage analytics. `feedback.enabled`
+controls feedback upload and the in-memory feedback tracing layers. `log_db`
+controls the local SQLite log layer used for diagnostics.
+
+`runtime_optimizations.rollout_batch_flush` skips rollout JSONL per-line flushes
+and keeps batch-barrier flushes such as turn/persist/shutdown boundaries. This
+reduces disk I/O, but an extreme process crash can lose the last few not-yet
+flushed history records.
+
+`runtime_optimizations.app_server_notification_coalescing` batches high-frequency
+app-server notifications for a short window, currently command output deltas,
+file-change deltas, token usage updates, diff updates, and plan updates. Users
+may see output arrive in small chunks instead of one tiny update at a time.
+
 ## Custom CA Certificates
 
 Codex can trust a custom root CA bundle for outbound HTTPS and secure websocket

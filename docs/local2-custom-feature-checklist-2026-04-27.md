@@ -31,11 +31,14 @@
 | `L2-F19` | `force_service_tier_priority` 只允许顶层配置 | 该字段只允许写在顶层 `config.toml`；任何 `[profiles.*].force_service_tier_priority` 都不得生效。 |
 | `L2-F20` | Windows app/app-server 默认日志降噪 | 未显式设置 `RUST_LOG` 时，Windows app/app-server 默认日志过滤为 warn 级别，不能高噪声写入 sqlite 日志；显式 `RUST_LOG` 时仍可覆盖。 |
 | `L2-F21` | TUI 默认日志降噪 | 未显式设置 `RUST_LOG` 时，`codex-tui.log` 与 TUI sqlite log layer 默认降噪；显式 `RUST_LOG` 时仍可恢复详细日志。 |
+| `L2-F22` | rollout 批量 flush 优化默认关闭 | `rollout` 写盘批量 flush 只能作为显式可选 runtime 优化保留，默认必须关闭；未在 `config.toml` 中明确开启时，不能静默改变会话过程记录的落盘时机、崩溃恢复口径或历史可恢复性。用户视角是默认继续保留当前历史安全感；只有显式开启后，才用更低磁盘 I/O 换取极端崩溃场景下最后少量记录可能未及时落盘的风险。 |
+| `L2-F23` | app-server 高频通知合并默认关闭 | `app-server` 高频通知合并/节流只能作为显式可选 runtime 优化保留，默认必须关闭；未在 `config.toml` 中明确开启时，命令输出 delta、文件变更 delta、token usage、diff/plan 更新等客户端可见事件不能被静默批量合并或延迟。用户视角是默认继续看到当前逐条刷新行为；只有显式开启后，才接受输出从逐字/逐条跳动变成小批量更新，以降低客户端、网络和序列化负担。 |
+| `L2-F24` | analytics / feedback / log_db 默认关闭并可配置开启 | `analytics`、`feedback`、`log_db` 必须支持分层配置开关，local2 默认关闭这些非必要 runtime 负担；需要产品统计、用户反馈上传或本地 sqlite 日志排查时，必须能通过 `config.toml` 显式打开对应能力。用户视角是默认更安静、更轻；开启后才恢复统计、反馈日志采集或本地日志入库。 |
 
 ## 使用方式
 
 - 合并 upstream 前，先读本文确认 local2 要保留哪些功能。
-- 合并 upstream 后，按 `L2-F1` 到 `L2-F21` 逐条核对。
+- 合并 upstream 后，按全部 `L2-F*` 条目逐条核对。
 - 如果后续新增 local2 功能，继续追加新的 `L2-F*` 条目。
 - 本文只是一份功能清单，不负责写代码方案、执行步骤或测试报告。
 
