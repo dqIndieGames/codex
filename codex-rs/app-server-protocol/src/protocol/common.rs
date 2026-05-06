@@ -561,10 +561,12 @@ client_request_definitions! {
     },
     ThreadProviderRuntimeRefresh => "thread/providerRuntime/refresh" {
         params: v2::ThreadProviderRuntimeRefreshParams,
+        serialization: thread_id(params.thread_id),
         response: v2::ThreadProviderRuntimeRefreshResponse,
     },
     ThreadProviderRuntimeRefreshAllLoaded => "thread/providerRuntime/refreshAllLoaded" {
         params: v2::ThreadProviderRuntimeRefreshAllLoadedParams,
+        serialization: global("config"),
         response: v2::ThreadProviderRuntimeRefreshAllLoadedResponse,
     },
     ThreadRead => "thread/read" {
@@ -1685,6 +1687,19 @@ mod tests {
             })
         );
 
+        let provider_runtime_refresh = ClientRequest::ThreadProviderRuntimeRefresh {
+            request_id: request_id(),
+            params: v2::ThreadProviderRuntimeRefreshParams {
+                thread_id: "refresh-thread".to_string(),
+            },
+        };
+        assert_eq!(
+            provider_runtime_refresh.serialization_scope(),
+            Some(ClientRequestSerializationScope::Thread {
+                thread_id: "refresh-thread".to_string()
+            })
+        );
+
         let marketplace_remove = ClientRequest::MarketplaceRemove {
             request_id: request_id(),
             params: v2::MarketplaceRemoveParams {
@@ -1791,6 +1806,15 @@ mod tests {
             },
         };
         assert_eq!(mcp_resource_read.serialization_scope(), None);
+
+        let refresh_all_loaded = ClientRequest::ThreadProviderRuntimeRefreshAllLoaded {
+            request_id: request_id(),
+            params: v2::ThreadProviderRuntimeRefreshAllLoadedParams::default(),
+        };
+        assert_eq!(
+            refresh_all_loaded.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("config"))
+        );
     }
 
     #[test]
