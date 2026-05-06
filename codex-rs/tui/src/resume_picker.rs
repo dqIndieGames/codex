@@ -274,6 +274,21 @@ async fn run_session_picker_with_loader(
     Ok(SessionSelection::StartFresh)
 }
 
+fn picker_cwd_filter(
+    config_cwd: &Path,
+    show_all: bool,
+    is_remote: bool,
+    remote_cwd_override: Option<&Path>,
+) -> Option<PathBuf> {
+    if show_all {
+        None
+    } else if is_remote {
+        remote_cwd_override.map(Path::to_path_buf)
+    } else {
+        Some(config_cwd.to_path_buf())
+    }
+}
+
 fn default_provider_filter_for_picker(
     _config: &Config,
     action: SessionPickerAction,
