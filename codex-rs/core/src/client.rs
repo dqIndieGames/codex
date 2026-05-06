@@ -2172,9 +2172,9 @@ where
                     }
                 }
                 Err(err) => {
-                    let mapped = map_responses_stream_api_error(err);
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
+                    let mapped = map_responses_stream_api_error(err);
                     let upstream_request_id =
                         upstream_request_id.or(response_debug_context.request_id.as_deref());
                     inference_trace_attempt.record_failed(

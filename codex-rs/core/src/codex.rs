@@ -185,7 +185,6 @@ use crate::config::deserialize_config_toml_with_base;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::config::types::McpServerConfig;
 use crate::config::types::ShellEnvironmentPolicy;
-use crate::config_loader::resolve_relative_paths_in_config_toml;
 use crate::context_manager::ContextManager;
 use crate::context_manager::TotalTokenUsageBreakdown;
 use crate::environment_context::EnvironmentContext;
@@ -194,6 +193,7 @@ use crate::error::Result as CodexResult;
 #[cfg(test)]
 use crate::exec::StreamOutput;
 use crate::model_provider_info::built_in_model_providers;
+use codex_config::loader::resolve_relative_paths_in_config_toml;
 use codex_config::CONFIG_TOML_FILE;
 
 mod rollout_reconstruction;
@@ -4741,10 +4741,10 @@ mod handlers {
     use crate::SkillError;
     use crate::codex::spawn_review_thread;
     use crate::config::Config;
-    use crate::config_loader::CloudRequirementsLoader;
-    use crate::config_loader::LoaderOverrides;
-    use crate::config_loader::load_config_layers_state;
     use codex_features::Feature;
+    use codex_config::loader::load_config_layers_state;
+    use codex_config::CloudRequirementsLoader;
+    use codex_config::LoaderOverrides;
     use codex_utils_absolute_path::AbsolutePathBuf;
 
     use crate::mcp::auth::compute_auth_statuses;
