@@ -574,7 +574,7 @@ impl OutgoingMessageSender {
             );
         }
 
-        let outgoing_message = OutgoingMessage::Request(request);
+        let outgoing_message = OutgoingMessage::Request(request.clone());
         if self.notification_coalescing_enabled {
             self.notification_coalescer
                 .flush_pending_for_recipients(&self.sender, connection_ids.unwrap_or(&[]))
