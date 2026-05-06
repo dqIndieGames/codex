@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppInfo;
+use codex_app_server_protocol::MarketplaceAddResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::PluginInstallResponse;
@@ -21,15 +22,16 @@ use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::ThreadGoalStatus;
 use codex_file_search::FileMatch;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::GetHistoryEntryResponseEvent;
-use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::ApprovalPreset;
 
+use crate::app_command::AppCommand;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
@@ -40,9 +42,9 @@ use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_realtime_webrtc::RealtimeWebrtcEvent;
 use codex_realtime_webrtc::RealtimeWebrtcSessionHandle;
 
@@ -52,6 +54,12 @@ use crate::history_cell::HistoryCell;
 pub(crate) enum RealtimeAudioDeviceKind {
     Microphone,
     Speaker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThreadGoalSetMode {
+    ConfirmIfExists,
+    ReplaceExisting,
 }
 
 impl RealtimeAudioDeviceKind {
@@ -100,6 +108,13 @@ pub(crate) enum RateLimitRefreshOrigin {
     StatusCommand { request_id: u64 },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeymapEditIntent {
+    ReplaceAll,
+    AddAlternate,
+    ReplaceOne { old_key: String },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
@@ -117,7 +132,7 @@ pub(crate) enum AppEvent {
     /// Submit an op to the specified thread, regardless of current focus.
     SubmitThreadOp {
         thread_id: ThreadId,
-        op: Op,
+        op: AppCommand,
     },
 
     /// Deliver a synthetic history lookup response to a specific thread channel.
@@ -167,7 +182,13 @@ pub(crate) enum AppEvent {
 
     /// Forward an `Op` to the Agent. Using an `AppEvent` for this avoids
     /// bubbling channels through layers of widgets.
-    CodexOp(Op),
+    CodexOp(AppCommand),
+
+    /// Approve one retry of a recent auto-review denial selected in the TUI.
+    ApproveRecentAutoReviewDenial {
+        thread_id: ThreadId,
+        id: String,
+    },
 
     /// Kick off an asynchronous file search for the given query (text after
     /// the `@`). Previous searches may be cancelled by the app layer so there
@@ -185,6 +206,29 @@ pub(crate) enum AppEvent {
     /// Refresh account rate limits in the background.
     RefreshRateLimits {
         origin: RateLimitRefreshOrigin,
+    },
+
+    /// Open the current thread goal summary/action menu.
+    OpenThreadGoalMenu {
+        thread_id: ThreadId,
+    },
+
+    /// Set or replace the current thread goal objective.
+    SetThreadGoalObjective {
+        thread_id: ThreadId,
+        objective: String,
+        mode: ThreadGoalSetMode,
+    },
+
+    /// Pause or resume the current thread goal.
+    SetThreadGoalStatus {
+        thread_id: ThreadId,
+        status: ThreadGoalStatus,
+    },
+
+    /// Clear the current thread goal.
+    ClearThreadGoal {
+        thread_id: ThreadId,
     },
 
     /// Result of refreshing rate limits.
@@ -242,6 +286,27 @@ pub(crate) enum AppEvent {
     PluginsLoaded {
         cwd: PathBuf,
         result: Result<PluginListResponse, String>,
+    },
+
+    /// Open the prompt for adding a marketplace source.
+    OpenMarketplaceAddPrompt,
+
+    /// Replace the plugins popup with a marketplace-add loading state.
+    OpenMarketplaceAddLoading {
+        source: String,
+    },
+
+    /// Add a marketplace from the provided source.
+    FetchMarketplaceAdd {
+        cwd: PathBuf,
+        source: String,
+    },
+
+    /// Result of adding a marketplace.
+    MarketplaceAddLoaded {
+        cwd: PathBuf,
+        source: String,
+        result: Result<MarketplaceAddResponse, String>,
     },
 
     /// Replace the plugins popup with a plugin-detail loading state.
@@ -354,7 +419,33 @@ pub(crate) enum AppEvent {
         result: Result<SkillsListResponse, String>,
     },
 
+    /// Begin buffering initial resume replay rows before they are written to scrollback.
+    BeginInitialHistoryReplayBuffer,
+
     InsertHistoryCell(Box<dyn HistoryCell>),
+
+    /// Finish buffering initial resume replay after all replay events have been queued.
+    EndInitialHistoryReplayBuffer,
+
+    /// Replace the contiguous run of streaming `AgentMessageCell`s at the end of
+    /// the transcript with a single `AgentMarkdownCell` that stores the raw
+    /// markdown source and re-renders from it on resize.
+    ///
+    /// Emitted by `ChatWidget::flush_answer_stream_with_separator` after stream
+    /// finalization. The `App` handler walks backward through `transcript_cells`
+    /// to find the `AgentMessageCell` run and splices in the consolidated cell.
+    /// The `cwd` keeps local file-link display stable across the final re-render.
+    ConsolidateAgentMessage {
+        source: String,
+        cwd: PathBuf,
+    },
+
+    /// Replace the contiguous run of streaming `ProposedPlanStreamCell`s at the
+    /// end of the transcript with a single source-backed `ProposedPlanCell`.
+    ///
+    /// Emitted by `ChatWidget::on_plan_item_completed` after plan stream
+    /// finalization.
+    ConsolidateProposedPlan(String),
 
     /// Apply rollback semantics to local transcript cells.
     ///
@@ -512,8 +603,8 @@ pub(crate) enum AppEvent {
     /// Update the current approval policy in the running app and widget.
     UpdateAskForApprovalPolicy(AskForApproval),
 
-    /// Update the current sandbox policy in the running app and widget.
-    UpdateSandboxPolicy(SandboxPolicy),
+    /// Update the current permission profile in the running app and widget.
+    UpdatePermissionProfile(PermissionProfile),
 
     /// Update the current approvals reviewer in the running app and widget.
     UpdateApprovalsReviewer(ApprovalsReviewer),
@@ -677,6 +768,39 @@ pub(crate) enum AppEvent {
     /// Apply a user-confirmed syntax theme selection.
     SyntaxThemeSelected {
         name: String,
+    },
+
+    /// Open set/remove actions for the selected keymap action.
+    OpenKeymapActionMenu {
+        context: String,
+        action: String,
+    },
+
+    /// Open binding selection before replacing one binding for an action.
+    OpenKeymapReplaceBindingMenu {
+        context: String,
+        action: String,
+    },
+
+    /// Open key capture for the selected keymap action.
+    OpenKeymapCapture {
+        context: String,
+        action: String,
+        intent: KeymapEditIntent,
+    },
+
+    /// Apply a captured key to the selected keymap action.
+    KeymapCaptured {
+        context: String,
+        action: String,
+        key: String,
+        intent: KeymapEditIntent,
+    },
+
+    /// Remove the custom root binding for the selected keymap action.
+    KeymapCleared {
+        context: String,
+        action: String,
     },
 }
 

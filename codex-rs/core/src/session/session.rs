@@ -1,5 +1,7 @@
 use super::*;
-use crate::config::ConstraintError;
+use crate::goals::GoalRuntimeState;
+use codex_protocol::permissions::FileSystemPath;
+use codex_protocol::permissions::FileSystemSpecialPath;
 use tokio::sync::Semaphore;
 
 /// Context for an initialized model agent
@@ -24,9 +26,9 @@ pub(crate) struct Session {
     pub(super) mailbox: Mailbox,
     pub(super) mailbox_rx: Mutex<MailboxReceiver>,
     pub(super) idle_pending_input: Mutex<Vec<ResponseInputItem>>, // TODO (jif) merge with mailbox!
+    pub(crate) goal_runtime: GoalRuntimeState,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
-    pub(super) js_repl: Arc<JsReplHandle>,
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
@@ -57,10 +59,11 @@ pub(crate) struct SessionConfiguration {
     /// When to escalate for approval for execution
     pub(super) approval_policy: Constrained<AskForApproval>,
     pub(super) approvals_reviewer: ApprovalsReviewer,
-    /// How to sandbox commands executed in the system
-    pub(super) sandbox_policy: Constrained<SandboxPolicy>,
-    pub(super) file_system_sandbox_policy: FileSystemSandboxPolicy,
-    pub(super) network_sandbox_policy: NetworkSandboxPolicy,
+    /// Canonical permission profile for the session.
+    pub(super) permission_profile: Constrained<PermissionProfile>,
+    /// Named or implicit built-in permissions profile selected from config, if
+    /// any.
+    pub(super) active_permission_profile: Option<ActivePermissionProfile>,
     pub(super) windows_sandbox_level: WindowsSandboxLevel,
 
     /// Absolute working directory that should be treated as the *root* of the
@@ -95,11 +98,33 @@ impl SessionConfiguration {
     }
 
     pub(super) fn permission_profile(&self) -> PermissionProfile {
-        PermissionProfile::from_runtime_permissions_with_enforcement(
-            SandboxEnforcement::from_legacy_sandbox_policy(self.sandbox_policy.get()),
-            &self.file_system_sandbox_policy,
-            self.network_sandbox_policy,
-        )
+        self.permission_profile.get().clone()
+    }
+
+    pub(super) fn active_permission_profile(&self) -> Option<ActivePermissionProfile> {
+        self.active_permission_profile.clone()
+    }
+
+    pub(super) fn sandbox_policy(&self) -> SandboxPolicy {
+        self.permission_profile()
+            .to_legacy_sandbox_policy(&self.cwd)
+            .unwrap_or_else(|_| {
+                let file_system_sandbox_policy = self.file_system_sandbox_policy();
+                codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
+                    self.permission_profile.get(),
+                    &file_system_sandbox_policy,
+                    self.network_sandbox_policy(),
+                    &self.cwd,
+                )
+            })
+    }
+
+    pub(super) fn file_system_sandbox_policy(&self) -> FileSystemSandboxPolicy {
+        self.permission_profile.get().file_system_sandbox_policy()
+    }
+
+    pub(super) fn network_sandbox_policy(&self) -> NetworkSandboxPolicy {
+        self.permission_profile.get().network_sandbox_policy()
     }
 
     pub(super) fn thread_config_snapshot(&self) -> ThreadConfigSnapshot {
@@ -109,8 +134,8 @@ impl SessionConfiguration {
             service_tier: self.service_tier,
             approval_policy: self.approval_policy.value(),
             approvals_reviewer: self.approvals_reviewer,
-            sandbox_policy: self.sandbox_policy.get().clone(),
             permission_profile: self.permission_profile(),
+            active_permission_profile: self.active_permission_profile(),
             cwd: self.cwd.clone(),
             ephemeral: self.original_config_do_not_use.ephemeral,
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
@@ -121,11 +146,30 @@ impl SessionConfiguration {
 
     pub(crate) fn apply(&self, updates: &SessionSettingsUpdate) -> ConstraintResult<Self> {
         let mut next_configuration = self.clone();
-        let file_system_policy_matches_legacy = self.file_system_sandbox_policy
-            == FileSystemSandboxPolicy::from_legacy_sandbox_policy(
-                self.sandbox_policy.get(),
+        let current_sandbox_policy = self.sandbox_policy();
+        let current_file_system_sandbox_policy = self.file_system_sandbox_policy();
+        let current_network_sandbox_policy = self.network_sandbox_policy();
+        let legacy_file_system_projection =
+            FileSystemSandboxPolicy::from_legacy_sandbox_policy_preserving_deny_entries(
+                &current_sandbox_policy,
                 &self.cwd,
+                &current_file_system_sandbox_policy,
             );
+        let file_system_policy_matches_legacy = current_file_system_sandbox_policy
+            .is_semantically_equivalent_to(&legacy_file_system_projection, &self.cwd);
+        let file_system_policy_has_rebindable_project_root_write =
+            current_file_system_sandbox_policy
+                .entries
+                .iter()
+                .any(|entry| {
+                    entry.access.can_write()
+                        && matches!(
+                            &entry.path,
+                            FileSystemPath::Special {
+                                value: FileSystemSpecialPath::ProjectRoots { subpath: None },
+                            }
+                        )
+                });
         if let Some(collaboration_mode) = updates.collaboration_mode.clone() {
             next_configuration.collaboration_mode = collaboration_mode;
         }
@@ -171,41 +215,55 @@ impl SessionConfiguration {
         }
 
         if let Some(permission_profile) = updates.permission_profile.clone() {
-            let sandbox_policy = permission_profile
-                .to_legacy_sandbox_policy(&next_configuration.cwd)
-                .map_err(|err| ConstraintError::InvalidValue {
-                    field_name: "permission_profile",
-                    candidate: format!("{permission_profile:?}"),
-                    allowed: format!(
-                        "permission profiles that can be represented by the active sandbox constraints: {err}"
-                    ),
-                    requirement_source: codex_config::RequirementSource::Unknown,
-                })?;
-            next_configuration.sandbox_policy.set(sandbox_policy)?;
-            let (mut file_system_sandbox_policy, network_sandbox_policy) =
-                permission_profile.to_runtime_permissions();
-            file_system_sandbox_policy
-                .preserve_deny_read_restrictions_from(&self.file_system_sandbox_policy);
-            next_configuration.file_system_sandbox_policy = file_system_sandbox_policy;
-            next_configuration.network_sandbox_policy = network_sandbox_policy;
+            let active_permission_profile =
+                updates.active_permission_profile.clone().or_else(|| {
+                    if permission_profile == self.permission_profile() {
+                        self.active_permission_profile.clone()
+                    } else {
+                        None
+                    }
+                });
+            next_configuration.set_permission_profile_projection(
+                permission_profile,
+                Some(&current_file_system_sandbox_policy),
+            )?;
+            next_configuration.active_permission_profile = active_permission_profile;
         } else if let Some(sandbox_policy) = updates.sandbox_policy.clone() {
-            next_configuration.sandbox_policy.set(sandbox_policy)?;
-            next_configuration.file_system_sandbox_policy =
+            let file_system_sandbox_policy =
                 FileSystemSandboxPolicy::from_legacy_sandbox_policy_preserving_deny_entries(
-                    next_configuration.sandbox_policy.get(),
+                    &sandbox_policy,
                     &next_configuration.cwd,
-                    &self.file_system_sandbox_policy,
+                    &current_file_system_sandbox_policy,
                 );
-            next_configuration.network_sandbox_policy =
-                NetworkSandboxPolicy::from(next_configuration.sandbox_policy.get());
-        } else if cwd_changed && file_system_policy_matches_legacy {
+            let network_sandbox_policy = NetworkSandboxPolicy::from(&sandbox_policy);
+            next_configuration.permission_profile.set(
+                PermissionProfile::from_runtime_permissions_with_enforcement(
+                    SandboxEnforcement::from_legacy_sandbox_policy(&sandbox_policy),
+                    &file_system_sandbox_policy,
+                    network_sandbox_policy,
+                ),
+            )?;
+            next_configuration.active_permission_profile = None;
+        } else if cwd_changed
+            && file_system_policy_matches_legacy
+            && file_system_policy_has_rebindable_project_root_write
+        {
             // Preserve richer split policies across cwd-only updates; only
-            // rederive when the session is already using the legacy bridge.
-            next_configuration.file_system_sandbox_policy =
-                FileSystemSandboxPolicy::from_legacy_sandbox_policy(
-                    next_configuration.sandbox_policy.get(),
+            // rederive when the session is already using a structurally
+            // cwd-bound legacy bridge.
+            let file_system_sandbox_policy =
+                FileSystemSandboxPolicy::from_legacy_sandbox_policy_preserving_deny_entries(
+                    &current_sandbox_policy,
                     &next_configuration.cwd,
+                    &current_file_system_sandbox_policy,
                 );
+            next_configuration.permission_profile.set(
+                PermissionProfile::from_runtime_permissions_with_enforcement(
+                    SandboxEnforcement::from_legacy_sandbox_policy(&current_sandbox_policy),
+                    &file_system_sandbox_policy,
+                    current_network_sandbox_policy,
+                ),
+            )?;
         }
         if let Some(app_server_client_name) = updates.app_server_client_name.clone() {
             next_configuration.app_server_client_name = Some(app_server_client_name);
@@ -214,6 +272,28 @@ impl SessionConfiguration {
             next_configuration.app_server_client_version = Some(app_server_client_version);
         }
         Ok(next_configuration)
+    }
+
+    fn set_permission_profile_projection(
+        &mut self,
+        permission_profile: PermissionProfile,
+        preserve_deny_reads_from: Option<&FileSystemSandboxPolicy>,
+    ) -> ConstraintResult<()> {
+        let enforcement = permission_profile.enforcement();
+        let (mut file_system_sandbox_policy, network_sandbox_policy) =
+            permission_profile.to_runtime_permissions();
+        if let Some(existing_file_system_policy) = preserve_deny_reads_from {
+            file_system_sandbox_policy
+                .preserve_deny_read_restrictions_from(existing_file_system_policy);
+        }
+        let effective_permission_profile =
+            PermissionProfile::from_runtime_permissions_with_enforcement(
+                enforcement,
+                &file_system_sandbox_policy,
+                network_sandbox_policy,
+            );
+        self.permission_profile.set(effective_permission_profile)?;
+        Ok(())
     }
 }
 
@@ -224,6 +304,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) approvals_reviewer: Option<ApprovalsReviewer>,
     pub(crate) sandbox_policy: Option<SandboxPolicy>,
     pub(crate) permission_profile: Option<PermissionProfile>,
+    pub(crate) active_permission_profile: Option<ActivePermissionProfile>,
     pub(crate) windows_sandbox_level: Option<WindowsSandboxLevel>,
     pub(crate) collaboration_mode: Option<CollaborationMode>,
     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
@@ -330,7 +411,7 @@ impl Session {
                             Arc::clone(&thread_store),
                             ResumeThreadParams {
                                 thread_id: resumed_history.conversation_id,
-                                rollout_path: Some(resumed_history.rollout_path.clone()),
+                                rollout_path: resumed_history.rollout_path.clone(),
                                 history: Some(resumed_history.history.clone()),
                                 include_archived: true,
                                 event_persistence_mode,
@@ -364,10 +445,7 @@ impl Session {
             session_init.ephemeral = config.ephemeral,
         ));
 
-        let is_subagent = matches!(
-            session_configuration.session_source,
-            SessionSource::SubAgent(_)
-        );
+        let is_subagent = session_configuration.session_source.is_non_root_agent();
         let history_meta_fut = async {
             if is_subagent {
                 (0, 0)
@@ -443,7 +521,7 @@ impl Session {
                 model: session_configuration.collaboration_mode.model().to_string(),
                 provider_name: config.model_provider_id.clone(),
                 approval_policy: session_configuration.approval_policy.value().to_string(),
-                sandbox_policy: format!("{:?}", session_configuration.sandbox_policy.get()),
+                sandbox_policy: format!("{:?}", session_configuration.sandbox_policy()),
             };
             let rollout_thread_trace = if matches!(
                 session_configuration.session_source,
@@ -572,7 +650,9 @@ impl Session {
                 config.model_context_window,
                 config.model_auto_compact_token_limit,
                 config.permissions.approval_policy.value(),
-                config.permissions.sandbox_policy.get().clone(),
+                config
+                    .permissions
+                    .legacy_sandbox_policy(session_configuration.cwd.as_path()),
                 mcp_servers.keys().map(String::as_str).collect(),
                 config.active_profile.clone(),
             );
@@ -668,7 +748,7 @@ impl Session {
                     let (network_proxy, session_network_proxy) = Self::start_managed_network_proxy(
                         spec,
                         current_exec_policy.as_ref(),
-                        config.permissions.sandbox_policy.get(),
+                        config.permissions.permission_profile.get(),
                         network_policy_decider.as_ref().map(Arc::clone),
                         blocked_request_observer.as_ref().map(Arc::clone),
                         managed_network_requirements_configured,
@@ -686,17 +766,8 @@ impl Session {
                     (None, None)
                 };
 
-            let mut hook_shell_argv =
-                default_shell.derive_exec_args("", /*use_login_shell*/ false);
-            let hook_shell_program = hook_shell_argv.remove(0);
-            let _ = hook_shell_argv.pop();
-            let hooks = Hooks::new(HooksConfig {
-                legacy_notify_argv: config.notify.clone(),
-                feature_enabled: config.features.enabled(Feature::CodexHooks),
-                config_layer_stack: Some(config.config_layer_stack.clone()),
-                shell_program: Some(hook_shell_program),
-                shell_args: hook_shell_argv,
-            });
+            let hooks =
+                build_hooks_for_config(&config, plugins_manager.as_ref(), &default_shell).await;
             for warning in hooks.startup_warnings() {
                 post_session_configured_events.push(Event {
                     id: INITIAL_SUBMIT_ID.to_owned(),
@@ -724,7 +795,7 @@ impl Session {
                 // setup is straightforward enough and performs well.
                 mcp_connection_manager: Arc::new(RwLock::new(McpConnectionManager::new_uninitialized(
                     &config.permissions.approval_policy,
-                    &config.permissions.sandbox_policy,
+                    &config.permissions.permission_profile,
                 ))),
                 mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
                 unified_exec_manager: UnifiedExecProcessManager::new(
@@ -733,7 +804,7 @@ impl Session {
                 shell_zsh_path: config.zsh_path.clone(),
                 main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
                 analytics_events_client,
-                hooks,
+                hooks: arc_swap::ArcSwap::from_pointee(hooks),
                 rollout_thread_trace,
                 user_shell: Arc::new(default_shell),
                 shell_snapshot_tx,
@@ -771,18 +842,12 @@ impl Session {
                     model_client.set_force_service_tier_priority(config.force_service_tier_priority);
                     model_client
                 },
-                code_mode_service: crate::tools::code_mode::CodeModeService::new(
-                    config.js_repl_node_path.clone(),
-                ),
+                code_mode_service: crate::tools::code_mode::CodeModeService::new(),
                 environment_manager,
             };
             services
                 .model_client
                 .set_window_generation(window_generation);
-            let js_repl = Arc::new(JsReplHandle::with_node_path(
-                config.js_repl_node_path.clone(),
-                config.js_repl_node_module_dirs.clone(),
-            ));
             let (out_of_band_elicitation_paused, _out_of_band_elicitation_paused_rx) =
                 watch::channel(false);
 
@@ -802,9 +867,9 @@ impl Session {
                 mailbox,
                 mailbox_rx: Mutex::new(mailbox_rx),
                 idle_pending_input: Mutex::new(Vec::new()),
+                goal_runtime: GoalRuntimeState::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
-                js_repl,
                 next_internal_sub_id: AtomicU64::new(0),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
@@ -825,16 +890,16 @@ impl Session {
                     service_tier: session_configuration.service_tier,
                     approval_policy: session_configuration.approval_policy.value(),
                     approvals_reviewer: session_configuration.approvals_reviewer,
-                    sandbox_policy: session_configuration.sandbox_policy.get().clone(),
-                    permission_profile: Some(session_configuration.permission_profile()),
+                    permission_profile: session_configuration.permission_profile(),
+                    active_permission_profile: session_configuration.active_permission_profile(),
                     cwd: session_configuration.cwd.clone(),
                     reasoning_effort: session_configuration.collaboration_mode.reasoning_effort(),
                     history_log_id,
                     history_entry_count,
                     initial_messages,
                     network_proxy: session_network_proxy.filter(|_| {
-                        Self::managed_network_proxy_active_for_sandbox_policy(
-                            session_configuration.sandbox_policy.get(),
+                        Self::managed_network_proxy_active_for_permission_profile(
+                            session_configuration.permission_profile.get(),
                         )
                     }),
                     rollout_path,
@@ -868,7 +933,7 @@ impl Session {
                 &session_configuration.approval_policy,
                 INITIAL_SUBMIT_ID.to_owned(),
                 tx_event.clone(),
-                session_configuration.sandbox_policy.get().clone(),
+                session_configuration.permission_profile(),
                 McpRuntimeEnvironment::new(
                     sess.services
                         .environment_manager
@@ -945,12 +1010,6 @@ impl Session {
                     pending_first_turn_checklist_candidate_source,
                 );
             }
-
-            memories::start_memories_startup_task(
-                &sess,
-                Arc::clone(&config),
-                &session_configuration.session_source,
-            );
 
             Ok(sess)
         }

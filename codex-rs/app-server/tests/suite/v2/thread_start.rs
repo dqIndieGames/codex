@@ -20,9 +20,9 @@ use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
 use codex_app_server_protocol::TurnEnvironmentParams;
+use codex_config::loader::project_trust_key;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::set_project_trust_level;
-use codex_core::config_loader::project_trust_key;
 use codex_exec_server::LOCAL_FS;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
@@ -44,7 +44,7 @@ use wiremock::matchers::method;
 use wiremock::matchers::path;
 
 use super::analytics::assert_basic_thread_initialized_event;
-use super::analytics::mount_analytics_capture;
+use super::analytics::enable_analytics_capture;
 use super::analytics::thread_initialized_event;
 use super::analytics::wait_for_analytics_payload;
 
@@ -265,13 +265,8 @@ async fn thread_start_tracks_thread_initialized_analytics() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
 
     let codex_home = TempDir::new()?;
-    create_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        &server.uri(),
-        &server.uri(),
-        /*general_analytics_enabled*/ true,
-    )?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
+    create_config_toml_with_chatgpt_base_url(codex_home.path(), &server.uri(), &server.uri())?;
+    enable_analytics_capture(&server, codex_home.path()).await?;
 
     let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -298,12 +293,7 @@ async fn thread_start_does_not_track_thread_initialized_analytics_without_featur
     let server = create_mock_responses_server_repeating_assistant("Done").await;
 
     let codex_home = TempDir::new()?;
-    create_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        &server.uri(),
-        &server.uri(),
-        /*general_analytics_enabled*/ false,
-    )?;
+    create_config_toml_with_chatgpt_base_url(codex_home.path(), &server.uri(), &server.uri())?;
     mount_analytics_capture(&server, codex_home.path()).await?;
 
     let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
@@ -643,7 +633,6 @@ async fn thread_start_surfaces_cloud_requirements_load_errors() -> Result<()> {
         codex_home.path(),
         &model_server.uri(),
         &chatgpt_base_url,
-        /*general_analytics_enabled*/ false,
     )?;
     write_chatgpt_auth(
         codex_home.path(),
@@ -966,13 +955,7 @@ fn create_config_toml_with_chatgpt_base_url(
     codex_home: &Path,
     server_uri: &str,
     chatgpt_base_url: &str,
-    general_analytics_enabled: bool,
 ) -> std::io::Result<()> {
-    let general_analytics_toml = if general_analytics_enabled {
-        "\ngeneral_analytics = true".to_string()
-    } else {
-        "\ngeneral_analytics = false".to_string()
-    };
     let config_toml = codex_home.join("config.toml");
     std::fs::write(
         config_toml,
@@ -984,13 +967,6 @@ sandbox_mode = "read-only"
 chatgpt_base_url = "{chatgpt_base_url}"
 
 model_provider = "mock_provider"
-
-[analytics]
-enabled = true
-
-[features]
-{general_analytics_toml}
-
 [model_providers.mock_provider]
 name = "Mock provider for test"
 base_url = "{server_uri}/v1"

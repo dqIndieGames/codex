@@ -5,7 +5,6 @@ use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxKind;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::FileSystemSpecialPath;
-use codex_protocol::protocol::NetworkAccess;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use pretty_assertions::assert_eq;
 
@@ -52,8 +51,8 @@ async fn resumed_initial_messages_render_history() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: None,
+        permission_profile: codex_protocol::models::PermissionProfile::read_only(),
+        active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -237,8 +236,8 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: None,
+        permission_profile: codex_protocol::models::PermissionProfile::read_only(),
+        active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -299,8 +298,8 @@ async fn replayed_user_message_preserves_remote_image_urls() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: None,
+        permission_profile: codex_protocol::models::PermissionProfile::read_only(),
+        active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -352,12 +351,10 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         .expect("set approval policy");
     chat.config
         .permissions
-        .sandbox_policy
-        .set(SandboxPolicy::new_workspace_write_policy())
-        .expect("set sandbox policy");
+        .set_permission_profile(PermissionProfile::workspace_write())
+        .expect("set permission profile");
     chat.config.cwd = test_path_buf("/home/user/main").abs();
 
-    let expected_sandbox = SandboxPolicy::new_read_only_policy();
     let expected_cwd = test_path_buf("/home/user/sub-agent").abs();
     let expected_file_system_policy = FileSystemSandboxPolicy::restricted(vec![
         FileSystemSandboxEntry {
@@ -378,6 +375,9 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
             &expected_file_system_policy,
             NetworkSandboxPolicy::Restricted,
         );
+    let expected_sandbox = expected_permission_profile
+        .to_legacy_sandbox_policy(expected_cwd.as_path())
+        .expect("permission profile should project to legacy sandbox policy");
     let configured = codex_protocol::protocol::SessionConfiguredEvent {
         session_id: ThreadId::new(),
         forked_from_id: None,
@@ -387,8 +387,8 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        sandbox_policy: expected_sandbox.clone(),
-        permission_profile: Some(expected_permission_profile.clone()),
+        permission_profile: expected_permission_profile.clone(),
+        active_permission_profile: None,
         cwd: expected_cwd.clone(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -408,7 +408,7 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         AskForApproval::Never
     );
     assert_eq!(
-        chat.config_ref().permissions.sandbox_policy.get(),
+        &chat.config_ref().legacy_sandbox_policy(),
         &expected_sandbox
     );
     assert_eq!(
@@ -417,16 +417,13 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
     );
     assert_eq!(&chat.config_ref().cwd, &expected_cwd);
 
-    let updated_sandbox = SandboxPolicy::new_workspace_write_policy();
-    chat.set_sandbox_policy(updated_sandbox.clone())
-        .expect("set sandbox policy");
+    let updated_profile = PermissionProfile::workspace_write();
+    chat.set_permission_profile(updated_profile.clone())
+        .expect("set permission profile");
     assert_eq!(
         chat.config_ref().permissions.permission_profile(),
-        codex_protocol::models::PermissionProfile::from_legacy_sandbox_policy(
-            &updated_sandbox,
-            &expected_cwd
-        ),
-        "local sandbox changes should replace SessionConfigured profile-derived runtime permissions"
+        updated_profile,
+        "local permission changes should replace SessionConfigured profile-derived runtime permissions"
     );
 }
 
@@ -434,9 +431,12 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
 async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    let expected_sandbox = SandboxPolicy::ExternalSandbox {
-        network_access: NetworkAccess::Restricted,
+    let expected_permission_profile = PermissionProfile::External {
+        network: NetworkSandboxPolicy::Restricted,
     };
+    let expected_sandbox = expected_permission_profile
+        .to_legacy_sandbox_policy(test_path_buf("/home/user/external").as_path())
+        .expect("external profile should project to legacy sandbox policy");
     let configured = codex_protocol::protocol::SessionConfiguredEvent {
         session_id: ThreadId::new(),
         forked_from_id: None,
@@ -446,8 +446,8 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        sandbox_policy: expected_sandbox.clone(),
-        permission_profile: None,
+        permission_profile: expected_permission_profile,
+        active_permission_profile: None,
         cwd: test_path_buf("/home/user/external").abs(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -463,18 +463,18 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
     });
 
     assert_eq!(
-        chat.config_ref().permissions.sandbox_policy.get(),
+        &chat.config_ref().legacy_sandbox_policy(),
         &expected_sandbox
     );
     assert_eq!(
         chat.config_ref()
             .permissions
-            .file_system_sandbox_policy
+            .file_system_sandbox_policy()
             .kind,
         FileSystemSandboxKind::ExternalSandbox,
     );
     assert_eq!(
-        chat.config_ref().permissions.network_sandbox_policy,
+        chat.config_ref().permissions.network_sandbox_policy(),
         NetworkSandboxPolicy::Restricted,
     );
 }
@@ -496,8 +496,8 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: None,
+        permission_profile: codex_protocol::models::PermissionProfile::read_only(),
+        active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -550,8 +550,8 @@ async fn replayed_user_message_with_only_local_images_does_not_render_history_ce
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: None,
+        permission_profile: codex_protocol::models::PermissionProfile::read_only(),
+        active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         history_log_id: 0,
@@ -872,8 +872,8 @@ async fn replayed_reasoning_item_hides_raw_reasoning_when_disabled() {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            permission_profile: None,
+            permission_profile: codex_protocol::models::PermissionProfile::read_only(),
+            active_permission_profile: None,
             cwd: test_project_path().abs(),
             reasoning_effort: None,
             history_log_id: 0,
@@ -920,8 +920,8 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            permission_profile: None,
+            permission_profile: codex_protocol::models::PermissionProfile::read_only(),
+            active_permission_profile: None,
             cwd: test_project_path().abs(),
             reasoning_effort: None,
             history_log_id: 0,

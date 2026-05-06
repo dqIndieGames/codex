@@ -127,6 +127,7 @@ mod collaboration_modes;
 mod color;
 pub(crate) mod custom_terminal;
 pub use custom_terminal::Terminal;
+mod auto_review_denials;
 mod cwd_prompt;
 mod debug_config;
 mod diff_render;
@@ -138,10 +139,13 @@ mod external_editor;
 mod file_search;
 mod frames;
 mod get_git_diff;
+mod goal_display;
 mod history_cell;
 pub(crate) mod insert_history;
 pub use insert_history::insert_history_lines;
 mod key_hint;
+mod keymap;
+mod keymap_setup;
 mod line_truncation;
 pub(crate) mod live_wrap;
 pub use live_wrap::RowBuilder;
@@ -154,11 +158,15 @@ mod model_catalog;
 mod model_migration;
 mod multi_agents;
 mod notifications;
+#[cfg(any(not(debug_assertions), test))]
+mod npm_registry;
 pub(crate) mod onboarding;
 mod oss_selection;
 mod pager_overlay;
+mod permission_compat;
 pub(crate) mod public_widgets;
 mod render;
+mod resize_reflow_cap;
 mod resume_picker;
 mod selection_list;
 mod session_log;
@@ -174,15 +182,21 @@ mod terminal_title;
 mod text_formatting;
 mod theme_picker;
 mod tooltips;
+mod transcript_reflow;
 mod tui;
 mod ui_consts;
 pub(crate) mod update_action;
 pub use update_action::UpdateAction;
+#[cfg(not(debug_assertions))]
+pub use update_action::get_update_action;
 mod update_prompt;
+#[cfg(any(not(debug_assertions), test))]
+mod update_versions;
 mod updates;
 mod version;
 #[cfg(not(target_os = "linux"))]
 mod voice;
+mod width;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 mod voice {
@@ -715,12 +729,7 @@ pub async fn run_main(
         .cwd
         .clone()
         .filter(|_| matches!(app_server_target, AppServerTarget::Remote { .. }));
-    let (sandbox_mode, approval_policy) = if cli.full_auto {
-        (
-            Some(SandboxMode::WorkspaceWrite),
-            Some(AskForApproval::OnRequest),
-        )
-    } else if cli.dangerously_bypass_approvals_and_sandbox {
+    let (sandbox_mode, approval_policy) = if cli.dangerously_bypass_approvals_and_sandbox {
         (
             Some(SandboxMode::DangerFullAccess),
             Some(AskForApproval::Never),
@@ -764,12 +773,15 @@ pub async fn run_main(
         }
     };
 
-    let environment_manager = Arc::new(EnvironmentManager::new(EnvironmentManagerArgs::from_env(
-        ExecServerRuntimePaths::from_optional_paths(
-            arg0_paths.codex_self_exe.clone(),
-            arg0_paths.codex_linux_sandbox_exe.clone(),
-        )?,
-    )));
+    let environment_manager = Arc::new(
+        EnvironmentManager::new(EnvironmentManagerArgs::new(
+            ExecServerRuntimePaths::from_optional_paths(
+                arg0_paths.codex_self_exe.clone(),
+                arg0_paths.codex_linux_sandbox_exe.clone(),
+            )?,
+        ))
+        .await,
+    );
     let cwd = cli.cwd.clone();
     let config_cwd =
         config_cwd_for_app_server_target(cwd.as_deref(), &app_server_target, &environment_manager)?;
@@ -818,7 +830,8 @@ pub async fn run_main(
         /*enable_codex_api_key_env*/ false,
         config_toml.cli_auth_credentials_store.unwrap_or_default(),
         chatgpt_base_url,
-    );
+    )
+    .await;
 
     let model_provider_override = if cli.oss {
         let resolved = resolve_oss_provider(
@@ -898,9 +911,11 @@ pub async fn run_main(
 
     set_default_client_residency_requirement(config.enforce_residency.value());
 
-    if let Some(warning) =
-        add_dir_warning_message(&cli.add_dir, config.permissions.sandbox_policy.get())
-    {
+    if let Some(warning) = add_dir_warning_message(
+        &cli.add_dir,
+        &config.permissions.permission_profile(),
+        config.cwd.as_path(),
+    ) {
         #[allow(clippy::print_stderr)]
         {
             eprintln!("Error adding directories: {warning}");
@@ -915,7 +930,10 @@ pub async fn run_main(
             auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
             forced_login_method: config.forced_login_method,
             forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
-        }) {
+            chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
+        })
+        .await
+        {
             eprintln!("{err}");
             std::process::exit(1);
         }
@@ -1189,7 +1207,8 @@ async fn run_ratatui_app(
                 /*enable_codex_api_key_env*/ false,
                 initial_config.cli_auth_credentials_store_mode,
                 initial_config.chatgpt_base_url.clone(),
-            );
+            )
+            .await;
         }
 
         // If the user made an explicit trust decision, or we showed the login flow, reload config
@@ -1615,7 +1634,7 @@ pub(crate) async fn resolve_cwd_for_resume_or_fork(
     reason = "TUI should no longer be displayed, so we can write to stderr."
 )]
 fn restore() {
-    if let Err(err) = tui::restore() {
+    if let Err(err) = tui::restore_after_exit() {
         eprintln!(
             "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
         );
@@ -1634,7 +1653,7 @@ impl TerminalRestoreGuard {
     #[cfg_attr(debug_assertions, allow(dead_code))]
     fn restore(&mut self) -> color_eyre::Result<()> {
         if self.active {
-            crate::tui::restore()?;
+            crate::tui::restore_after_exit()?;
             self.active = false;
         }
         Ok(())
@@ -2090,14 +2109,14 @@ mod tests {
             Path::new("/definitely/not/local/to/this/test")
         };
         let target = AppServerTarget::Embedded;
-        let environment_manager =
-            EnvironmentManager::new(codex_exec_server::EnvironmentManagerArgs {
-                exec_server_url: Some("ws://127.0.0.1:8765".to_string()),
-                local_runtime_paths: ExecServerRuntimePaths::new(
-                    std::env::current_exe().expect("current exe"),
-                    /*codex_linux_sandbox_exe*/ None,
-                )?,
-            });
+        let environment_manager = EnvironmentManager::create_for_tests(
+            Some("ws://127.0.0.1:8765".to_string()),
+            ExecServerRuntimePaths::new(
+                std::env::current_exe().expect("current exe"),
+                /*codex_linux_sandbox_exe*/ None,
+            )?,
+        )
+        .await;
 
         let config_cwd =
             config_cwd_for_app_server_target(Some(remote_only_cwd), &target, &environment_manager)?;
@@ -2284,6 +2303,10 @@ mod tests {
             .model
             .clone()
             .unwrap_or_else(|| "gpt-5.1".to_string());
+        let permission_profile = config.permissions.permission_profile();
+        let sandbox_policy = permission_profile
+            .to_legacy_sandbox_policy(config.cwd.as_path())
+            .expect("configured permissions must have a legacy compatibility projection");
         TurnContextItem {
             turn_id: None,
             trace_id: None,
@@ -2291,8 +2314,8 @@ mod tests {
             current_date: None,
             timezone: None,
             approval_policy: config.permissions.approval_policy.value(),
-            sandbox_policy: config.permissions.sandbox_policy.get().clone(),
-            permission_profile: None,
+            sandbox_policy,
+            permission_profile: Some(permission_profile),
             network: None,
             file_system_sandbox_policy: None,
             model,
@@ -2414,6 +2437,7 @@ trust_level = "untrusted"
             ..Default::default()
         };
         let trusted_config = ConfigBuilder::default()
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
             .codex_home(codex_home.clone())
             .harness_overrides(trusted_overrides.clone())
             .build()
@@ -2428,6 +2452,7 @@ trust_level = "untrusted"
             ..trusted_overrides
         };
         let untrusted_config = ConfigBuilder::default()
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
             .codex_home(codex_home)
             .harness_overrides(untrusted_overrides)
             .build()

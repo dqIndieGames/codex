@@ -147,6 +147,10 @@ struct PickerPage {
 /// 1. Provider and source filtering at the backend. Resume defaults to all
 ///    providers, while fork keeps the current provider filter for local sessions.
 /// 2. Working-directory filtering at the picker (unless `--all` is passed).
+/// 1. Provider and source filtering at the backend. Resume defaults to all
+///    providers, while fork keeps the current provider filter for local sessions.
+/// 2. Typed search filtering over loaded rows in the picker.
+/// 3. Working-directory filtering at the picker (unless `--all` is passed).
 pub async fn run_resume_picker_with_app_server(
     tui: &mut Tui,
     config: &Config,
@@ -156,11 +160,12 @@ pub async fn run_resume_picker_with_app_server(
 ) -> Result<SessionSelection> {
     let (bg_tx, bg_rx) = mpsc::unbounded_channel();
     let is_remote = app_server.is_remote();
-    let cwd_filter = if show_all {
-        None
-    } else {
-        app_server.remote_cwd_override().map(Path::to_path_buf)
-    };
+    let cwd_filter = picker_cwd_filter(
+        config.cwd.as_path(),
+        show_all,
+        is_remote,
+        app_server.remote_cwd_override(),
+    );
     run_session_picker_with_loader(
         tui,
         config,
@@ -181,11 +186,12 @@ pub async fn run_fork_picker_with_app_server(
 ) -> Result<SessionSelection> {
     let (bg_tx, bg_rx) = mpsc::unbounded_channel();
     let is_remote = app_server.is_remote();
-    let cwd_filter = if show_all {
-        None
-    } else {
-        app_server.remote_cwd_override().map(Path::to_path_buf)
-    };
+    let cwd_filter = picker_cwd_filter(
+        config.cwd.as_path(),
+        show_all,
+        is_remote,
+        app_server.remote_cwd_override(),
+    );
     run_session_picker_with_loader(
         tui,
         config,
@@ -246,7 +252,7 @@ async fn run_session_picker_with_loader(
                             return Ok(sel);
                         }
                     }
-                    TuiEvent::Draw => {
+                    TuiEvent::Draw | TuiEvent::Resize => {
                         if let Ok(size) = alt.tui.terminal.size() {
                             let list_height = size.height.saturating_sub(4) as usize;
                             state.update_view_rows(list_height);
@@ -264,7 +270,7 @@ async fn run_session_picker_with_loader(
         }
     }
 
-    // Fallback – treat as cancel/new
+    // Fallback — treat as cancel/new
     Ok(SessionSelection::StartFresh)
 }
 
@@ -1593,6 +1599,28 @@ mod tests {
         };
 
         assert_eq!(row.display_preview(), "My session");
+    }
+
+    #[test]
+    fn local_picker_thread_list_params_include_cwd_filter() {
+        let cwd_filter = picker_cwd_filter(
+            Path::new("/tmp/project"),
+            /*show_all*/ false,
+            /*is_remote*/ false,
+            /*remote_cwd_override*/ None,
+        );
+        let params = thread_list_params(
+            Some(String::from("cursor-1")),
+            cwd_filter.as_deref(),
+            ProviderFilter::MatchDefault(String::from("openai")),
+            ThreadSortKey::UpdatedAt,
+            /*include_non_interactive*/ false,
+        );
+
+        assert_eq!(
+            params.cwd,
+            Some(ThreadListCwdFilter::One(String::from("/tmp/project")))
+        );
     }
 
     #[test]
