@@ -69,6 +69,11 @@ tmp/
 coverage/
 
 # codexflow temp artifacts
+.codexflow/临时/
+.codexflow/**/artifacts/
+.codexflow/**/capture-*/
+.codexflow/**/.tmp/
+.codexflow/**/server/
 .codexflow/**/*.stderr.txt
 .codexflow/**/*.stdout.txt
 .codexflow/**/tmp-release/
