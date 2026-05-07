@@ -81,9 +81,7 @@ pub fn should_retry_request_error(
     match err {
         TransportError::Http { status, body, .. } => {
             if route.is_responses() {
-                if status.as_u16() == 429 && body_is_usage_limit(body.as_deref()) {
-                    return false;
-                }
+                let _ = body;
                 return responses_http_status_is_retryable(*status);
             }
 
@@ -320,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_requests_do_not_retry_terminal_usage_limit_429() {
+    fn responses_requests_retry_usage_limit_429() {
         let policy = RetryPolicy {
             max_attempts: 4,
             base_delay: Duration::from_millis(200),
@@ -341,7 +339,7 @@ mod tests {
             ),
         };
 
-        assert!(!should_retry_request_error(
+        assert!(should_retry_request_error(
             &policy,
             RequestRetryRoute::Responses,
             &err,
