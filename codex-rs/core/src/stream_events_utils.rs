@@ -33,37 +33,11 @@ use tracing::debug;
 use tracing::instrument;
 
 const GENERATED_IMAGE_ARTIFACTS_DIR: &str = "generated_images";
-const LOCAL3_CHECKLIST_TABLE: &str = r#"
-| `L3-F0` | local3 当前显示版本 | 当前 Codex 展示版本口径为 `<Codex 版本>-local3`；后续合并到更高 upstream 版本时，应继续保留 `-local3` 本地构建身份后缀。 |
-| `L3-F1` | local3 版本显示 | CLI、TUI、状态卡片、标题区、历史单元、升级提示等用户可见位置，都要显示 local3 本地构建身份，不能被 upstream 合并改回官方裸版本。 |
-| `L3-F2` | local3 版本显示测试保护 | 和 local3 版本显示直接相关的断言、快照或等效测试保护要保留；合并 upstream 后，如果版本显示被冲掉，应能被测试或静态复核发现。 |
-| `L3-F3` | “你好”首轮显示清单 | brand-new thread 或 Clear 后的新线程，首个普通用户输入恰好为纯文本 `你好` 时，首个 assistant 主消息第一段必须显示固定 local3 功能清单；该清单必须显式包含当前版本后缀 `<Codex 版本>-local3` 以及 `L3-F0` 到 `L3-F25` 全量条目。 |
-| `L3-F4` | “你好”清单只显示一次 | 同一线程后续轮次、resume、continue、fork、历史线程重开、MCP `codex-reply` 都不能重复插入这段清单；subagent、reviewer、guardian 等子会话也不能触发。 |
-| `L3-F5` | “你好”清单走普通 assistant 主消息 | 清单必须作为普通 assistant 主消息的首段文本跨 CLI、app-server、VS Code、MCP 一致可见；不能退回 TUI 专用 banner、status、计划事件、history cell 或客户端旁路。 |
-| `L3-F6` | `/responses` 远端 HTTP 错误统一自动重试 | `/responses` 主链远端 HTTP 错误统一进入普通自动 retry，包含 `401`，不再只依赖 `402`、`429`、`5xx` 白名单。 |
-| `L3-F7` | 非 `/responses` 端点保留旧重试白名单 | 非 `/responses` 端点继续只按旧口径重试：`402 usage-limit`、`429`、`5xx`、传输层错误；非 usage-limit 的 `402` 不能被误判为可重试。 |
-| `L3-F8` | `401` 走普通 retry | `/responses` 主链执行中出现 `401` 时，request-layer、stream、websocket reconnect、fallback to HTTP 都直接走普通 retry；不能退回 unauthorized recovery 优先分支，也不能直接终止。 |
-| `L3-F9` | retry 次数保持大次数或等效无界目标 | 普通主链 retry 的 bounded/unbounded 语义要保留；分类扩展不能被误改成很少次数的短 retry，也不能把中间 retry 误当终态失败。 |
-| `L3-F10` | 单次 retry 等待上限为 `10s` | 无论 HTTP 错误分类扩展到多少，单次指数退避或 `Retry-After` 等待都不能超过 `10s`。 |
-| `L3-F11` | retry 中间态不写入历史 | `/responses` 主链 retry 或 reconnect 的中间态只更新状态区和状态详情，不往历史区写入脏错误记录；只有最终失败才进入终态错误路径。 |
-| `L3-F12` | retry 可见提示保留 | 首个 websocket retry、`Reconnecting... N`、retry 详情字段、`additional_details`、`request_retry_notifier`、`will_retry = true` 等用户可见或可诊断提示不能丢。 |
-| `L3-F13` | retry 日志降噪 | `/responses` retry 中间态不再刷 `codex.api_request`、`codex.websocket_connect`、`codex.websocket_request`、失败型 `codex.websocket_event` 的中间态 OTEL log-trace；sampling reconnect warn 也不能刷屏。 |
-| `L3-F14` | retry metrics 保留 | retry 中间态 metrics 继续保留；不能因为降噪把可观测统计一起删掉。 |
-| `L3-F15` | 历史默认跨 provider 可发现 | 历史列表、最近会话、resume picker 默认不按 provider 过滤；继续旧线程时执行仍使用当前 `config.toml` 顶层 provider。 |
-| `L3-F16` | provider provenance 不作为保真要求 | 历史与 resume 默认跨 provider 可发现；不要求 `thread/list` 历史 provider provenance 保真。 |
-| `L3-F17` | 全局 `service_tier=priority` 默认开启 | 顶层 `force_service_tier_priority` 省略或显式 `true` 时，所有 `/responses` 请求在底层构造时强制带 `service_tier=priority`。 |
-| `L3-F18` | `force_service_tier_priority = false` 恢复官方映射 | 顶层显式 `false` 时恢复官方原始映射：`Fast -> priority`、`Flex -> flex`、`None -> unset`，不能误压 `flex`。 |
-| `L3-F19` | `force_service_tier_priority` 只允许顶层配置 | 该字段只允许写在顶层 `config.toml`；任何 `[profiles.*].force_service_tier_priority` 都不得生效。 |
-| `L3-F20` | Windows app/app-server 默认日志降噪 | 未显式设置 `RUST_LOG` 时，Windows app/app-server 默认日志过滤为 warn 级别，不能高噪声写入 sqlite 日志；显式 `RUST_LOG` 时仍可覆盖。 |
-| `L3-F21` | TUI 默认日志降噪 | 未显式设置 `RUST_LOG` 时，`codex-tui.log` 与 TUI sqlite log layer 默认降噪；显式 `RUST_LOG` 时仍可恢复详细日志。 |
-| `L3-F22` | rollout 批量 flush 优化默认关闭 | `rollout` 写盘批量 flush 只能作为显式可选 runtime 优化保留，默认必须关闭；未在 `config.toml` 中明确开启时，不能静默改变会话过程记录落盘时机、崩溃恢复口径或历史可恢复性。 |
-| `L3-F23` | app-server 高频通知合并默认关闭 | `app-server` 高频通知合并/节流只能作为显式可选 runtime 优化保留，默认必须关闭；未在 `config.toml` 中明确开启时，命令输出 delta、文件变更 delta、token usage、diff/plan 更新等客户端可见事件不能被静默批量合并或延迟。 |
-| `L3-F24` | analytics / feedback / log_db 默认关闭并可配置开启 | `analytics`、`feedback`、`log_db` 必须支持分层配置开关，local3 默认关闭这些非必要 runtime 负担；需要产品统计、用户反馈上传或本地 sqlite 日志排查时，必须能通过 `config.toml` 显式打开对应能力。 |
-| `L3-F25` | Provider refresh/retry 与 Windows tray 两字段联动 | Provider runtime 刷新口径必须继续只覆盖 `base_url` 与 `experimental_bearer_token` 两字段；Windows tray 的 source provider 字段复制只允许复制这两字段到当前 target provider，写入成功后再尝试 refresh；无 live instance 也视为成功并给出“未刷新任何实例”反馈。 |
-"#;
+const LOCAL3_CHECKLIST_TABLE: &str =
+    include_str!("../../../docs/local3-custom-feature-checklist-2026-05-10.md");
 
 fn local3_first_turn_checklist_entries() -> Vec<(String, String, String)> {
-    LOCAL3_CHECKLIST_TABLE
+    let entries = LOCAL3_CHECKLIST_TABLE
         .lines()
         .filter_map(|line| {
             let trimmed = line.trim();
@@ -86,7 +60,21 @@ fn local3_first_turn_checklist_entries() -> Vec<(String, String, String)> {
 
             Some((id.to_string(), parts[1].to_string(), parts[2].to_string()))
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    let expected_ids = (0..=25)
+        .map(|index| format!("L3-F{index}"))
+        .collect::<Vec<_>>();
+    let actual_ids = entries
+        .iter()
+        .map(|(id, _, _)| id.clone())
+        .collect::<Vec<_>>();
+    debug_assert_eq!(
+        actual_ids, expected_ids,
+        "local3 checklist rows must contain L3-F0..L3-F25 in order"
+    );
+
+    entries
 }
 
 pub(crate) fn local1_first_turn_checklist_prefix() -> String {

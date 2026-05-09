@@ -209,9 +209,15 @@ fn local1_first_turn_checklist_prefix_contains_expected_sections() {
 #[test]
 fn local1_first_turn_checklist_prefix_contains_all_l3_rows() {
     let entries = local3_first_turn_checklist_entries();
-    assert_eq!(entries.len(), 26);
-    assert_eq!(entries.first().map(|(id, _, _)| id.as_str()), Some("L3-F0"));
-    assert_eq!(entries.last().map(|(id, _, _)| id.as_str()), Some("L3-F25"));
+    let actual_ids = entries
+        .iter()
+        .map(|(id, _, _)| id.as_str())
+        .collect::<Vec<_>>();
+    let expected_ids = (0..=25)
+        .map(|index| format!("L3-F{index}"))
+        .collect::<Vec<_>>();
+    let expected_ids = expected_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_eq!(actual_ids, expected_ids);
 }
 
 #[test]
