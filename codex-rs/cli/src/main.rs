@@ -67,7 +67,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
 use codex_terminal_detection::TerminalName;
 
-const CODEX_CLI_DISPLAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local2");
+const CODEX_CLI_DISPLAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local3");
 
 /// Codex CLI
 ///

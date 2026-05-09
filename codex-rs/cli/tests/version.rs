@@ -11,14 +11,17 @@ fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
 }
 
 #[test]
-fn version_output_includes_local2_suffix() -> Result<()> {
+fn version_output_includes_local3_suffix() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut cmd = codex_command(codex_home.path())?;
     let output = cmd.arg("--version").output()?;
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout)?;
-    assert_eq!(stdout.trim(), format!("codex-cli {}-local2", env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        stdout.trim(),
+        format!("codex-cli {}-local3", env!("CARGO_PKG_VERSION"))
+    );
 
     Ok(())
 }

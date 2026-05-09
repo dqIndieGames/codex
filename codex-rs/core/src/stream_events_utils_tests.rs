@@ -4,6 +4,7 @@ use super::handle_non_tool_response_item;
 use super::image_generation_artifact_path;
 use super::last_assistant_message_from_item;
 use super::local1_first_turn_checklist_prefix;
+use super::local3_first_turn_checklist_entries;
 use super::prepend_local1_first_turn_checklist;
 use super::prepend_text_to_assistant_response_item;
 use super::response_item_may_include_external_context;
@@ -195,11 +196,22 @@ fn last_assistant_message_from_item_returns_none_for_plan_only_hidden_message() 
 fn local1_first_turn_checklist_prefix_contains_expected_sections() {
     let prefix = local1_first_turn_checklist_prefix();
 
-    assert!(prefix.starts_with("local2 定制功能已启用：\n\n- 版本显示统一保留 `-local2`。"));
-    assert!(!prefix.contains("Provider refresh/retry 与 Windows tray 联动"));
-    assert!(!prefix.contains("Provider runtime 热刷新"));
+    assert!(prefix.starts_with(&format!(
+        "local3 定制功能已启用（当前版本：{}-local3）",
+        env!("CARGO_PKG_VERSION")
+    )));
+    assert!(prefix.contains("L3-F25 Provider refresh/retry 与 Windows tray 两字段联动"));
+    assert!(!prefix.contains("-local2"));
     assert!(prefix.contains("force_service_tier_priority"));
     assert!(prefix.ends_with("\n\n"));
+}
+
+#[test]
+fn local1_first_turn_checklist_prefix_contains_all_l3_rows() {
+    let entries = local3_first_turn_checklist_entries();
+    assert_eq!(entries.len(), 26);
+    assert_eq!(entries.first().map(|(id, _, _)| id.as_str()), Some("L3-F0"));
+    assert_eq!(entries.last().map(|(id, _, _)| id.as_str()), Some("L3-F25"));
 }
 
 #[test]
