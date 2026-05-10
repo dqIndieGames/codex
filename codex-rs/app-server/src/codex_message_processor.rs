@@ -4485,6 +4485,7 @@ impl CodexMessageProcessor {
                         return;
                     }
                 };
+                thread.model_provider = session_configured.model_provider_id.clone();
 
                 self.thread_watch_manager
                     .upsert_thread(thread.clone())
@@ -4578,7 +4579,14 @@ impl CodexMessageProcessor {
             .await
             .ok()
             .flatten()?;
-        merge_persisted_resume_metadata(request_overrides, typesafe_overrides, &persisted_metadata);
+        let preserve_persisted_model_provider =
+            resumed_history_contains_encrypted_provider_bound_items(thread_history);
+        merge_persisted_resume_metadata(
+            request_overrides,
+            typesafe_overrides,
+            &persisted_metadata,
+            preserve_persisted_model_provider,
+        );
         Some(persisted_metadata)
     }
 
@@ -8458,6 +8466,7 @@ async fn handle_pending_thread_resume_request(
         reasoning_effort,
         ..
     } = pending.config_snapshot;
+    thread.model_provider = model_provider_id.clone();
     let instruction_sources = pending.instruction_sources;
     let sandbox = thread_response_sandbox_policy(&permission_profile, cwd.as_path());
     let active_permission_profile =
@@ -8742,13 +8751,16 @@ fn merge_persisted_resume_metadata(
     request_overrides: &mut Option<HashMap<String, serde_json::Value>>,
     typesafe_overrides: &mut ConfigOverrides,
     persisted_metadata: &ThreadMetadata,
+    preserve_persisted_model_provider: bool,
 ) {
     if has_model_resume_override(request_overrides.as_ref(), typesafe_overrides) {
         return;
     }
 
     typesafe_overrides.model = persisted_metadata.model.clone();
-    typesafe_overrides.model_provider = Some(persisted_metadata.model_provider.clone());
+    if preserve_persisted_model_provider {
+        typesafe_overrides.model_provider = Some(persisted_metadata.model_provider.clone());
+    }
 
     if let Some(reasoning_effort) = persisted_metadata.reasoning_effort {
         request_overrides.get_or_insert_with(HashMap::new).insert(
@@ -8767,6 +8779,44 @@ fn has_model_resume_override(
         || request_overrides.is_some_and(|overrides| overrides.contains_key("model"))
         || request_overrides
             .is_some_and(|overrides| overrides.contains_key("model_reasoning_effort"))
+}
+
+fn resumed_history_contains_encrypted_provider_bound_items(
+    thread_history: &InitialHistory,
+) -> bool {
+    let InitialHistory::Resumed(resumed_history) = thread_history else {
+        return false;
+    };
+
+    resumed_history
+        .history
+        .iter()
+        .any(|rollout_item| match rollout_item {
+            RolloutItem::ResponseItem(response_item) => {
+                response_item_contains_encrypted_provider_bound_payload(response_item)
+            }
+            RolloutItem::Compacted(compacted_item) => compacted_item
+                .replacement_history
+                .as_ref()
+                .is_some_and(|replacement_history| {
+                    replacement_history
+                        .iter()
+                        .any(response_item_contains_encrypted_provider_bound_payload)
+                }),
+            _ => false,
+        })
+}
+
+fn response_item_contains_encrypted_provider_bound_payload(response_item: &ResponseItem) -> bool {
+    match response_item {
+        ResponseItem::Reasoning {
+            encrypted_content, ..
+        } => encrypted_content
+            .as_deref()
+            .is_some_and(|content| !content.trim().is_empty()),
+        ResponseItem::Compaction { encrypted_content } => !encrypted_content.trim().is_empty(),
+        _ => false,
+    }
 }
 
 fn skills_to_info(
@@ -10505,16 +10555,14 @@ mod tests {
             &mut request_overrides,
             &mut typesafe_overrides,
             &persisted_metadata,
+            /*preserve_persisted_model_provider*/ false,
         );
 
         assert_eq!(
             typesafe_overrides.model,
             Some("gpt-5.1-codex-max".to_string())
         );
-        assert_eq!(
-            typesafe_overrides.model_provider,
-            Some("mock_provider".to_string())
-        );
+        assert_eq!(typesafe_overrides.model_provider, None);
         assert_eq!(
             request_overrides,
             Some(HashMap::from([(
@@ -10542,6 +10590,7 @@ mod tests {
             &mut request_overrides,
             &mut typesafe_overrides,
             &persisted_metadata,
+            /*preserve_persisted_model_provider*/ false,
         );
 
         assert_eq!(typesafe_overrides.model, Some("gpt-5.2-codex".to_string()));
@@ -10571,6 +10620,7 @@ mod tests {
             &mut request_overrides,
             &mut typesafe_overrides,
             &persisted_metadata,
+            /*preserve_persisted_model_provider*/ false,
         );
 
         assert_eq!(typesafe_overrides.model, None);
@@ -10600,6 +10650,7 @@ mod tests {
             &mut request_overrides,
             &mut typesafe_overrides,
             &persisted_metadata,
+            /*preserve_persisted_model_provider*/ false,
         );
 
         assert_eq!(typesafe_overrides.model, None);
@@ -10623,6 +10674,7 @@ mod tests {
             &mut request_overrides,
             &mut typesafe_overrides,
             &persisted_metadata,
+            /*preserve_persisted_model_provider*/ false,
         );
 
         assert_eq!(typesafe_overrides.model, None);
@@ -10648,15 +10700,138 @@ mod tests {
             &mut request_overrides,
             &mut typesafe_overrides,
             &persisted_metadata,
+            /*preserve_persisted_model_provider*/ false,
         );
 
         assert_eq!(typesafe_overrides.model, None);
+        assert_eq!(typesafe_overrides.model_provider, None);
+        assert_eq!(request_overrides, None);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_persisted_resume_metadata_preserves_provider_when_requested() -> Result<()> {
+        let mut request_overrides = None;
+        let mut typesafe_overrides = ConfigOverrides::default();
+        let persisted_metadata =
+            test_thread_metadata(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High))?;
+
+        merge_persisted_resume_metadata(
+            &mut request_overrides,
+            &mut typesafe_overrides,
+            &persisted_metadata,
+            /*preserve_persisted_model_provider*/ true,
+        );
+
+        assert_eq!(
+            typesafe_overrides.model,
+            Some("gpt-5.1-codex-max".to_string())
+        );
         assert_eq!(
             typesafe_overrides.model_provider,
             Some("mock_provider".to_string())
         );
-        assert_eq!(request_overrides, None);
+        assert_eq!(
+            request_overrides,
+            Some(HashMap::from([(
+                "model_reasoning_effort".to_string(),
+                serde_json::Value::String("high".to_string()),
+            )]))
+        );
         Ok(())
+    }
+
+    #[test]
+    fn resumed_history_contains_encrypted_provider_bound_items_detects_compaction_payload() {
+        let thread_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::new(),
+            history: vec![RolloutItem::ResponseItem(ResponseItem::Compaction {
+                encrypted_content: "encrypted".to_string(),
+            })],
+            rollout_path: PathBuf::from("resume.rollout"),
+        });
+
+        assert!(resumed_history_contains_encrypted_provider_bound_items(
+            &thread_history
+        ));
+    }
+
+    #[test]
+    fn resumed_history_contains_encrypted_provider_bound_items_detects_reasoning_payload() {
+        let thread_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::new(),
+            history: vec![RolloutItem::ResponseItem(ResponseItem::Reasoning {
+                id: "reasoning-id".to_string(),
+                summary: vec![],
+                content: None,
+                encrypted_content: Some("encrypted".to_string()),
+            })],
+            rollout_path: PathBuf::from("resume.rollout"),
+        });
+
+        assert!(resumed_history_contains_encrypted_provider_bound_items(
+            &thread_history
+        ));
+    }
+
+    #[test]
+    fn resumed_history_contains_encrypted_provider_bound_items_detects_compacted_replacement_payload()
+     {
+        let thread_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::new(),
+            history: vec![RolloutItem::Compacted(
+                codex_protocol::protocol::CompactedItem {
+                    message: "compact-summary".to_string(),
+                    replacement_history: Some(vec![ResponseItem::Compaction {
+                        encrypted_content: "encrypted".to_string(),
+                    }]),
+                },
+            )],
+            rollout_path: PathBuf::from("resume.rollout"),
+        });
+
+        assert!(resumed_history_contains_encrypted_provider_bound_items(
+            &thread_history
+        ));
+    }
+
+    #[test]
+    fn resumed_history_contains_encrypted_provider_bound_items_detects_compacted_reasoning_payload()
+    {
+        let thread_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::new(),
+            history: vec![RolloutItem::Compacted(
+                codex_protocol::protocol::CompactedItem {
+                    message: "compact-summary".to_string(),
+                    replacement_history: Some(vec![ResponseItem::Reasoning {
+                        id: "reasoning-id".to_string(),
+                        summary: vec![],
+                        content: None,
+                        encrypted_content: Some("encrypted".to_string()),
+                    }]),
+                },
+            )],
+            rollout_path: PathBuf::from("resume.rollout"),
+        });
+
+        assert!(resumed_history_contains_encrypted_provider_bound_items(
+            &thread_history
+        ));
+    }
+
+    #[test]
+    fn resumed_history_contains_encrypted_provider_bound_items_ignores_empty_payloads() {
+        let thread_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::new(),
+            history: vec![RolloutItem::ResponseItem(ResponseItem::Compaction {
+                encrypted_content: "   ".to_string(),
+            })],
+            rollout_path: PathBuf::from("resume.rollout"),
+        });
+
+        assert!(!resumed_history_contains_encrypted_provider_bound_items(
+            &thread_history
+        ));
     }
 
     #[test]
