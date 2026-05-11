@@ -1,5 +1,12 @@
 use super::*;
 use crate::error_code::method_not_found;
+use codex_app_server_protocol::ThreadProviderRuntimeRefreshAllLoadedParams;
+use codex_app_server_protocol::ThreadProviderRuntimeRefreshAllLoadedResponse;
+use codex_app_server_protocol::ThreadProviderRuntimeRefreshFailure;
+use codex_app_server_protocol::ThreadProviderRuntimeRefreshParams;
+use codex_app_server_protocol::ThreadProviderRuntimeRefreshResponse;
+use codex_app_server_protocol::ThreadProviderRuntimeRefreshStatus as ApiThreadProviderRuntimeRefreshStatus;
+use codex_core::ProviderRuntimeRefreshStatus as CoreProviderRuntimeRefreshStatus;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -556,6 +563,24 @@ impl ThreadRequestProcessor {
             .map(|()| None)
     }
 
+    pub(crate) async fn thread_provider_runtime_refresh(
+        &self,
+        params: ThreadProviderRuntimeRefreshParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.thread_provider_runtime_refresh_response_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn thread_provider_runtime_refresh_all_loaded(
+        &self,
+        params: ThreadProviderRuntimeRefreshAllLoadedParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.thread_provider_runtime_refresh_all_loaded_response_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     pub(crate) async fn thread_list(
         &self,
         params: ThreadListParams,
@@ -628,6 +653,63 @@ impl ThreadRequestProcessor {
         self.get_thread_summary_response_inner(params)
             .await
             .map(|response| Some(response.into()))
+    }
+
+    async fn thread_provider_runtime_refresh_response_inner(
+        &self,
+        params: ThreadProviderRuntimeRefreshParams,
+    ) -> Result<ThreadProviderRuntimeRefreshResponse, JSONRPCErrorError> {
+        fn provider_runtime_refresh_error(err: CodexErr) -> JSONRPCErrorError {
+            match err {
+                CodexErr::InvalidRequest(message) => {
+                    invalid_request(format!("failed to refresh provider runtime: {message}"))
+                }
+                err => internal_error(format!("failed to refresh provider runtime: {err}")),
+            }
+        }
+
+        let ThreadProviderRuntimeRefreshParams { thread_id } = params;
+        let (_thread_uuid, thread) = self.load_thread(&thread_id).await?;
+
+        let status = match thread.refresh_provider_runtime().await {
+            Ok(CoreProviderRuntimeRefreshStatus::Applied) => {
+                ApiThreadProviderRuntimeRefreshStatus::Applied
+            }
+            Ok(CoreProviderRuntimeRefreshStatus::Queued) => {
+                ApiThreadProviderRuntimeRefreshStatus::Queued
+            }
+            Err(err) => return Err(provider_runtime_refresh_error(err)),
+        };
+
+        Ok(ThreadProviderRuntimeRefreshResponse { thread_id, status })
+    }
+
+    async fn thread_provider_runtime_refresh_all_loaded_response_inner(
+        &self,
+        _params: ThreadProviderRuntimeRefreshAllLoadedParams,
+    ) -> Result<ThreadProviderRuntimeRefreshAllLoadedResponse, JSONRPCErrorError> {
+        let report = self.thread_manager.refresh_all_loaded_provider_runtime().await;
+        Ok(ThreadProviderRuntimeRefreshAllLoadedResponse {
+            total_threads: report.total_threads as u32,
+            applied_thread_ids: report
+                .applied_thread_ids
+                .into_iter()
+                .map(|thread_id| thread_id.to_string())
+                .collect(),
+            queued_thread_ids: report
+                .queued_thread_ids
+                .into_iter()
+                .map(|thread_id| thread_id.to_string())
+                .collect(),
+            failed_threads: report
+                .failed_threads
+                .into_iter()
+                .map(|failure| ThreadProviderRuntimeRefreshFailure {
+                    thread_id: failure.thread_id.to_string(),
+                    message: failure.message,
+                })
+                .collect(),
+        })
     }
 
     async fn instruction_sources_from_config(config: &Config) -> Vec<AbsolutePathBuf> {
@@ -3293,7 +3375,7 @@ impl ThreadRequestProcessor {
                     Some(providers)
                 }
             }
-            None => Some(vec![self.config.model_provider_id.clone()]),
+            None => None,
         };
         let (allowed_sources_vec, source_kind_filter) = compute_source_filters(source_kinds);
         let allowed_sources = allowed_sources_vec.as_slice();

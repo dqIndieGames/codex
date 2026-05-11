@@ -1009,6 +1009,16 @@ impl MessageProcessor {
                     .thread_rollback(&request_id, params)
                     .await
             }
+            ClientRequest::ThreadProviderRuntimeRefresh { params, .. } => {
+                self.thread_processor
+                    .thread_provider_runtime_refresh(params)
+                    .await
+            }
+            ClientRequest::ThreadProviderRuntimeRefreshAllLoaded { params, .. } => {
+                self.thread_processor
+                    .thread_provider_runtime_refresh_all_loaded(params)
+                    .await
+            }
             ClientRequest::ThreadList { params, .. } => {
                 self.thread_processor.thread_list(params).await
             }
