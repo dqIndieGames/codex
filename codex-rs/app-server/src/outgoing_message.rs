@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::ClientResponsePayload;
@@ -16,7 +17,6 @@ use codex_app_server_protocol::ServerRequestPayload;
 use codex_otel::span_w3c_trace_context;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::W3cTraceContext;
-use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -25,9 +25,13 @@ use tracing::Instrument;
 use tracing::Span;
 use tracing::warn;
 
-use crate::error_code::INTERNAL_ERROR_CODE;
 use crate::error_code::internal_error;
 use crate::server_request_error::TURN_TRANSITION_PENDING_REQUEST_ERROR_REASON;
+pub(crate) use codex_app_server_transport::ConnectionId;
+pub(crate) use codex_app_server_transport::OutgoingError;
+pub(crate) use codex_app_server_transport::OutgoingMessage;
+pub(crate) use codex_app_server_transport::OutgoingResponse;
+pub(crate) use codex_app_server_transport::QueuedOutgoingMessage;
 
 #[cfg(test)]
 use codex_protocol::account::PlanType;
@@ -35,16 +39,6 @@ use codex_protocol::account::PlanType;
 const NOTIFICATION_COALESCING_WINDOW: Duration = Duration::from_millis(150);
 
 pub(crate) type ClientRequestResult = std::result::Result<Result, JSONRPCErrorError>;
-
-/// Stable identifier for a transport connection.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ConnectionId(pub(crate) u64);
-
-impl fmt::Display for ConnectionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 /// Stable identifier for a client request scoped to a transport connection.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -98,21 +92,6 @@ pub(crate) enum OutgoingEnvelope {
     Broadcast {
         message: OutgoingMessage,
     },
-}
-
-#[derive(Debug)]
-pub(crate) struct QueuedOutgoingMessage {
-    pub(crate) message: OutgoingMessage,
-    pub(crate) write_complete_tx: Option<oneshot::Sender<()>>,
-}
-
-impl QueuedOutgoingMessage {
-    pub(crate) fn new(message: OutgoingMessage) -> Self {
-        Self {
-            message,
-            write_complete_tx: None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -384,6 +363,9 @@ impl ThreadScopedOutgoingMessageSender {
     }
 
     pub(crate) async fn send_server_notification(&self, notification: ServerNotification) {
+        self.outgoing
+            .analytics_events_client
+            .track_notification(notification.clone());
         if self.connection_ids.is_empty() {
             return;
         }
@@ -400,11 +382,14 @@ impl ThreadScopedOutgoingMessageSender {
         self.outgoing
             .cancel_requests_for_thread(
                 self.thread_id,
-                Some(JSONRPCErrorError {
-                    code: INTERNAL_ERROR_CODE,
-                    message: "client request resolved because the turn state was changed"
-                        .to_string(),
-                    data: Some(serde_json::json!({ "reason": TURN_TRANSITION_PENDING_REQUEST_ERROR_REASON })),
+                Some({
+                    let mut error = internal_error(
+                        "client request resolved because the turn state was changed",
+                    );
+                    error.data = Some(serde_json::json!({
+                        "reason": TURN_TRANSITION_PENDING_REQUEST_ERROR_REASON,
+                    }));
+                    error
                 }),
             )
             .await
@@ -648,8 +633,10 @@ impl OutgoingMessageSender {
 
         match entry {
             Some((id, entry)) => {
+                let completed_at_ms = now_unix_timestamp_ms();
                 if let Ok(response) = entry.request.response_from_result(result.clone()) {
-                    self.analytics_events_client.track_server_response(response);
+                    self.analytics_events_client
+                        .track_server_response(completed_at_ms, response);
                 }
                 if let Err(err) = entry.callback.send(Ok(result)) {
                     warn!("could not notify callback for {id:?} due to: {err:?}");
@@ -953,28 +940,13 @@ impl OutgoingMessageSender {
     }
 }
 
-/// Outgoing message from the server to the client.
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-pub(crate) enum OutgoingMessage {
-    Request(ServerRequest),
-    /// AppServerNotification is specific to the case where this is run as an
-    /// "app server" as opposed to an MCP server.
-    AppServerNotification(ServerNotification),
-    Response(OutgoingResponse),
-    Error(OutgoingError),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct OutgoingResponse {
-    pub id: RequestId,
-    pub result: Result,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct OutgoingError {
-    pub error: JSONRPCErrorError,
-    pub id: RequestId,
+fn now_unix_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -986,8 +958,8 @@ mod tests {
     use codex_app_server_protocol::AccountUpdatedNotification;
     use codex_app_server_protocol::ApplyPatchApprovalParams;
     use codex_app_server_protocol::AuthMode;
-    use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
     use codex_app_server_protocol::CommandExecutionApprovalDecision;
+    use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
     use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
     use codex_app_server_protocol::ConfigWarningNotification;
     use codex_app_server_protocol::DynamicToolCallParams;
@@ -1000,11 +972,11 @@ mod tests {
     use codex_app_server_protocol::ModelVerificationNotification;
     use codex_app_server_protocol::RateLimitSnapshot;
     use codex_app_server_protocol::RateLimitWindow;
+    use codex_app_server_protocol::ServerResponse;
     use codex_app_server_protocol::ThreadTokenUsage;
     use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
-    use codex_app_server_protocol::ServerResponse;
-    use codex_app_server_protocol::ToolRequestUserInputParams;
     use codex_app_server_protocol::TokenUsageBreakdown;
+    use codex_app_server_protocol::ToolRequestUserInputParams;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnCompletedNotification;
     use codex_app_server_protocol::TurnDiffUpdatedNotification;
@@ -1244,6 +1216,7 @@ mod tests {
                 thread_id: "thread-1".to_string(),
                 turn_id: "turn-1".to_string(),
                 item_id: "item-1".to_string(),
+                started_at_ms: 0,
                 approval_id: None,
                 reason: None,
                 network_approval_context: None,
@@ -1357,11 +1330,7 @@ mod tests {
             connection_id: ConnectionId(9),
             request_id: RequestId::Integer(3),
         };
-        let error = JSONRPCErrorError {
-            code: INTERNAL_ERROR_CODE,
-            message: "boom".to_string(),
-            data: None,
-        };
+        let error = internal_error("boom");
 
         outgoing.send_error(request_id.clone(), error.clone()).await;
 
@@ -1472,7 +1441,10 @@ mod tests {
             .await;
 
         let early = timeout(Duration::from_millis(25), rx.recv()).await;
-        assert!(early.is_err(), "coalesced delta should wait for the batch window");
+        assert!(
+            early.is_err(),
+            "coalesced delta should wait for the batch window"
+        );
 
         let envelope = timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -1480,9 +1452,9 @@ mod tests {
             .expect("channel should contain the merged delta");
         let OutgoingEnvelope::Broadcast {
             message:
-                OutgoingMessage::AppServerNotification(
-                    ServerNotification::CommandExecutionOutputDelta(notification),
-                ),
+                OutgoingMessage::AppServerNotification(ServerNotification::CommandExecutionOutputDelta(
+                    notification,
+                )),
         } = envelope
         else {
             panic!("expected merged command output delta envelope");
@@ -1490,7 +1462,10 @@ mod tests {
         assert_eq!(notification.delta, "hello world");
 
         let extra = timeout(Duration::from_millis(25), rx.recv()).await;
-        assert!(extra.is_err(), "merged deltas should produce one outgoing message");
+        assert!(
+            extra.is_err(),
+            "merged deltas should produce one outgoing message"
+        );
     }
 
     #[tokio::test]
@@ -1675,21 +1650,25 @@ mod tests {
 
         let notifications = recv_broadcast_notifications(&mut rx, /*count*/ 4).await;
 
-        let file_delta = notifications.iter().find_map(|notification| match notification {
-            ServerNotification::FileChangeOutputDelta(notification) => Some(notification),
-            _ => None,
-        });
+        let file_delta = notifications
+            .iter()
+            .find_map(|notification| match notification {
+                ServerNotification::FileChangeOutputDelta(notification) => Some(notification),
+                _ => None,
+            });
         assert_eq!(
             file_delta.expect("file delta should be emitted").delta,
             "diff chunk"
         );
 
-        let token_usage = notifications.iter().find_map(|notification| match notification {
-            ServerNotification::ThreadTokenUsageUpdated(notification) => {
-                Some(&notification.token_usage)
-            }
-            _ => None,
-        });
+        let token_usage = notifications
+            .iter()
+            .find_map(|notification| match notification {
+                ServerNotification::ThreadTokenUsageUpdated(notification) => {
+                    Some(&notification.token_usage)
+                }
+                _ => None,
+            });
         assert_eq!(
             token_usage
                 .expect("token usage should be emitted")
@@ -1698,22 +1677,31 @@ mod tests {
             2
         );
 
-        let diff = notifications.iter().find_map(|notification| match notification {
-            ServerNotification::TurnDiffUpdated(notification) => Some(notification.diff.as_str()),
-            _ => None,
-        });
+        let diff = notifications
+            .iter()
+            .find_map(|notification| match notification {
+                ServerNotification::TurnDiffUpdated(notification) => {
+                    Some(notification.diff.as_str())
+                }
+                _ => None,
+            });
         assert_eq!(diff, Some("new diff"));
 
-        let plan = notifications.iter().find_map(|notification| match notification {
-            ServerNotification::TurnPlanUpdated(notification) => Some(notification),
-            _ => None,
-        });
+        let plan = notifications
+            .iter()
+            .find_map(|notification| match notification {
+                ServerNotification::TurnPlanUpdated(notification) => Some(notification),
+                _ => None,
+            });
         let plan = plan.expect("plan should be emitted");
         assert_eq!(plan.explanation.as_deref(), Some("new plan"));
         assert_eq!(plan.plan[0].status, TurnPlanStepStatus::Completed);
 
         let extra = timeout(Duration::from_millis(25), rx.recv()).await;
-        assert!(extra.is_err(), "coalescing should emit only one notification per key");
+        assert!(
+            extra.is_err(),
+            "coalescing should emit only one notification per key"
+        );
     }
 
     fn completed_turn(id: &str) -> Turn {
@@ -1888,11 +1876,7 @@ mod tests {
             ))
             .await;
 
-        let error = JSONRPCErrorError {
-            code: INTERNAL_ERROR_CODE,
-            message: "refresh failed".to_string(),
-            data: None,
-        };
+        let error = internal_error("refresh failed");
 
         outgoing
             .notify_client_error(request_id, error.clone())
@@ -1947,6 +1931,7 @@ mod tests {
                     thread_id: thread_id.to_string(),
                     turn_id: "turn-1".to_string(),
                     item_id: "call-2".to_string(),
+                    started_at_ms: 0,
                     reason: None,
                     grant_root: None,
                 },
@@ -2002,11 +1987,7 @@ mod tests {
                 },
             ))
             .await;
-        let error = JSONRPCErrorError {
-            code: INTERNAL_ERROR_CODE,
-            message: "tracked request cancelled".to_string(),
-            data: None,
-        };
+        let error = internal_error("tracked request cancelled");
 
         outgoing
             .cancel_requests_for_thread(thread_id, Some(error.clone()))

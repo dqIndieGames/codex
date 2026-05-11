@@ -6,69 +6,47 @@ For advanced configuration instructions, see [this documentation](https://develo
 
 For a full configuration reference, see [this documentation](https://developers.openai.com/codex/config-reference).
 
-## Connecting to MCP servers
+## Commit attribution
 
-Codex can connect to MCP servers configured in `~/.codex/config.toml`. See the configuration reference for the latest MCP server options:
+Codex can add a [git trailer](https://git-scm.com/docs/git-interpret-trailers) to
+generated commit messages so commits make Codex's involvement explicit. This
+behavior is gated by the `codex_git_commit` feature flag; the top-level
+`commit_attribution` setting is only used when that feature is enabled.
 
-- https://developers.openai.com/codex/config-reference
-
-MCP tools default to serialized calls. To mark every tool exposed by one server
-as eligible for parallel tool calls, set `supports_parallel_tool_calls` on that
-server:
-
-```toml
-[mcp_servers.docs]
-command = "docs-server"
-supports_parallel_tool_calls = true
-```
-
-Only enable parallel calls for MCP servers whose tools are safe to run at the
-same time. If tools read and write shared state, files, databases, or external
-resources, review those read/write race conditions before enabling this setting.
-
-## MCP tool approvals
-
-Codex stores approval defaults and per-tool overrides for custom MCP servers
-under `mcp_servers` in `~/.codex/config.toml`. Set
-`default_tools_approval_mode` on the server to apply a default to every tool,
-and use per-tool `approval_mode` entries for exceptions:
+Add the following to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.docs]
-command = "docs-server"
-default_tools_approval_mode = "approve"
+commit_attribution = "Codex <noreply@openai.com>"
 
-[mcp_servers.docs.tools.search]
-approval_mode = "prompt"
+[features]
+codex_git_commit = true
 ```
 
-## Apps (Connectors)
+When enabled, Codex appends a `Co-authored-by:` trailer using the configured
+attribution value. If `commit_attribution` is omitted, Codex uses
+`Codex <noreply@openai.com>`. Set `commit_attribution = ""` to disable the
+trailer while leaving the feature flag enabled.
 
-Use `$` in the composer to insert a ChatGPT connector; the popover lists accessible
-apps. The `/apps` command lists available and installed apps. Connected apps appear first
-and are labeled as connected; others are marked as can be installed.
+## OpenTelemetry Trace Metadata
 
-Codex stores "never show again" choices for tool suggestions in `config.toml`:
+Codex can add static OpenTelemetry span attributes to exported trace spans and
+static W3C tracestate fields to propagated trace context:
 
 ```toml
-[tool_suggest]
-disabled_tools = [
-  { type = "plugin", id = "slack@openai-curated" },
-  { type = "connector", id = "connector_google_calendar" },
-]
+[otel.span_attributes]
+"example.trace_attr" = "enabled"
+
+[otel.tracestate.example]
+alpha = "one"
+beta = "two"
 ```
 
-## Notify
-
-Codex can run a notification hook when the agent finishes a turn. See the configuration reference for the latest notification settings:
-
-- https://developers.openai.com/codex/config-reference
-
-When Codex knows which client started the turn, the legacy notify JSON payload also includes a top-level `client` field. The TUI reports `codex-tui`, and the app server reports the `clientInfo.name` value from `initialize`.
-
-## JSON Schema
-
-The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.
+Nested `otel.tracestate` tables are encoded as semicolon-separated `key:value`
+fields inside the named tracestate member. If propagated trace context already
+has the named member, Codex upserts configured fields and preserves other fields
+in that member. This config shape does not support setting opaque tracestate
+member values. Invalid trace metadata entries are ignored during config load and
+reported as startup warnings.
 
 ## SQLite State DB
 
@@ -152,5 +130,3 @@ config value for "follow the global default in Plan mode".
 developer message Codex inserts when realtime becomes active. It only affects
 the realtime start message in prompt history and does not change websocket
 backend prompt settings or the realtime end/inactive message.
-
-Ctrl+C/Ctrl+D quitting uses a ~1 second double-press hint (`ctrl + c again to quit`).

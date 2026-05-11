@@ -90,8 +90,7 @@ pub(crate) async fn enable_analytics_capture(server: &MockServer, codex_home: &P
     if !config_toml.contains("[features]") {
         config_toml = format!("{config_toml}\n[features]\ngeneral_analytics = true\n");
     } else if !config_toml.contains("general_analytics") {
-        config_toml =
-            config_toml.replace("[features]\n", "[features]\ngeneral_analytics = true\n");
+        config_toml = config_toml.replace("[features]\n", "[features]\ngeneral_analytics = true\n");
     }
     std::fs::write(&config_path, config_toml)?;
 
@@ -188,6 +187,7 @@ pub(crate) fn assert_basic_thread_initialized_event(
     thread_id: &str,
     expected_model: &str,
     initialization_mode: &str,
+    expected_thread_source: &str,
 ) {
     assert_eq!(event["event_params"]["thread_id"], thread_id);
     assert_eq!(
@@ -204,7 +204,10 @@ pub(crate) fn assert_basic_thread_initialized_event(
     );
     assert_eq!(event["event_params"]["model"], expected_model);
     assert_eq!(event["event_params"]["ephemeral"], false);
-    assert_eq!(event["event_params"]["thread_source"], "user");
+    assert_eq!(
+        event["event_params"]["thread_source"],
+        expected_thread_source
+    );
     assert_eq!(
         event["event_params"]["subagent_source"],
         serde_json::Value::Null
