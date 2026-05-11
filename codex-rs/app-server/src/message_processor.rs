@@ -476,15 +476,15 @@ impl MessageProcessor {
     }
 
     pub(crate) fn thread_manager(&self) -> Arc<ThreadManager> {
-        self.codex_message_processor.thread_manager()
+        self.thread_processor.thread_manager()
     }
 
-    pub(crate) fn config_api(&self) -> ConfigApi {
-        self.config_api.clone()
+    pub(crate) fn config_api(&self) -> ConfigRequestProcessor {
+        self.config_processor.clone()
     }
 
     pub(crate) fn codex_home(&self) -> PathBuf {
-        self.config.codex_home.to_path_buf()
+        self.thread_processor.codex_home()
     }
 
     pub(crate) async fn process_request(

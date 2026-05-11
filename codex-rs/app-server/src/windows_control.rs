@@ -1,6 +1,6 @@
 #![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
-use crate::config_api::ConfigApi;
+use crate::request_processors::ConfigRequestProcessor;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigEdit;
 use codex_app_server_protocol::ConfigLayer;
@@ -117,7 +117,7 @@ impl WindowsAppServerControlPlane {
     pub(crate) async fn start(
         _codex_home: PathBuf,
         _thread_manager: Arc<ThreadManager>,
-        _config_api: ConfigApi,
+        _config_api: ConfigRequestProcessor,
     ) -> io::Result<Self> {
         Ok(Self {})
     }
@@ -126,7 +126,7 @@ impl WindowsAppServerControlPlane {
     pub(crate) async fn start(
         codex_home: PathBuf,
         thread_manager: Arc<ThreadManager>,
-        config_api: ConfigApi,
+        config_api: ConfigRequestProcessor,
     ) -> io::Result<Self> {
         use tokio::net::windows::named_pipe::NamedPipeServer;
 
@@ -216,7 +216,7 @@ async fn run_named_pipe_server(
     mut server: tokio::net::windows::named_pipe::NamedPipeServer,
     control_endpoint: String,
     thread_manager: Arc<ThreadManager>,
-    config_api: ConfigApi,
+    config_api: ConfigRequestProcessor,
     shutdown: CancellationToken,
 ) {
     loop {
@@ -271,7 +271,7 @@ fn create_named_pipe_server(
 async fn handle_named_pipe_client(
     pipe: tokio::net::windows::named_pipe::NamedPipeServer,
     thread_manager: Arc<ThreadManager>,
-    config_api: ConfigApi,
+    config_api: ConfigRequestProcessor,
 ) -> io::Result<()> {
     use tokio::io::AsyncBufReadExt;
     use tokio::io::AsyncWriteExt;
@@ -360,7 +360,7 @@ fn refresh_response_from_report(
 
 #[cfg(windows)]
 async fn list_effective_providers(
-    config_api: &ConfigApi,
+    config_api: &ConfigRequestProcessor,
 ) -> Result<EffectiveProvidersResponse, JSONRPCErrorError> {
     let effective_config = config_api.load_latest_config(/*fallback_cwd*/ None).await?;
     let current_model_provider_id = effective_config.model_provider_id.clone();
@@ -400,7 +400,7 @@ async fn list_effective_providers(
 
 #[cfg(windows)]
 async fn apply_provider_runtime_from_effective_provider(
-    config_api: &ConfigApi,
+    config_api: &ConfigRequestProcessor,
     thread_manager: &ThreadManager,
     source_provider_id: Option<&str>,
 ) -> ApplySelectedProviderRuntimeResponse {
@@ -656,20 +656,32 @@ fn write_registration_atomically(
 #[cfg(windows)]
 fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING;
-    use windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    type Bool = i32;
+    type Dword = u32;
+    type Lpcwstr = *const u16;
+
+    const MOVEFILE_REPLACE_EXISTING: Dword = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: Dword = 0x0000_0008;
+
+    unsafe extern "system" {
+        fn MoveFileExW(
+            lp_existing_file_name: Lpcwstr,
+            lp_new_file_name: Lpcwstr,
+            dw_flags: Dword,
+        ) -> Bool;
+    }
 
     let source_wide = source
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+        .collect::<Vec<u16>>();
     let destination_wide = destination
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+        .collect::<Vec<u16>>();
 
     let moved = unsafe {
         MoveFileExW(

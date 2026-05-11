@@ -277,7 +277,7 @@ impl ConfigRequestProcessor {
         });
     }
 
-    async fn load_latest_config(
+    pub(crate) async fn load_latest_config(
         &self,
         fallback_cwd: Option<PathBuf>,
     ) -> Result<codex_core::config::Config, JSONRPCErrorError> {
