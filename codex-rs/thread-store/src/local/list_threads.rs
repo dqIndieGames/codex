@@ -46,6 +46,7 @@ pub(super) async fn list_threads(
         cwd: store.config.codex_home.clone(),
         model_provider_id: store.config.default_model_provider_id.clone(),
         generate_memories: false,
+        rollout_batch_flush_enabled: store.config.rollout_batch_flush_enabled,
     };
     let page = list_rollout_threads(
         state_db,

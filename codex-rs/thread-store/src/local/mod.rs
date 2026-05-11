@@ -54,6 +54,8 @@ pub struct LocalThreadStoreConfig {
     pub sqlite_home: PathBuf,
     /// Provider used only when older local metadata does not contain one.
     pub default_model_provider_id: String,
+    /// Whether rollout writer batch flush mode is enabled.
+    pub rollout_batch_flush_enabled: bool,
 }
 
 impl LocalThreadStoreConfig {
@@ -62,6 +64,7 @@ impl LocalThreadStoreConfig {
             codex_home: config.codex_home().to_path_buf(),
             sqlite_home: config.sqlite_home().to_path_buf(),
             default_model_provider_id: config.model_provider_id().to_string(),
+            rollout_batch_flush_enabled: config.rollout_batch_flush_enabled(),
         }
     }
 }

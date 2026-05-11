@@ -13,6 +13,7 @@ pub(super) fn test_config(codex_home: &Path) -> LocalThreadStoreConfig {
         codex_home: codex_home.to_path_buf(),
         sqlite_home: codex_home.to_path_buf(),
         default_model_provider_id: "test-provider".to_string(),
+        rollout_batch_flush_enabled: false,
     }
 }
 

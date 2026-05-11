@@ -70,6 +70,7 @@ pub(super) async fn resume_thread(
         cwd,
         model_provider_id: params.metadata.model_provider.clone(),
         generate_memories: matches!(params.metadata.memory_mode, ThreadMemoryMode::Enabled),
+        rollout_batch_flush_enabled: store.config.rollout_batch_flush_enabled,
     };
     let state_db_ctx = store.state_db().await;
     let recorder = RolloutRecorder::new(

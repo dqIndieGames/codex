@@ -72,6 +72,7 @@ async fn has_recorded_sessions(
             codex_home: codex_home.to_path_buf(),
             sqlite_home: codex_home.to_path_buf(),
             default_model_provider_id: default_provider.to_string(),
+            rollout_batch_flush_enabled: false,
         },
         state_db,
     );

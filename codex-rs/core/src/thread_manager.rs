@@ -406,6 +406,7 @@ impl ThreadManager {
                 codex_home: codex_home.clone(),
                 sqlite_home: codex_home.clone(),
                 default_model_provider_id: OPENAI_PROVIDER_ID.to_string(),
+                rollout_batch_flush_enabled: false,
             },
             state_db.clone(),
         ));
