@@ -1079,7 +1079,7 @@ pub async fn run_main(
     let otel_tracing_layer = otel.as_ref().and_then(|o| o.tracing_layer());
 
     let log_db = if runtime_load_gates.log_db {
-        get_state_db(&config).await.map(log_db::start)
+        state_db::get_state_db(&config).await.map(log_db::start)
     } else {
         None
     };

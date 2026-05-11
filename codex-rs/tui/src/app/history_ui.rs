@@ -4,6 +4,7 @@
 //! state, and resetting transcript-related app state after `/clear` or Ctrl-L.
 
 use super::*;
+use crate::version::CODEX_CLI_DISPLAY_VERSION;
 
 impl App {
     pub(super) fn open_url_in_browser(&mut self, url: String) {
