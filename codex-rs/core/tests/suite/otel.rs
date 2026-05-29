@@ -11,7 +11,6 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_custom_tool_call;
 use core_test_support::responses::ev_function_call;
-use core_test_support::responses::ev_local_shell_call;
 use core_test_support::responses::ev_message_item_added;
 use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_reasoning_item;
@@ -24,7 +23,6 @@ use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
-use core_test_support::responses::start_websocket_server;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -34,7 +32,6 @@ use tracing_test::traced_test;
 
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_test::internal::MockWriter;
-use wiremock::ResponseTemplate;
 
 fn extract_log_field(line: &str, key: &str) -> Option<String> {
     let quoted_prefix = format!("{key}=\"");
@@ -74,13 +71,17 @@ fn assert_empty_mcp_tool_fields(line: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn has_event_name(line: &str, event_name: &str) -> bool {
-    extract_log_field(line, "event.name").as_deref() == Some(event_name)
+fn shell_command_call(call_id: &str, command: &str) -> serde_json::Value {
+    let args = serde_json::json!({ "command": command }).to_string();
+    ev_function_call(call_id, "shell_command", &args)
 }
 
-fn has_event_name_and_endpoint(line: &str, event_name: &str, endpoint: &str) -> bool {
-    has_event_name(line, event_name)
-        && extract_log_field(line, "endpoint").as_deref() == Some(endpoint)
+fn touch_command(path: &str) -> String {
+    if cfg!(windows) {
+        format!("New-Item -ItemType File -Path {path} -Force | Out-Null")
+    } else {
+        format!("/usr/bin/touch {path}")
+    }
 }
 
 #[test]
@@ -121,6 +122,8 @@ async fn responses_api_emits_api_request_event() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -130,7 +133,7 @@ async fn responses_api_emits_api_request_event() {
     logs_assert(|lines: &[&str]| {
         lines
             .iter()
-            .find(|line| has_event_name_and_endpoint(line, "codex.api_request", "/responses"))
+            .find(|line| line.contains("codex.api_request"))
             .map(|_| Ok(()))
             .unwrap_or_else(|| Err("expected codex.api_request event".to_string()))
     });
@@ -142,136 +145,6 @@ async fn responses_api_emits_api_request_event() {
             .map(|_| Ok(()))
             .unwrap_or_else(|| Err("expected codex.conversation_starts event".to_string()))
     });
-}
-
-#[tokio::test]
-#[traced_test]
-async fn responses_api_retry_suppresses_request_telemetry_logs() {
-    let server = start_mock_server().await;
-
-    let retry_response = mount_response_once(
-        &server,
-        ResponseTemplate::new(503)
-            .insert_header("content-type", "application/json")
-            .set_body_json(serde_json::json!({
-                "error": {
-                    "code": "slow_down",
-                    "message": "retry please"
-                }
-            })),
-    )
-    .await;
-    let success_response = mount_sse_once(&server, sse(vec![ev_completed("done")])).await;
-
-    let TestCodex { codex, .. } = test_codex()
-        .with_config(|config| {
-            config.model_provider.supports_websockets = false;
-            config.model_provider.request_max_retries = Some(1);
-            config.model_provider.stream_max_retries = Some(0);
-        })
-        .build(&server)
-        .await
-        .unwrap();
-
-    codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello".into(),
-                text_elements: Vec::new(),
-            }],
-            environments: None,
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-        })
-        .await
-        .unwrap();
-
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-
-    assert_eq!(retry_response.requests().len(), 1);
-    assert_eq!(success_response.requests().len(), 1);
-
-    logs_assert(|lines: &[&str]| {
-        let matches = lines
-            .iter()
-            .copied()
-            .filter(|line| has_event_name_and_endpoint(line, "codex.api_request", "/responses"))
-            .collect::<Vec<_>>();
-        if !matches.is_empty() {
-            return Err(format!(
-                "expected retry-chain request telemetry to be suppressed, matched lines: {matches:?}"
-            ));
-        }
-        Ok(())
-    });
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[traced_test]
-async fn responses_websocket_retry_suppresses_retry_logs_and_warns() {
-    core_test_support::skip_if_no_network!();
-
-    let server = start_websocket_server(vec![
-        vec![
-            vec![
-                ev_response_created("resp-prewarm"),
-                ev_completed("resp-prewarm"),
-            ],
-            vec![serde_json::json!({
-                "type": "response.failed",
-                "response": {
-                    "error": {
-                        "code": "server_is_overloaded",
-                        "message": "retry please"
-                    }
-                }
-            })],
-        ],
-        vec![vec![ev_response_created("resp-1"), ev_completed("resp-1")]],
-    ])
-    .await;
-
-    let mut builder = test_codex().with_config(|config| {
-        config.model_provider.request_max_retries = Some(0);
-        config.model_provider.stream_max_retries = Some(1);
-    });
-    let test = builder
-        .build_with_websocket_server(&server)
-        .await
-        .expect("build websocket codex");
-
-    test.submit_turn("hello")
-        .await
-        .expect("websocket retry should complete");
-
-    logs_assert(|lines: &[&str]| {
-        let websocket_connect_count = lines
-            .iter()
-            .filter(|line| {
-                has_event_name_and_endpoint(line, "codex.websocket_connect", "/responses")
-            })
-            .count();
-        if websocket_connect_count > 1 {
-            return Err(format!(
-                "expected retry reconnect websocket_connect logs to be suppressed, got {websocket_connect_count}"
-            ));
-        }
-        if lines.iter().any(|line| {
-            has_event_name(line, "codex.websocket_event")
-                && line.contains("event.kind=response.failed")
-        }) {
-            return Err("expected retry-driving websocket_event log to be suppressed".to_string());
-        }
-        if lines
-            .iter()
-            .any(|line| line.contains("stream disconnected - retrying sampling request"))
-        {
-            return Err("expected reconnect warn to be suppressed".to_string());
-        }
-        Ok(())
-    });
-
-    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -296,6 +169,8 @@ async fn process_sse_emits_tracing_for_output_item() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -341,6 +216,8 @@ async fn process_sse_emits_failed_event_on_parse_error() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -387,6 +264,8 @@ async fn process_sse_records_failed_event_when_stream_closes_without_completed()
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -453,6 +332,8 @@ async fn process_sse_failed_event_records_response_error_message() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -517,6 +398,8 @@ async fn process_sse_failed_event_logs_parse_error() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -568,6 +451,8 @@ async fn process_sse_failed_event_logs_missing_error() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -628,6 +513,8 @@ async fn process_sse_failed_event_logs_response_completed_parse_error() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -682,6 +569,8 @@ async fn process_sse_emits_completed_telemetry() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -760,6 +649,8 @@ async fn turn_and_completed_response_spans_record_token_usage() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -847,6 +738,8 @@ async fn handle_responses_span_records_response_kind_and_tool_name() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -940,6 +833,8 @@ async fn record_responses_sets_span_fields_for_response_events() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -1028,11 +923,13 @@ async fn handle_response_item_records_tool_result_for_custom_tool_call() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TokenCount(_))).await;
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     logs_assert(|lines: &[&str]| {
         let line = lines
@@ -1103,6 +1000,8 @@ async fn handle_response_item_records_tool_result_for_function_call() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -1137,23 +1036,13 @@ async fn handle_response_item_records_tool_result_for_function_call() {
 
 #[tokio::test]
 #[traced_test]
-async fn handle_response_item_records_tool_result_for_local_shell_missing_ids() {
+async fn handle_response_item_records_tool_result_for_shell_command_call() {
     let server = start_mock_server().await;
 
     mount_sse_once(
         &server,
         sse(vec![
-            serde_json::json!({
-                "type": "response.output_item.done",
-                "item": {
-                    "type": "local_shell_call",
-                    "status": "completed",
-                    "action": {
-                        "type": "exec",
-                        "command": vec!["/bin/echo", "hello"],
-                    }
-                }
-            }),
+            shell_command_call("shell-call", "echo shell"),
             ev_completed("done"),
         ]),
     )
@@ -1162,76 +1051,7 @@ async fn handle_response_item_records_tool_result_for_local_shell_missing_ids() 
     mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("msg-1", "local shell done"),
-            ev_completed("done"),
-        ]),
-    )
-    .await;
-
-    let TestCodex { codex, .. } = test_codex()
-        .with_config(move |config| {
-            config
-                .features
-                .disable(Feature::GhostCommit)
-                .expect("test config should allow feature update");
-        })
-        .build(&server)
-        .await
-        .unwrap();
-
-    codex
-        .submit(Op::UserInput {
-            environments: None,
-            items: vec![UserInput::Text {
-                text: "hello".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-        })
-        .await
-        .unwrap();
-
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TokenCount(_))).await;
-
-    logs_assert(|lines: &[&str]| {
-        let line = lines
-            .iter()
-            .find(|line| {
-                line.contains("codex.tool_result")
-                    && line.contains(&"tool_name=local_shell".to_string())
-                    && line.contains("output=LocalShellCall without call_id or id")
-            })
-            .ok_or_else(|| "missing codex.tool_result event".to_string())?;
-
-        if !line.contains("success=false") {
-            return Err("missing success field".to_string());
-        }
-        assert_empty_mcp_tool_fields(line)?;
-
-        Ok(())
-    });
-}
-
-#[cfg(target_os = "macos")]
-#[tokio::test]
-#[traced_test]
-async fn handle_response_item_records_tool_result_for_local_shell_call() {
-    let server = start_mock_server().await;
-
-    mount_sse_once(
-        &server,
-        sse(vec![
-            ev_local_shell_call("shell-call", "completed", vec!["/bin/echo", "shell"]),
-            ev_completed("done"),
-        ]),
-    )
-    .await;
-
-    mount_sse_once(
-        &server,
-        sse(vec![
-            ev_assistant_message("msg-1", "local shell done"),
+            ev_assistant_message("msg-1", "shell command done"),
             ev_completed("done"),
         ]),
     )
@@ -1258,6 +1078,8 @@ async fn handle_response_item_records_tool_result_for_local_shell_call() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -1270,10 +1092,10 @@ async fn handle_response_item_records_tool_result_for_local_shell_call() {
             .find(|line| line.contains("codex.tool_result") && line.contains("call_id=shell-call"))
             .ok_or_else(|| "missing codex.tool_result event".to_string())?;
 
-        if !line.contains("tool_name=local_shell") {
+        if !line.contains("tool_name=shell_command") {
             return Err("missing tool_name field".to_string());
         }
-        if !line.contains("arguments=/bin/echo shell") {
+        if !line.contains("arguments={\"command\":\"echo shell\"}") {
             return Err("missing arguments field".to_string());
         }
         let output_idx = line
@@ -1309,8 +1131,8 @@ fn tool_decision_assertion<'a>(
             .ok_or_else(|| format!("missing codex.tool_decision event for {call_id}"))?;
 
         let lower = line.to_lowercase();
-        if !lower.contains("tool_name=local_shell") {
-            return Err("missing tool_name for local_shell".to_string());
+        if !lower.contains("tool_name=shell_command") {
+            return Err("missing tool_name for shell_command".to_string());
         }
         if !lower.contains(&format!("decision={expected_decision}")) {
             return Err(format!("unexpected decision for {call_id}"));
@@ -1325,16 +1147,12 @@ fn tool_decision_assertion<'a>(
 
 #[tokio::test]
 #[traced_test]
-async fn handle_container_exec_autoapprove_from_config_records_tool_decision() {
+async fn handle_shell_command_autoapprove_from_config_records_tool_decision() {
     let server = start_mock_server().await;
     mount_sse_once(
         &server,
         sse(vec![
-            ev_local_shell_call(
-                "auto_config_call",
-                "completed",
-                vec!["/bin/echo", "local shell"],
-            ),
+            shell_command_call("auto_config_call", "echo local shell"),
             ev_completed("done"),
         ]),
     )
@@ -1343,7 +1161,7 @@ async fn handle_container_exec_autoapprove_from_config_records_tool_decision() {
     mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("msg-1", "local shell done"),
+            ev_assistant_message("msg-1", "shell command done"),
             ev_completed("done"),
         ]),
     )
@@ -1370,6 +1188,8 @@ async fn handle_container_exec_autoapprove_from_config_records_tool_decision() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -1385,16 +1205,13 @@ async fn handle_container_exec_autoapprove_from_config_records_tool_decision() {
 
 #[tokio::test]
 #[traced_test]
-async fn handle_container_exec_user_approved_records_tool_decision() {
+async fn handle_shell_command_user_approved_records_tool_decision() {
     let server = start_mock_server().await;
+    let command = touch_command("codex-otel-approval-test");
     mount_sse_once(
         &server,
         sse(vec![
-            ev_local_shell_call(
-                "user_approved_call",
-                "completed",
-                vec!["/usr/bin/touch", "codex-otel-approval-test"],
-            ),
+            shell_command_call("user_approved_call", &command),
             ev_completed("done"),
         ]),
     )
@@ -1403,7 +1220,7 @@ async fn handle_container_exec_user_approved_records_tool_decision() {
     mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("msg-1", "local shell done"),
+            ev_assistant_message("msg-1", "shell command done"),
             ev_completed("done"),
         ]),
     )
@@ -1427,6 +1244,8 @@ async fn handle_container_exec_user_approved_records_tool_decision() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -1457,17 +1276,14 @@ async fn handle_container_exec_user_approved_records_tool_decision() {
 
 #[tokio::test]
 #[traced_test]
-async fn handle_container_exec_user_approved_for_session_records_tool_decision() {
+async fn handle_shell_command_user_approved_for_session_records_tool_decision() {
     let server = start_mock_server().await;
+    let command = touch_command("codex-otel-approval-test");
 
     mount_sse_once(
         &server,
         sse(vec![
-            ev_local_shell_call(
-                "user_approved_session_call",
-                "completed",
-                vec!["/usr/bin/touch", "codex-otel-approval-test"],
-            ),
+            shell_command_call("user_approved_session_call", &command),
             ev_completed("done"),
         ]),
     )
@@ -1475,7 +1291,7 @@ async fn handle_container_exec_user_approved_for_session_records_tool_decision()
     mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("msg-1", "local shell done"),
+            ev_assistant_message("msg-1", "shell command done"),
             ev_completed("done"),
         ]),
     )
@@ -1499,6 +1315,8 @@ async fn handle_container_exec_user_approved_for_session_records_tool_decision()
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -1531,15 +1349,12 @@ async fn handle_container_exec_user_approved_for_session_records_tool_decision()
 #[traced_test]
 async fn handle_sandbox_error_user_approves_retry_records_tool_decision() {
     let server = start_mock_server().await;
+    let command = touch_command("codex-otel-approval-test");
 
     mount_sse_once(
         &server,
         sse(vec![
-            ev_local_shell_call(
-                "sandbox_retry_call",
-                "completed",
-                vec!["/usr/bin/touch", "codex-otel-approval-test"],
-            ),
+            shell_command_call("sandbox_retry_call", &command),
             ev_completed("done"),
         ]),
     )
@@ -1547,7 +1362,7 @@ async fn handle_sandbox_error_user_approves_retry_records_tool_decision() {
     mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("msg-1", "local shell done"),
+            ev_assistant_message("msg-1", "shell command done"),
             ev_completed("done"),
         ]),
     )
@@ -1571,6 +1386,8 @@ async fn handle_sandbox_error_user_approves_retry_records_tool_decision() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -1601,17 +1418,14 @@ async fn handle_sandbox_error_user_approves_retry_records_tool_decision() {
 
 #[tokio::test]
 #[traced_test]
-async fn handle_container_exec_user_denies_records_tool_decision() {
+async fn handle_shell_command_user_denies_records_tool_decision() {
     let server = start_mock_server().await;
+    let command = touch_command("codex-otel-approval-test");
 
     mount_sse_once(
         &server,
         sse(vec![
-            ev_local_shell_call(
-                "user_denied_call",
-                "completed",
-                vec!["/usr/bin/touch", "codex-otel-approval-test"],
-            ),
+            shell_command_call("user_denied_call", &command),
             ev_completed("done"),
         ]),
     )
@@ -1620,7 +1434,7 @@ async fn handle_container_exec_user_denies_records_tool_decision() {
     mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("msg-1", "local shell done"),
+            ev_assistant_message("msg-1", "shell command done"),
             ev_completed("done"),
         ]),
     )
@@ -1643,6 +1457,8 @@ async fn handle_container_exec_user_denies_records_tool_decision() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -1675,15 +1491,12 @@ async fn handle_container_exec_user_denies_records_tool_decision() {
 #[traced_test]
 async fn handle_sandbox_error_user_approves_for_session_records_tool_decision() {
     let server = start_mock_server().await;
+    let command = touch_command("codex-otel-approval-test");
 
     mount_sse_once(
         &server,
         sse(vec![
-            ev_local_shell_call(
-                "sandbox_session_call",
-                "completed",
-                vec!["/usr/bin/touch", "codex-otel-approval-test"],
-            ),
+            shell_command_call("sandbox_session_call", &command),
             ev_completed("done"),
         ]),
     )
@@ -1691,7 +1504,7 @@ async fn handle_sandbox_error_user_approves_for_session_records_tool_decision() 
     mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("msg-1", "local shell done"),
+            ev_assistant_message("msg-1", "shell command done"),
             ev_completed("done"),
         ]),
     )
@@ -1715,6 +1528,8 @@ async fn handle_sandbox_error_user_approves_for_session_records_tool_decision() 
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();
@@ -1747,15 +1562,12 @@ async fn handle_sandbox_error_user_approves_for_session_records_tool_decision() 
 #[traced_test]
 async fn handle_sandbox_error_user_denies_records_tool_decision() {
     let server = start_mock_server().await;
+    let command = touch_command("codex-otel-approval-test");
 
     mount_sse_once(
         &server,
         sse(vec![
-            ev_local_shell_call(
-                "sandbox_deny_call",
-                "completed",
-                vec!["/usr/bin/touch", "codex-otel-approval-test"],
-            ),
+            shell_command_call("sandbox_deny_call", &command),
             ev_completed("done"),
         ]),
     )
@@ -1764,7 +1576,7 @@ async fn handle_sandbox_error_user_denies_records_tool_decision() {
     mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("msg-1", "local shell done"),
+            ev_assistant_message("msg-1", "shell command done"),
             ev_completed("done"),
         ]),
     )
@@ -1788,6 +1600,8 @@ async fn handle_sandbox_error_user_denies_records_tool_decision() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
         })
         .await
         .unwrap();

@@ -2,15 +2,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use codex_protocol::ThreadId;
-use codex_protocol::error::CodexErr;
-use codex_shell_command::parse_command::shlex_join;
 use rand::Rng;
 use tracing::error;
 
 const INITIAL_DELAY_MS: u64 = 200;
 const BACKOFF_FACTOR: f64 = 2.0;
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 /// Emit structured feedback metadata as key/value pairs.
 ///
@@ -37,7 +33,6 @@ macro_rules! feedback_tags {
     };
 }
 
-#[cfg(test)]
 struct Auth401FeedbackSnapshot<'a> {
     request_id: &'a str,
     cf_ray: &'a str,
@@ -45,7 +40,6 @@ struct Auth401FeedbackSnapshot<'a> {
     error_code: &'a str,
 }
 
-#[cfg(test)]
 impl<'a> Auth401FeedbackSnapshot<'a> {
     fn from_optional_fields(
         request_id: Option<&'a str>,
@@ -62,7 +56,6 @@ impl<'a> Auth401FeedbackSnapshot<'a> {
     }
 }
 
-#[cfg(test)]
 pub(crate) fn emit_feedback_auth_recovery_tags(
     auth_recovery_mode: &str,
     auth_recovery_phase: &str,
@@ -93,20 +86,7 @@ pub fn backoff(attempt: u64) -> Duration {
     let exp = BACKOFF_FACTOR.powi(attempt.saturating_sub(1) as i32);
     let base = (INITIAL_DELAY_MS as f64 * exp) as u64;
     let jitter = rand::rng().random_range(0.9..1.1);
-    clamp_retry_delay(Duration::from_millis((base as f64 * jitter) as u64))
-}
-
-pub fn clamp_retry_delay(delay: Duration) -> Duration {
-    delay.min(MAX_RETRY_DELAY)
-}
-
-pub fn retry_delay_for_error(err: &CodexErr, attempt: u64) -> Duration {
-    match err {
-        CodexErr::Stream(_, requested_delay) => {
-            clamp_retry_delay(requested_delay.unwrap_or_else(|| backoff(attempt)))
-        }
-        _ => backoff(attempt),
-    }
+    Duration::from_millis((base as f64 * jitter) as u64)
 }
 
 pub(crate) fn error_or_panic(message: impl std::string::ToString) {
@@ -133,22 +113,6 @@ pub fn normalize_thread_name(name: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
-}
-
-pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
-    let resume_target = thread_name
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .or_else(|| thread_id.map(|thread_id| thread_id.to_string()));
-    resume_target.map(|target| {
-        let needs_double_dash = target.starts_with('-');
-        let escaped = shlex_join(&[target]);
-        if needs_double_dash {
-            format!("codex resume -- {escaped}")
-        } else {
-            format!("codex resume {escaped}")
-        }
-    })
 }
 
 #[cfg(test)]

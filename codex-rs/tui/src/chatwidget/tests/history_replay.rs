@@ -1,13 +1,12 @@
 use super::*;
-use codex_app_server_protocol::FileSystemAccessMode;
-use codex_app_server_protocol::FileSystemPath;
-use codex_app_server_protocol::FileSystemSandboxEntry;
-use codex_app_server_protocol::FileSystemSpecialPath;
 use codex_app_server_protocol::NetworkAccess;
-use codex_app_server_protocol::PermissionProfile as AppServerPermissionProfile;
-use codex_app_server_protocol::PermissionProfileFileSystemPermissions;
-use codex_app_server_protocol::PermissionProfileNetworkPermissions;
 use codex_app_server_protocol::SandboxPolicy;
+use codex_protocol::models::ManagedFileSystemPermissions;
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemPath;
+use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSpecialPath;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use pretty_assertions::assert_eq;
 
 const LEGACY_LOCAL1_CHECKLIST_HEADER: &str = "local1 定制功能已启用";
@@ -57,8 +56,11 @@ async fn resumed_initial_messages_render_history() {
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
+        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        collaboration_mode: None,
+        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -239,8 +241,11 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
+        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        collaboration_mode: None,
+        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -257,6 +262,7 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
             },
             AppServerUserInput::LocalImage {
                 path: local_images[0].clone(),
+                detail: None,
             },
         ],
         ReplayKind::ResumeInitialMessages,
@@ -307,8 +313,11 @@ async fn replayed_user_message_preserves_remote_image_urls() {
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
+        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        collaboration_mode: None,
+        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -325,6 +334,7 @@ async fn replayed_user_message_preserves_remote_image_urls() {
             },
             AppServerUserInput::Image {
                 url: remote_image_urls[0].clone(),
+                detail: None,
             },
         ],
         ReplayKind::ResumeInitialMessages,
@@ -367,9 +377,9 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
     chat.config.cwd = test_path_buf("/home/user/main").abs();
 
     let expected_cwd = test_path_buf("/home/user/sub-agent").abs();
-    let expected_app_server_permission_profile = AppServerPermissionProfile::Managed {
-        network: PermissionProfileNetworkPermissions { enabled: false },
-        file_system: PermissionProfileFileSystemPermissions::Restricted {
+    let expected_app_server_permission_profile = PermissionProfile::Managed {
+        network: NetworkSandboxPolicy::Restricted,
+        file_system: ManagedFileSystemPermissions::Restricted {
             entries: vec![
                 FileSystemSandboxEntry {
                     path: FileSystemPath::Special {
@@ -381,14 +391,13 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
                     path: FileSystemPath::GlobPattern {
                         pattern: "**/.secret".to_string(),
                     },
-                    access: FileSystemAccessMode::None,
+                    access: FileSystemAccessMode::Deny,
                 },
             ],
             glob_scan_max_depth: None,
         },
     };
-    let expected_permission_profile: PermissionProfile =
-        expected_app_server_permission_profile.clone().into();
+    let expected_permission_profile = expected_app_server_permission_profile.clone();
     let expected_core_sandbox = expected_permission_profile
         .to_legacy_sandbox_policy(expected_cwd.as_path())
         .expect("permission profile should project to legacy sandbox policy");
@@ -406,8 +415,11 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         permission_profile: expected_permission_profile,
         active_permission_profile: None,
         cwd: expected_cwd.clone(),
+        runtime_workspace_roots: vec![expected_cwd.clone()],
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        collaboration_mode: None,
+        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -422,18 +434,80 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
     let actual_sandbox = SandboxPolicy::from(chat.config_ref().legacy_sandbox_policy());
     assert_eq!(&actual_sandbox, &expected_sandbox);
     assert_eq!(
-        AppServerPermissionProfile::from(chat.config_ref().permissions.permission_profile()),
+        chat.config_ref().permissions.effective_permission_profile(),
         expected_app_server_permission_profile
     );
     assert_eq!(&chat.config_ref().cwd, &expected_cwd);
 
     let updated_profile = PermissionProfile::workspace_write();
-    chat.set_permission_profile(updated_profile.clone())
-        .expect("set permission profile");
+    chat.set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
+        updated_profile.clone(),
+    ))
+    .expect("set permission profile");
     assert_eq!(
         chat.config_ref().permissions.permission_profile(),
-        updated_profile,
-        "local permission changes should replace SessionConfigured profile-derived runtime permissions"
+        &updated_profile,
+        "local permission changes should replace SessionConfigured canonical permissions"
+    );
+    assert_eq!(
+        chat.config_ref().permissions.effective_permission_profile(),
+        updated_profile
+            .materialize_project_roots_with_workspace_roots(std::slice::from_ref(&expected_cwd,)),
+        "effective permissions should still use the current thread runtime workspace roots"
+    );
+}
+
+#[tokio::test]
+async fn session_configured_preserves_profile_workspace_roots() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    let previous_cwd = test_path_buf("/home/user/main").abs();
+    let profile_root = test_path_buf("/home/user/shared").abs();
+    chat.config.cwd = previous_cwd.clone();
+    chat.config.workspace_roots = vec![previous_cwd, profile_root.clone()];
+    chat.config.workspace_roots_explicit = false;
+    chat.config
+        .permissions
+        .set_workspace_roots(chat.config.workspace_roots.clone());
+
+    let session_cwd = test_path_buf("/home/user/sub-agent").abs();
+    let session_runtime_workspace_roots = vec![session_cwd.clone()];
+    let session_effective_workspace_roots = vec![session_cwd.clone(), profile_root];
+    let session_permission_profile = PermissionProfile::workspace_write()
+        .materialize_project_roots_with_workspace_roots(&session_effective_workspace_roots);
+    let configured = crate::session_state::ThreadSessionState {
+        thread_id: ThreadId::new(),
+        forked_from_id: None,
+        fork_parent_title: None,
+        thread_name: None,
+        model: "test-model".to_string(),
+        model_provider_id: "test-provider".to_string(),
+        service_tier: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: ApprovalsReviewer::User,
+        permission_profile: session_permission_profile.clone(),
+        active_permission_profile: None,
+        cwd: session_cwd.clone(),
+        runtime_workspace_roots: session_runtime_workspace_roots.clone(),
+        instruction_source_paths: Vec::new(),
+        reasoning_effort: Some(ReasoningEffortConfig::default()),
+        collaboration_mode: None,
+        personality: None,
+        message_history: None,
+        network_proxy: None,
+        rollout_path: None,
+    };
+
+    chat.handle_thread_session(configured);
+
+    assert_eq!(&chat.config_ref().cwd, &session_cwd);
+    assert_eq!(
+        chat.config_ref().permissions.user_visible_workspace_roots(),
+        session_runtime_workspace_roots.as_slice()
+    );
+    assert_eq!(
+        chat.config_ref().permissions.effective_permission_profile(),
+        session_permission_profile
     );
 }
 
@@ -441,11 +515,10 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
 async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    let expected_app_server_permission_profile = AppServerPermissionProfile::External {
-        network: PermissionProfileNetworkPermissions { enabled: false },
+    let expected_app_server_permission_profile = PermissionProfile::External {
+        network: NetworkSandboxPolicy::Restricted,
     };
-    let expected_permission_profile: PermissionProfile =
-        expected_app_server_permission_profile.clone().into();
+    let expected_permission_profile = expected_app_server_permission_profile.clone();
     let expected_sandbox = SandboxPolicy::ExternalSandbox {
         network_access: NetworkAccess::Restricted,
     };
@@ -462,8 +535,11 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
         permission_profile: expected_permission_profile,
         active_permission_profile: None,
         cwd: test_path_buf("/home/user/external").abs(),
+        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        collaboration_mode: None,
+        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -474,7 +550,7 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
     let actual_sandbox = SandboxPolicy::from(chat.config_ref().legacy_sandbox_policy());
     assert_eq!(&actual_sandbox, &expected_sandbox);
     assert_eq!(
-        AppServerPermissionProfile::from(chat.config_ref().permissions.permission_profile()),
+        chat.config_ref().permissions.effective_permission_profile(),
         expected_app_server_permission_profile
     );
 }
@@ -500,8 +576,11 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
+        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        collaboration_mode: None,
+        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -513,6 +592,7 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
         "user-1",
         vec![AppServerUserInput::Image {
             url: remote_image_urls[0].clone(),
+            detail: None,
         }],
         ReplayKind::ResumeInitialMessages,
     );
@@ -554,8 +634,11 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
+        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
+        collaboration_mode: None,
+        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -567,6 +650,7 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
         "user-1",
         vec![AppServerUserInput::LocalImage {
             path: local_images[0].clone(),
+            detail: None,
         }],
         ReplayKind::ResumeInitialMessages,
     );
@@ -824,8 +908,11 @@ async fn replayed_reasoning_item_hides_raw_reasoning_when_disabled() {
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
         cwd: test_project_path().abs(),
+        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
+        collaboration_mode: None,
+        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -869,8 +956,11 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
         cwd: test_project_path().abs(),
+        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
+        collaboration_mode: None,
+        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -894,6 +984,34 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
         other => panic!("expected InsertHistoryCell, got {other:?}"),
     };
     assert!(rendered.contains("Raw reasoning"));
+}
+
+#[tokio::test]
+async fn replayed_in_progress_mcp_tool_call_stays_active() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _ = drain_insert_history(&mut rx);
+
+    chat.replay_thread_item(
+        AppServerThreadItem::McpToolCall {
+            id: "mcp-1".to_string(),
+            server: "copilot-bridge".to_string(),
+            tool: "copilot".to_string(),
+            status: codex_app_server_protocol::McpToolCallStatus::InProgress,
+            arguments: json!({"action": "wait"}),
+            mcp_app_resource_uri: None,
+            plugin_id: None,
+            result: None,
+            error: None,
+            duration_ms: None,
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshot,
+    );
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+    let active = active_blob(&chat);
+    assert!(active.contains("Calling"));
+    assert!(!active.contains("MCP tool call completed without a result"));
 }
 
 #[tokio::test]
@@ -1012,8 +1130,8 @@ async fn replayed_stream_error_does_not_set_retry_status_or_status_indicator() {
         cells.is_empty(),
         "expected no history cell for replayed StreamError event"
     );
-    assert_eq!(chat.current_status.header, "Idle");
-    assert!(chat.retry_status_header.is_none());
+    assert_eq!(chat.status_state.current_status.header, "Idle");
+    assert!(chat.status_state.retry_status_header.is_none());
     assert!(chat.bottom_pane.status_widget().is_none());
 }
 
@@ -1040,7 +1158,7 @@ async fn thread_snapshot_replayed_stream_recovery_restores_previous_status_heade
         .expect("status indicator should be visible");
     assert_eq!(status.header(), "Working");
     assert_eq!(status.details(), None);
-    assert!(chat.retry_status_header.is_none());
+    assert!(chat.status_state.retry_status_header.is_none());
 }
 
 #[tokio::test]
@@ -1062,5 +1180,5 @@ async fn stream_recovery_restores_previous_status_header() {
         .expect("status indicator should be visible");
     assert_eq!(status.header(), "Working");
     assert_eq!(status.details(), None);
-    assert!(chat.retry_status_header.is_none());
+    assert!(chat.status_state.retry_status_header.is_none());
 }

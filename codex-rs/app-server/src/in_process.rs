@@ -59,6 +59,7 @@ use crate::message_processor::ConnectionSessionState;
 use crate::message_processor::MessageProcessor;
 use crate::message_processor::MessageProcessorArgs;
 use crate::outgoing_message::ConnectionId;
+use crate::outgoing_message::NotificationCoalescing;
 use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -102,7 +103,10 @@ pub const DEFAULT_IN_PROCESS_CHANNEL_CAPACITY: usize = CHANNEL_CAPACITY;
 type PendingClientRequestResponse = std::result::Result<Result, JSONRPCErrorError>;
 
 fn server_notification_requires_delivery(notification: &ServerNotification) -> bool {
-    matches!(notification, ServerNotification::TurnCompleted(_))
+    matches!(
+        notification,
+        ServerNotification::TurnCompleted(_) | ServerNotification::ThreadSettingsUpdated(_)
+    )
 }
 
 /// Input needed to start an in-process app-server runtime.
@@ -119,6 +123,8 @@ pub struct InProcessStartArgs {
     pub cli_overrides: Vec<(String, TomlValue)>,
     /// Loader override knobs used by config API paths.
     pub loader_overrides: LoaderOverrides,
+    /// Whether config API paths should reject unknown config fields.
+    pub strict_config: bool,
     /// Preloaded cloud requirements provider.
     pub cloud_requirements: CloudRequirementsLoader,
     /// Loader used to fetch typed thread config sources before a thread starts.
@@ -377,10 +383,18 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 .await;
         let analytics_events_client =
             analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref());
-        let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(
-            outgoing_tx,
-            analytics_events_client.clone(),
-        ));
+        let notification_coalescing = if args.config.app_server_notification_coalescing_enabled {
+            NotificationCoalescing::Enabled
+        } else {
+            NotificationCoalescing::Disabled
+        };
+        let outgoing_message_sender = Arc::new(
+            OutgoingMessageSender::new_with_notification_coalescing(
+                outgoing_tx,
+                notification_coalescing,
+                analytics_events_client.clone(),
+            ),
+        );
 
         let (writer_tx, mut writer_rx) = mpsc::channel::<QueuedOutgoingMessage>(channel_capacity);
         let outbound_initialized = Arc::new(AtomicBool::new(false));
@@ -409,6 +423,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
             args.config.codex_home.to_path_buf(),
             args.cli_overrides,
             args.loader_overrides,
+            args.strict_config,
             args.cloud_requirements,
             args.arg0_paths.clone(),
             args.thread_config_loader,
@@ -433,6 +448,20 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 remote_control_handle: None,
                 plugin_startup_tasks: crate::PluginStartupTasks::Start,
             }));
+            let windows_control_plane =
+                match crate::windows_control::WindowsAppServerControlPlane::start(
+                    processor.codex_home(),
+                    processor.thread_manager(),
+                    processor.config_api(),
+                )
+                .await
+                {
+                    Ok(control_plane) => Some(control_plane),
+                    Err(err) => {
+                        warn!("failed to start in-process Windows app-server control plane: {err}");
+                        None
+                    }
+                };
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());
             let mut listen_for_threads = true;
@@ -511,6 +540,11 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
             processor.clear_all_thread_listeners().await;
             processor.drain_background_tasks().await;
             processor.shutdown_threads().await;
+            if let Some(windows_control_plane) = windows_control_plane
+                && let Err(err) = windows_control_plane.shutdown().await
+            {
+                warn!("failed to stop in-process Windows app-server control plane: {err}");
+            }
         });
         let mut pending_request_responses =
             HashMap::<RequestId, oneshot::Sender<PendingClientRequestResponse>>::new();
@@ -765,6 +799,7 @@ mod tests {
             config,
             cli_overrides: Vec::new(),
             loader_overrides: LoaderOverrides::default(),
+            strict_config: false,
             cloud_requirements: CloudRequirementsLoader::default(),
             thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
             feedback: CodexFeedback::new(),

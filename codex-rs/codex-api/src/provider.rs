@@ -80,30 +80,12 @@ pub fn should_retry_request_error(
 
     match err {
         TransportError::Http { status, body, .. } => {
-            if route.is_responses() {
-                let _ = body;
-                return responses_http_status_is_retryable(*status);
-            }
-
-            (policy.retry_on.retry_402
-                && status.as_u16() == 402
-                && body_is_usage_limit(body.as_deref()))
-                || (policy.retry_on.retry_429 && status.as_u16() == 429)
-                || (policy.retry_on.retry_5xx && status.is_server_error())
+            let _ = (route, body);
+            responses_http_status_is_retryable(*status)
         }
-        TransportError::Timeout | TransportError::Network(_) => policy.retry_on.retry_transport,
+        TransportError::Timeout | TransportError::Network(_) => true,
         TransportError::RetryLimit | TransportError::Build(_) => false,
     }
-}
-
-fn body_is_usage_limit(body: Option<&str>) -> bool {
-    let Some(body) = body.map(str::trim).filter(|body| !body.is_empty()) else {
-        return false;
-    };
-    let normalized = body.to_ascii_lowercase();
-    normalized.contains("usage_limit_reached")
-        || normalized.contains("usage limit reached")
-        || normalized.contains("daily spending limit reached")
 }
 
 /// HTTP endpoint configuration used to talk to a concrete API deployment.
@@ -348,40 +330,67 @@ mod tests {
     }
 
     #[test]
-    fn non_responses_requests_keep_existing_402_whitelist_behavior() {
+    fn non_responses_requests_retry_all_http_statuses_without_whitelist() {
         let policy = RetryPolicy {
             max_attempts: 4,
             base_delay: Duration::from_millis(200),
             retry_on: RetryOn {
-                retry_402: true,
+                retry_402: false,
                 retry_429: false,
                 retry_5xx: false,
                 retry_transport: false,
             },
         };
-        let usage_limit_err = TransportError::Http {
-            status: StatusCode::PAYMENT_REQUIRED,
-            url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
-            headers: None,
-            body: Some("Daily spending limit reached".to_string()),
-        };
-        let non_usage_limit_err = TransportError::Http {
+        let payment_err = TransportError::Http {
             status: StatusCode::PAYMENT_REQUIRED,
             url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
             headers: None,
             body: Some(r#"{"error":{"type":"usage_not_included"}}"#.to_string()),
         };
+        let bad_request_err = TransportError::Http {
+            status: StatusCode::BAD_REQUEST,
+            url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
+            headers: None,
+            body: Some(r#"{"error":{"type":"bad_request"}}"#.to_string()),
+        };
 
         assert!(should_retry_request_error(
             &policy,
             RequestRetryRoute::Other,
-            &usage_limit_err,
+            &payment_err,
             0
         ));
-        assert!(!should_retry_request_error(
+        assert!(should_retry_request_error(
             &policy,
             RequestRetryRoute::Other,
-            &non_usage_limit_err,
+            &bad_request_err,
+            0
+        ));
+    }
+
+    #[test]
+    fn remote_timeout_and_network_errors_retry_without_transport_flag() {
+        let policy = RetryPolicy {
+            max_attempts: 4,
+            base_delay: Duration::from_millis(200),
+            retry_on: RetryOn {
+                retry_402: false,
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+        };
+
+        assert!(should_retry_request_error(
+            &policy,
+            RequestRetryRoute::Other,
+            &TransportError::Timeout,
+            0
+        ));
+        assert!(should_retry_request_error(
+            &policy,
+            RequestRetryRoute::Other,
+            &TransportError::Network("connection reset".to_string()),
             0
         ));
     }

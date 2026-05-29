@@ -1,67 +1,22 @@
-# local3 定制功能清单（2026-05-10）
+# local3 定制功能清单_2026-05-10
+本清单用于在 local3 合并官方上游版本后，按用户可感知的功能结果核对本地定制能力是否仍然保留。
 
-## 用途
+1. local3 版本身份保留为 `<Codex 版本>-local3`，所有用户能看到版本的位置都要显示这个本地构建后缀；原来可能被上游版本覆盖成官方裸版本，修改后 CLI、TUI、状态卡片、标题区、历史单元和升级提示都继续显示 local3 身份，这样用户能确认自己正在使用本地定制版。
 
-- 本文用于把 `local1` 与 `local2` 的长期定制能力整合成一份 `local3` 清单。
-- 本文用于以后并入 upstream 时逐项核对，不写代码方案，不写实现步骤，不写分析报告。
-- `upstream` 是官方上游仓库；用户视角是以后合并官方新版本时，按这份清单检查自己的功能有没有丢。
+2. 首次输入纯文本 `你好` 时显示 local3 功能清单，并且每个新线程只显示 1 次；原来清单可能被做成某个客户端专用提示或重复插入，修改后 brand-new thread 或 Clear 后的新线程中，首个普通用户输入恰好为 `你好` 才会在首个 assistant 主消息第一段显示全量 local3 清单，resume、continue、fork、历史线程重开、子会话和其他输入都不重复触发，这样用户首次检查定制功能时能稳定看到完整清单且不会被反复打扰。
 
-## 整合基线
+3. 远端请求失败后的自动重试覆盖所有错误，保持更耐用、更少打断的体验；原来只有部分远端错误会按白名单重试，修改后所有远端请求错误都进入普通自动重试，单次等待上限保持 `10s`，中间失败不写入历史，只保留可见重连提示和可诊断信息，这样用户在临时鉴权、网络、服务抖动或其他远端异常时更少看到终态失败。
 
-- `local3` 的能力口径按并集收口：`local3 = local1 ∪ local2`。
-- `local2` 已覆盖的大部分能力保持不变；`local1` 中缺失于 `local2` 的 provider refresh/base_url/experimental_bearer_token 口径在 `L3-F25` 补齐。
+4. 重试期间的可见提示、日志噪声和统计口径保持平衡；原来中间态可能刷屏或让诊断信息丢失，修改后用户仍能看到首次重连、重试次数、重试详情等提示，日志不再被中间失败刷屏，同时 retry metrics 继续保留，这样用户界面更安静，排查问题时仍有统计依据。
 
-## 功能清单
+5. 历史会话默认跨 provider 可发现，并且继续旧线程时使用当前顶层 provider；原来历史入口可能按 provider 收窄，修改后历史列表、最近会话和 resume picker 默认都能看到旧会话，不要求历史 provider 来源绝对保真，这样用户切换 provider 后仍能找回并继续之前的工作。
 
-| ID | 功能 | 必须保留的口径 |
-|---|---|---|
-| `L3-F0` | local3 当前显示版本 | 当前 Codex 展示版本口径为 `<Codex 版本>-local3`；以当前仓库版本为例应展示为 `0.130.0-local3`。后续合并到更高 upstream 版本时，应继续保留 `-local3` 本地构建身份后缀。 |
-| `L3-F1` | local3 版本显示 | CLI、TUI、状态卡片、标题区、历史单元、升级提示等用户可见位置，都要显示 local3 本地构建身份，不能被 upstream 合并改回官方裸版本。 |
-| `L3-F2` | local3 版本显示测试保护 | 和 local3 版本显示直接相关的断言、快照或等效测试保护要保留；合并 upstream 后，如果版本显示被冲掉，应能被测试或静态复核发现。 |
-| `L3-F3` | “你好”首轮显示清单 | brand-new thread 或 Clear 后的新线程，首个普通用户输入恰好为纯文本 `你好` 时，首个 assistant 主消息第一段必须显示固定 local3 功能清单；该清单必须显式包含“当前版本后缀 `<Codex 版本>-local3`”以及本文 `L3-F0` 到 `L3-F25` 的全量自定义功能条目。其他输入如 `hello`、`hi`、`你好啊`、带图片、多输入项、富文本 `你好` 不触发。 |
-| `L3-F4` | “你好”清单只显示一次 | 同一线程后续轮次、resume、continue、fork、历史线程重开、MCP `codex-reply` 都不能重复插入这段清单；subagent、reviewer、guardian 等子会话也不能触发。 |
-| `L3-F5` | “你好”清单走普通 assistant 主消息 | 清单必须作为普通 assistant 主消息的首段文本跨 CLI、app-server、VS Code、MCP 一致可见；不能退回 TUI 专用 banner、status、计划事件、history cell 或客户端旁路。 |
-| `L3-F6` | `/responses` 远端 HTTP 错误统一自动重试 | `/responses` 主链远端 HTTP 错误统一进入普通自动 retry，包含 `401`，不再只依赖 `402`、`429`、`5xx` 白名单。 |
-| `L3-F7` | 非 `/responses` 端点保留旧重试白名单 | 非 `/responses` 端点继续只按旧口径重试：`402 usage-limit`、`429`、`5xx`、传输层错误；非 usage-limit 的 `402` 不能被误判为可重试。 |
-| `L3-F8` | `401` 走普通 retry | `/responses` 主链执行中出现 `401` 时，request-layer、stream、websocket reconnect、fallback to HTTP 都直接走普通 retry；不能退回 unauthorized recovery 优先分支，也不能直接终止。 |
-| `L3-F9` | retry 次数保持大次数或等效无界目标 | 普通主链 retry 的 bounded/unbounded 语义要保留；分类扩展不能被误改成很少次数的短 retry，也不能把中间 retry 误当终态失败。 |
-| `L3-F10` | 单次 retry 等待上限为 `10s` | 无论 HTTP 错误分类扩展到多少，单次指数退避或 `Retry-After` 等待都不能超过 `10s`。 |
-| `L3-F11` | retry 中间态不写入历史 | `/responses` 主链 retry 或 reconnect 的中间态只更新状态区和状态详情，不往历史区写入脏错误记录；只有最终失败才进入终态错误路径。 |
-| `L3-F12` | retry 可见提示保留 | 首个 websocket retry、`Reconnecting... N`、retry 详情字段、`additional_details`、`request_retry_notifier`、`will_retry = true` 等用户可见或可诊断提示不能丢。 |
-| `L3-F13` | retry 日志降噪 | `/responses` retry 中间态不再刷 `codex.api_request`、`codex.websocket_connect`、`codex.websocket_request`、失败型 `codex.websocket_event` 的中间态 OTEL log-trace；sampling reconnect warn 也不能刷屏。 |
-| `L3-F14` | retry metrics 保留 | retry 中间态 metrics 继续保留；不能因为降噪把可观测统计一起删掉。 |
-| `L3-F15` | 历史默认跨 provider 可发现 | 历史列表、最近会话、resume picker 默认不按 provider 过滤；继续旧线程时执行仍使用当前 `config.toml` 顶层 provider。 |
-| `L3-F16` | provider provenance 不作为保真要求 | 历史与 resume 默认跨 provider 可发现；不要求 `thread/list` 历史 provider provenance 保真。 |
-| `L3-F17` | 全局 `service_tier=priority` 默认开启 | 顶层 `force_service_tier_priority` 省略或显式 `true` 时，所有 `/responses` 请求在底层构造时强制带 `service_tier=priority`。 |
-| `L3-F18` | `force_service_tier_priority = false` 恢复官方映射 | 顶层显式 `false` 时恢复官方原始映射：`Fast -> priority`、`Flex -> flex`、`None -> unset`，不能误压 `flex`。 |
-| `L3-F19` | `force_service_tier_priority` 只允许顶层配置 | 该字段只允许写在顶层 `config.toml`；任何 `[profiles.*].force_service_tier_priority` 都不得生效。 |
-| `L3-F20` | Windows app/app-server 默认日志降噪 | 未显式设置 `RUST_LOG` 时，Windows app/app-server 默认日志过滤为 warn 级别，不能高噪声写入 sqlite 日志；显式 `RUST_LOG` 时仍可覆盖。 |
-| `L3-F21` | TUI 默认日志降噪 | 未显式设置 `RUST_LOG` 时，`codex-tui.log` 与 TUI sqlite log layer 默认降噪；显式 `RUST_LOG` 时仍可恢复详细日志。 |
-| `L3-F22` | rollout 批量 flush 优化默认关闭 | `rollout` 写盘批量 flush 只能作为显式可选 runtime 优化保留，默认必须关闭；未在 `config.toml` 中明确开启时，不能静默改变会话过程记录的落盘时机、崩溃恢复口径或历史可恢复性。用户视角是默认继续保留当前历史安全感；只有显式开启后，才用更低磁盘 I/O 换取极端崩溃场景下最后少量记录可能未及时落盘的风险。 |
-| `L3-F23` | app-server 高频通知合并默认关闭 | `app-server` 高频通知合并/节流只能作为显式可选 runtime 优化保留，默认必须关闭；未在 `config.toml` 中明确开启时，命令输出 delta、文件变更 delta、token usage、diff/plan 更新等客户端可见事件不能被静默批量合并或延迟。用户视角是默认继续看到当前逐条刷新行为；只有显式开启后，才接受输出从逐字/逐条跳动变成小批量更新，以降低客户端、网络和序列化负担。 |
-| `L3-F24` | analytics / feedback / log_db 默认关闭并可配置开启 | `analytics`、`feedback`、`log_db` 必须支持分层配置开关，local3 默认关闭这些非必要 runtime 负担；需要产品统计、用户反馈上传或本地 sqlite 日志排查时，必须能通过 `config.toml` 显式打开对应能力。用户视角是默认更安静、更轻；开启后才恢复统计、反馈日志采集或本地日志入库。 |
-| `L3-F25` | Provider refresh/retry 与 Windows tray 两字段联动 | Provider runtime 刷新口径必须继续只覆盖 `base_url` 与 `experimental_bearer_token` 两字段；Windows tray 的 source provider 字段复制只允许复制这两字段到当前 target provider，写入成功后再尝试 refresh；无 live instance 也视为成功并给出“未刷新任何实例”反馈。 |
+6. 全局优先服务层默认开启，并允许显式恢复官方映射；原来不同配置层级可能让请求服务层表现不一致，修改后顶层未配置或设为开启时统一使用 priority，顶层显式关闭时恢复 Fast -> priority、Flex -> flex、None -> unset 的官方映射，profile 内同名设置不生效，这样用户默认获得更稳定的优先体验，也能按需回到官方行为。
 
-## L3-F3 首轮清单显示内容（冻结口径）
+7. Windows app、app server 和 TUI 默认日志降噪，运行时负担默认更轻；原来未显式设置日志时可能产生高噪声记录，修改后 Windows app/app server 和 TUI 默认只保留更安静的日志级别，显式设置后仍可打开详细日志，同时 analytics、feedback、log_db 默认关闭但可配置开启，这样用户日常使用更轻、更安静，需要排查或反馈时还能手动打开。
 
-- 本节用于冻结 `L3-F3` 的“用户实际看到什么内容”。
-- 首轮清单正文必须以“普通 assistant 主消息第一段文本”展示，不得改为旁路 UI（如 banner、status 或计划事件）。
-- 首轮清单第一行必须包含当前版本后缀，格式为：`local3 定制功能已启用（当前版本：<Codex 版本>-local3）`。
-- 其中 `<Codex 版本>` 必须随当前包版本动态变化；用户看到的是例如 `0.130.0-local3` 这类实时版本值，而不是写死的历史值。
-- 首轮清单必须覆盖本文“功能清单”表中的全部 `L3-F*` 条目，不允许只显示子集。
-- 首轮清单覆盖范围由表格动态确定：以“功能清单”表内当前存在的 `| \`L3-F数字\` |` 行为准，按表格顺序渲染，不写死上限编号。
-- 推荐渲染格式：
-  - 第一行：`local3 定制功能已启用（当前版本：<Codex 版本>-local3）`
-  - 后续行：`- <ID> <功能名>：<必须保留的口径摘要>`
-- 维护规则：当“功能清单”表新增、删除、重排或改名某个 `L3-F*` 条目时，首轮清单覆盖集应自动随表变化，不需要再修改本节的固定枚举列表。
+8. 默认开启不影响使用的批量优化，并保留即时反馈和历史安全；原来 rollout 批量 flush 与 app-server 高频通知合并默认关闭，修改后这些优化可以默认开启，但前提是输出节奏、token usage、diff/plan 更新、命令完成状态和崩溃恢复与未开启优化时保持用户可感知等价，同时必须保留显式关闭开关；这样用户默认获得更低 I/O 和更少客户端负担，但仍能看到及时刷新和可靠历史。
 
-## 使用方式
+9. Provider refresh 的 URL 和 token 刷新范围扩大到所有正在使用的 Codex 入口；原来 provider runtime 刷新只要求覆盖 `base_url` 与 `experimental_bearer_token` 两个字段，刷新结果可能只影响部分 live instance，修改后这两个字段刷新必须对所有 app server、已经打开的 Codex 窗口/会话、以及 `codex exec` 都生效，Windows tray 从 source provider 复制字段到当前 target provider 后也要触发同一刷新口径；这样用户换 URL 或 token 后，不同入口不会继续拿旧地址或旧 token 发请求。
 
-- 合并 upstream 前，先读本文确认 local3 要保留哪些功能。
-- 合并 upstream 后，按全部 `L3-F*` 条目逐条核对。
-- 如果后续新增 local3 功能，继续追加新的 `L3-F*` 条目。
-- 本文只是一份功能清单，不负责写代码方案、执行步骤或测试报告。
-
-## 最终结论
-
-local3 当前需要保留的功能已按条目列出；后续并入 upstream 时按本清单逐项核对即可。
+10. 无 live instance 的 provider 字段复制仍视为成功，并给出明确反馈；原来没有可刷新实例时可能让用户误以为字段写入失败，修改后只要 `base_url` 与 `experimental_bearer_token` 写入成功，即使没有任何正在运行的实例，也反馈“未刷新任何实例”，这样用户能区分“配置已保存”和“当前没有可通知的运行入口”。

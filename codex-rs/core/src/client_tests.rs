@@ -1,33 +1,28 @@
 use super::AuthRequestTelemetryContext;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
-use super::RequestRouteTelemetry;
-use super::TransportError;
 use super::UnauthorizedRecoveryExecution;
-use super::WebsocketSession;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
-use super::build_live_api_auth;
-use super::format_retry_transport_error_details;
-use super::should_emit_websocket_connect_or_request_log_trace;
-use super::should_emit_websocket_event_log_trace;
-use crate::Prompt;
+use crate::AttestationContext;
+use crate::AttestationProvider;
+use crate::GenerateAttestationFuture;
 use codex_api::ApiError;
 use codex_api::ResponseEvent;
 use codex_app_server_protocol::AuthMode;
+use codex_login::AuthManager;
+use codex_login::CodexAuth;
 use codex_model_provider::BearerAuthProvider;
-use codex_model_provider::create_model_provider;
+use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
+use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
-use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::config_types::ServiceTier;
-use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
@@ -42,15 +37,15 @@ use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
 use futures::StreamExt;
-use http::StatusCode;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::RwLock as StdRwLock;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
@@ -76,9 +71,11 @@ fn test_model_client(session_source: SessionSource) -> ModelClient {
         provider,
         session_source,
         /*model_verbosity*/ None,
+        /*force_service_tier_priority*/ true,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        /*attestation_provider*/ None,
     )
 }
 
@@ -125,59 +122,6 @@ fn test_session_telemetry() -> SessionTelemetry {
         "test-terminal".to_string(),
         SessionSource::Cli,
     )
-}
-
-fn test_request_prompt() -> Prompt {
-    Prompt {
-        input: Vec::new(),
-        tools: Vec::new(),
-        parallel_tool_calls: false,
-        base_instructions: BaseInstructions {
-            text: "test instructions".to_string(),
-        },
-        personality: None,
-        output_schema: None,
-        output_schema_strict: true,
-    }
-}
-
-fn build_test_responses_request(
-    model_slug: &str,
-    service_tier: Option<ServiceTier>,
-) -> codex_api::ResponsesApiRequest {
-    let client = test_model_client(SessionSource::Cli);
-    build_test_responses_request_with_priority_hook(
-        client,
-        model_slug,
-        service_tier,
-        /*force_service_tier_priority*/ true,
-    )
-}
-
-fn build_test_responses_request_with_priority_hook(
-    client: ModelClient,
-    model_slug: &str,
-    service_tier: Option<ServiceTier>,
-    force_service_tier_priority: bool,
-) -> codex_api::ResponsesApiRequest {
-    client.set_force_service_tier_priority(force_service_tier_priority);
-    let provider = client
-        .provider_snapshot()
-        .to_api_provider(/*auth_mode*/ None)
-        .expect("test provider");
-    let mut model_info = test_model_info();
-    model_info.slug = model_slug.to_string();
-
-    client
-        .build_responses_request(
-            &provider,
-            &test_request_prompt(),
-            &model_info,
-            /*effort*/ None,
-            ReasoningSummary::Auto,
-            service_tier.map(|tier| tier.request_value().to_string()),
-        )
-        .expect("responses request")
 }
 
 #[derive(Default)]
@@ -312,74 +256,6 @@ fn build_subagent_headers_sets_other_subagent_label() {
         .get(X_OPENAI_SUBAGENT_HEADER)
         .and_then(|value| value.to_str().ok());
     assert_eq!(value, Some("memory_consolidation"));
-}
-
-#[test]
-fn build_responses_request_forces_priority_without_service_tier_when_hook_enabled() {
-    let request = build_test_responses_request("gpt-test", /*service_tier*/ None);
-    assert_eq!(request.service_tier.as_deref(), Some("priority"));
-}
-
-#[test]
-fn build_responses_request_forces_priority_for_gpt_5_5_when_hook_enabled() {
-    let request = build_test_responses_request("gpt-5.5", Some(ServiceTier::Flex));
-    assert_eq!(request.service_tier.as_deref(), Some("priority"));
-}
-
-#[test]
-fn build_responses_request_forces_priority_for_flex_tier_when_hook_enabled() {
-    let request = build_test_responses_request("gpt-test", Some(ServiceTier::Flex));
-    assert_eq!(request.service_tier.as_deref(), Some("priority"));
-}
-
-#[test]
-fn build_responses_request_forces_priority_for_fast_tier_when_hook_enabled() {
-    let request = build_test_responses_request("gpt-test", Some(ServiceTier::Fast));
-    assert_eq!(request.service_tier.as_deref(), Some("priority"));
-}
-
-#[test]
-fn build_responses_request_omits_service_tier_when_hook_disabled_and_no_tier() {
-    let request = build_test_responses_request_with_priority_hook(
-        test_model_client(SessionSource::Cli),
-        "gpt-test",
-        /*service_tier*/ None,
-        /*force_service_tier_priority*/ false,
-    );
-    assert_eq!(request.service_tier, None);
-}
-
-#[test]
-fn build_responses_request_maps_fast_to_priority_when_hook_is_false() {
-    let request = build_test_responses_request_with_priority_hook(
-        test_model_client(SessionSource::Cli),
-        "gpt-test",
-        Some(ServiceTier::Fast),
-        /*force_service_tier_priority*/ false,
-    );
-    assert_eq!(request.service_tier.as_deref(), Some("priority"));
-}
-
-#[test]
-fn build_responses_request_preserves_flex_when_hook_is_false() {
-    let request = build_test_responses_request_with_priority_hook(
-        test_model_client(SessionSource::Cli),
-        "gpt-test",
-        Some(ServiceTier::Flex),
-        /*force_service_tier_priority*/ false,
-    );
-    assert_eq!(request.service_tier.as_deref(), Some("flex"));
-}
-
-#[test]
-fn build_responses_request_gpt_5_4_uses_normal_fast_mapping_when_hook_is_false() {
-    let request = build_test_responses_request_with_priority_hook(
-        test_model_client(SessionSource::Cli),
-        "gpt-5.4",
-        Some(ServiceTier::Fast),
-        /*force_service_tier_priority*/ false,
-    );
-    assert_eq!(request.service_tier.as_deref(), Some("priority"));
 }
 
 #[test]
@@ -603,263 +479,107 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
     assert_eq!(auth_context.recovery_phase, Some("refresh_token"));
 }
 
-#[test]
-fn refresh_provider_runtime_updates_only_runtime_fields_and_clears_cached_websocket_session() {
-    let provider =
-        ModelProviderInfo::create_openai_provider(Some("https://old.example.com/v1".to_string()));
-    let client = ModelClient::new(
-        /*auth_manager*/ None,
+fn model_client_with_counting_attestation(
+    include_attestation: bool,
+) -> (ModelClient, Arc<AtomicUsize>) {
+    #[derive(Debug)]
+    struct CountingAttestationProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl AttestationProvider for CountingAttestationProvider {
+        fn header_for_request(
+            &self,
+            _context: AttestationContext,
+        ) -> GenerateAttestationFuture<'_> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                let call = calls.fetch_add(1, Ordering::Relaxed) + 1;
+                Some(http::HeaderValue::from_bytes(format!("v1.header-{call}").as_bytes()).unwrap())
+            })
+        }
+    }
+
+    let attestation_calls = Arc::new(AtomicUsize::new(0));
+    let (auth_manager, provider) = if include_attestation {
+        (
+            Some(AuthManager::from_auth_for_testing(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            )),
+            ModelProviderInfo::create_openai_provider(Some(CHATGPT_CODEX_BASE_URL.to_string())),
+        )
+    } else {
+        (
+            None,
+            create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses),
+        )
+    };
+    let model_client = ModelClient::new(
+        auth_manager,
+        SessionId::new(),
         ThreadId::new(),
         /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
-        provider.clone(),
-        SessionSource::Cli,
+        provider,
+        SessionSource::Exec,
         /*model_verbosity*/ None,
+        /*force_service_tier_priority*/ true,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        Some(Arc::new(CountingAttestationProvider {
+            calls: attestation_calls.clone(),
+        })),
     );
-
-    client
-        .state
-        .disable_websockets
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    let cached_websocket_session = WebsocketSession::default();
-    cached_websocket_session.set_connection_reused(true);
-    client.store_cached_websocket_session(cached_websocket_session);
-
-    client.refresh_provider_runtime(
-        Some("https://new.example.com/v1".to_string()),
-        Some("new-token".to_string()),
-    );
-
-    let refreshed_provider = client.provider_snapshot();
-    assert_eq!(
-        refreshed_provider.base_url.as_deref(),
-        Some("https://new.example.com/v1")
-    );
-    assert_eq!(
-        refreshed_provider.experimental_bearer_token.as_deref(),
-        Some("new-token")
-    );
-    assert_eq!(refreshed_provider.wire_api, provider.wire_api);
-    assert_eq!(
-        refreshed_provider.supports_websockets,
-        provider.supports_websockets
-    );
-    assert_eq!(
-        refreshed_provider.request_max_retries,
-        provider.request_max_retries
-    );
-    assert_eq!(
-        refreshed_provider.stream_max_retries,
-        provider.stream_max_retries
-    );
-    assert!(
-        client
-            .state
-            .disable_websockets
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-
-    let cached_websocket_session = client.take_cached_websocket_session();
-    assert!(!cached_websocket_session.connection_reused());
-    assert!(cached_websocket_session.last_request.is_none());
+    (model_client, attestation_calls)
 }
 
-#[test]
-fn live_api_auth_reads_refreshed_bearer_token() {
-    let provider_info = ModelProviderInfo {
-        experimental_bearer_token: Some("old-token".to_string()),
-        ..ModelProviderInfo::create_openai_provider(Some("https://old.example.com/v1".to_string()))
-    };
-    let model_provider = create_model_provider(provider_info.clone(), /*auth_manager*/ None);
-    let live_provider = Arc::new(StdRwLock::new(provider_info));
-    let auth = build_live_api_auth(
-        /*auth*/ None,
-        model_provider,
-        Arc::clone(&live_provider),
-    )
-    .expect("build live auth");
+#[tokio::test]
+async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses() {
+    let (model_client, attestation_calls) =
+        model_client_with_counting_attestation(/*include_attestation*/ true);
 
-    let mut headers = http::HeaderMap::new();
-    auth.add_auth_headers_result(&mut headers)
-        .expect("add old auth header");
+    let headers = model_client
+        .build_websocket_headers(/*turn_state*/ None, /*turn_metadata_header*/ None)
+        .await;
+
     assert_eq!(
         headers
-            .get(http::header::AUTHORIZATION)
+            .get(crate::attestation::X_OAI_ATTESTATION_HEADER)
             .and_then(|value| value.to_str().ok()),
-        Some("Bearer old-token")
+        Some("v1.header-1"),
     );
+    assert_eq!(attestation_calls.load(Ordering::Relaxed), 1);
+}
 
-    {
-        let mut provider = live_provider
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        provider.experimental_bearer_token = Some("new-token".to_string());
+#[tokio::test]
+async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
+    let (model_client, attestation_calls) =
+        model_client_with_counting_attestation(/*include_attestation*/ false);
+    let mut response_headers = http::HeaderMap::new();
+
+    if let Some(header_value) = model_client.generate_attestation_header_for().await {
+        response_headers.insert(crate::attestation::X_OAI_ATTESTATION_HEADER, header_value);
+    }
+    let mut compaction_headers = http::HeaderMap::new();
+    if let Some(header_value) = model_client.generate_attestation_header_for().await {
+        compaction_headers.insert(crate::attestation::X_OAI_ATTESTATION_HEADER, header_value);
+    }
+    let mut realtime_headers = http::HeaderMap::new();
+    if let Some(header_value) = model_client.generate_attestation_header_for().await {
+        realtime_headers.insert(crate::attestation::X_OAI_ATTESTATION_HEADER, header_value);
     }
 
-    let mut headers = http::HeaderMap::new();
-    auth.add_auth_headers_result(&mut headers)
-        .expect("add new auth header");
     assert_eq!(
-        headers
-            .get(http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok()),
-        Some("Bearer new-token")
+        response_headers.get(crate::attestation::X_OAI_ATTESTATION_HEADER),
+        None,
     );
-}
-
-#[test]
-fn retry_transport_error_details_reuse_semantic_usage_limit_formatter_when_available() {
-    let error = TransportError::Http {
-        status: StatusCode::TOO_MANY_REQUESTS,
-        url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
-        headers: None,
-        body: Some(
-            r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}"#
-                .to_string(),
-        ),
-    };
-
-    let details = format_retry_transport_error_details(&error);
-    assert!(
-        !details.starts_with("unexpected status 429"),
-        "expected semantic usage-limit details, got {details}"
+    assert_eq!(
+        compaction_headers.get(crate::attestation::X_OAI_ATTESTATION_HEADER),
+        None,
     );
-}
-
-#[test]
-fn retry_transport_error_details_keep_plain_429_as_raw_http_details() {
-    let error = TransportError::Http {
-        status: StatusCode::TOO_MANY_REQUESTS,
-        url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
-        headers: None,
-        body: Some(r#"{"detail":"rate limited"}"#.to_string()),
-    };
-
-    let details = format_retry_transport_error_details(&error);
-    assert!(details.starts_with("unexpected status 429"));
-    assert!(details.contains("rate limited"));
-}
-
-#[test]
-fn websocket_connect_log_trace_is_suppressed_for_responses_retry_chain() {
-    assert!(!should_emit_websocket_connect_or_request_log_trace(
-        RequestRouteTelemetry::for_endpoint("/responses"),
-        /*retry_chain_active*/ true,
-        /*error*/ None,
-    ));
-}
-
-#[test]
-fn websocket_request_log_trace_is_retained_for_non_responses_endpoint() {
-    let error = codex_api::ApiError::Transport(TransportError::Http {
-        status: StatusCode::SERVICE_UNAVAILABLE,
-        url: Some("https://example.com/v1/responses/compact".to_string()),
-        headers: None,
-        body: Some(r#"{"detail":"retry"}"#.to_string()),
-    });
-
-    assert!(should_emit_websocket_connect_or_request_log_trace(
-        RequestRouteTelemetry::for_endpoint("/responses/compact"),
-        /*retry_chain_active*/ false,
-        Some(&error),
-    ));
-}
-
-#[test]
-fn websocket_request_log_trace_is_suppressed_for_retryable_responses_failure() {
-    let error = codex_api::ApiError::Transport(TransportError::Http {
-        status: StatusCode::SERVICE_UNAVAILABLE,
-        url: Some("https://example.com/v1/responses".to_string()),
-        headers: None,
-        body: Some(r#"{"detail":"retry"}"#.to_string()),
-    });
-
-    assert!(!should_emit_websocket_connect_or_request_log_trace(
-        RequestRouteTelemetry::for_endpoint("/responses"),
-        /*retry_chain_active*/ false,
-        Some(&error),
-    ));
-}
-
-#[test]
-fn websocket_request_log_trace_is_suppressed_for_retryable_responses_unauthorized() {
-    let error = codex_api::ApiError::Transport(TransportError::Http {
-        status: StatusCode::UNAUTHORIZED,
-        url: Some("https://example.com/v1/responses".to_string()),
-        headers: None,
-        body: Some(r#"{"detail":"unauthorized"}"#.to_string()),
-    });
-
-    assert!(!should_emit_websocket_connect_or_request_log_trace(
-        RequestRouteTelemetry::for_endpoint("/responses"),
-        /*retry_chain_active*/ false,
-        Some(&error),
-    ));
-}
-
-#[test]
-fn websocket_event_log_trace_is_suppressed_for_retryable_response_failed() {
-    let result: std::result::Result<
-        Option<
-            std::result::Result<
-                tokio_tungstenite::tungstenite::Message,
-                tokio_tungstenite::tungstenite::Error,
-            >,
-        >,
-        codex_api::ApiError,
-    > = Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(
-        r#"{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"try again"}}}"#
-            .into(),
-    ))));
-
-    assert!(!should_emit_websocket_event_log_trace(
-        RequestRouteTelemetry::for_endpoint("/responses"),
-        &result,
-    ));
-}
-
-#[test]
-fn websocket_event_log_trace_is_retained_for_terminal_response_failed() {
-    let result: std::result::Result<
-        Option<
-            std::result::Result<
-                tokio_tungstenite::tungstenite::Message,
-                tokio_tungstenite::tungstenite::Error,
-            >,
-        >,
-        codex_api::ApiError,
-    > = Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(
-        r#"{"type":"response.failed","response":{"error":{"code":"invalid_prompt","message":"terminal"}}}"#
-            .into(),
-    ))));
-
-    assert!(should_emit_websocket_event_log_trace(
-        RequestRouteTelemetry::for_endpoint("/responses"),
-        &result,
-    ));
-}
-
-#[test]
-fn websocket_event_log_trace_is_suppressed_for_retryable_responses_unauthorized() {
-    let result: std::result::Result<
-        Option<
-            std::result::Result<
-                tokio_tungstenite::tungstenite::Message,
-                tokio_tungstenite::tungstenite::Error,
-            >,
-        >,
-        codex_api::ApiError,
-    > = Err(codex_api::ApiError::Transport(TransportError::Http {
-        status: StatusCode::UNAUTHORIZED,
-        url: Some("https://example.com/v1/responses".to_string()),
-        headers: None,
-        body: Some(r#"{"detail":"unauthorized"}"#.to_string()),
-    }));
-
-    assert!(!should_emit_websocket_event_log_trace(
-        RequestRouteTelemetry::for_endpoint("/responses"),
-        &result,
-    ));
+    assert_eq!(
+        realtime_headers.get(crate::attestation::X_OAI_ATTESTATION_HEADER),
+        None,
+    );
+    assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
 }
