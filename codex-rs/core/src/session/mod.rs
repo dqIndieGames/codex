@@ -1584,12 +1584,15 @@ impl Session {
             .config_layer_stack
             .with_user_config(&config_toml_path, user_config)
             .effective_config();
-        let cfg: ConfigToml =
-            deserialize_config_toml_with_base(merged_toml, config_base_dir).map_err(|err| {
-                CodexErr::InvalidRequest(format!(
-                    "failed to parse effective config while refreshing provider runtime: {err}"
-                ))
-            })?;
+        let cfg: ConfigToml = deserialize_config_toml_with_base(
+            merged_toml,
+            config_base_dir.as_path(),
+        )
+        .map_err(|err| {
+            CodexErr::InvalidRequest(format!(
+                "failed to parse effective config while refreshing provider runtime: {err}"
+            ))
+        })?;
 
         Self::resolve_provider_runtime_refresh(cfg, &config.model_provider_id)
     }

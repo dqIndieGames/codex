@@ -918,6 +918,7 @@ impl ModelClient {
             start.elapsed(),
             status,
             error_message.as_deref(),
+            /*emit_log_trace*/ true,
             auth_context.auth_header_attached,
             auth_context.auth_header_name,
             auth_context.retry_after_unauthorized,
@@ -2213,6 +2214,7 @@ impl RequestTelemetry for ApiTelemetry {
         status: Option<HttpStatusCode>,
         error: Option<&TransportError>,
         duration: Duration,
+        emit_log_trace: bool,
     ) {
         let error_message = error.map(telemetry_transport_error_message);
         let status = status.map(|s| s.as_u16());
@@ -2224,6 +2226,7 @@ impl RequestTelemetry for ApiTelemetry {
             status,
             error_message.as_deref(),
             duration,
+            emit_log_trace,
             self.auth_context.auth_header_attached,
             self.auth_context.auth_header_name,
             self.auth_context.retry_after_unauthorized,
@@ -2288,6 +2291,7 @@ impl WebsocketTelemetry for ApiTelemetry {
             duration,
             error_message.as_deref(),
             connection_reused,
+            /*emit_log_trace*/ true,
         );
         emit_feedback_request_tags_with_auth_env(
             &FeedbackRequestTags {
@@ -2323,7 +2327,7 @@ impl WebsocketTelemetry for ApiTelemetry {
         duration: Duration,
     ) {
         self.session_telemetry
-            .record_websocket_event(result, duration);
+            .record_websocket_event(result, duration, /*emit_log_trace*/ true);
     }
 }
 
