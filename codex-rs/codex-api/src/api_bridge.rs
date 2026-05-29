@@ -137,6 +137,7 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                             resets_at: None,
                             rate_limits: None,
                             promo_message: None,
+                            rate_limit_reached_type: None,
                         });
                     }
 
