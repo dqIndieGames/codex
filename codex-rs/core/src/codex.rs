@@ -7453,15 +7453,8 @@ async fn drain_in_flight(
     Ok(())
 }
 
-fn retry_message_for_status(
-    status: http::StatusCode,
-    retry_number: u64,
-    max_attempts: u64,
-) -> String {
-    format!(
-        "{} retry {retry_number}/{max_attempts}",
-        status.as_u16()
-    )
+fn retry_message_for_status(status: http::StatusCode, retry_number: u64) -> String {
+    format!("{} retry {retry_number}", status.as_u16())
 }
 
 fn retry_error_info_for_status(status: http::StatusCode) -> CodexErrorInfo {
@@ -7481,13 +7474,12 @@ async fn emit_retry_status_event(
     turn_context: &TurnContext,
     status: http::StatusCode,
     retry_number: u64,
-    max_attempts: u64,
     details: String,
 ) {
     sess.send_event(
         turn_context,
         EventMsg::StreamError(StreamErrorEvent {
-            message: retry_message_for_status(status, retry_number, max_attempts),
+            message: retry_message_for_status(status, retry_number),
             codex_error_info: Some(retry_error_info_for_status(status)),
             additional_details: Some(details),
         }),
@@ -7499,13 +7491,12 @@ async fn emit_transport_retry_status_event(
     sess: &Session,
     turn_context: &TurnContext,
     retry_number: u64,
-    max_attempts: u64,
     details: String,
 ) {
     sess.send_event(
         turn_context,
         EventMsg::StreamError(StreamErrorEvent {
-            message: format!("Reconnecting... {retry_number}/{max_attempts}"),
+            message: format!("Reconnecting... {retry_number}"),
             codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
                 http_status_code: None,
             }),
@@ -7531,7 +7522,6 @@ async fn emit_retryable_stream_error(
     }
 
     let details = err.to_string();
-    let max_attempts = fallback_retry_threshold;
     let websocket_handshake_status = matches!(
         &err,
         CodexErr::UnexpectedStatus(err)
@@ -7541,19 +7531,16 @@ async fn emit_retryable_stream_error(
                 .is_some_and(|url| url.starts_with("ws://") || url.starts_with("wss://"))
     );
     if websocket_handshake_status {
-        emit_transport_retry_status_event(sess, turn_context, retry_number, max_attempts, details)
-            .await;
+        emit_transport_retry_status_event(sess, turn_context, retry_number, details).await;
         return;
     }
     if let Some(status) = err
         .http_status_code_value()
         .and_then(|value| http::StatusCode::from_u16(value).ok())
     {
-        emit_retry_status_event(sess, turn_context, status, retry_number, max_attempts, details)
-            .await;
+        emit_retry_status_event(sess, turn_context, status, retry_number, details).await;
     } else {
-        emit_transport_retry_status_event(sess, turn_context, retry_number, max_attempts, details)
-            .await;
+        emit_transport_retry_status_event(sess, turn_context, retry_number, details).await;
     }
 }
 
@@ -7597,7 +7584,6 @@ async fn try_run_sampling_request(
                         turn_context.as_ref(),
                         status,
                         event.retry_number,
-                        event.max_attempts,
                         event.details,
                     )
                     .await;
@@ -7606,7 +7592,6 @@ async fn try_run_sampling_request(
                         sess.as_ref(),
                         turn_context.as_ref(),
                         event.retry_number,
-                        event.max_attempts,
                         event.details,
                     )
                     .await;
