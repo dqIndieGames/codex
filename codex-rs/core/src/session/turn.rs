@@ -98,6 +98,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
+use codex_protocol::protocol::StreamErrorEvent;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
@@ -145,6 +146,7 @@ pub(crate) async fn run_turn(
 ) -> Option<String> {
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    install_request_retry_notifier(&mut client_session, &sess, &turn_context);
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -1312,6 +1314,102 @@ async fn maybe_emit_pending_agent_message_start(
             .started_agent_message_items
             .insert(item_id.to_string());
     }
+}
+
+fn request_retry_message_for_status(
+    status: http::StatusCode,
+    retry_number: u64,
+    max_attempts: u64,
+) -> String {
+    format!(
+        "{} retry {retry_number}/{max_attempts}",
+        status.as_u16()
+    )
+}
+
+fn request_retry_error_info_for_status(status: http::StatusCode) -> CodexErrorInfo {
+    match status {
+        http::StatusCode::PAYMENT_REQUIRED => CodexErrorInfo::UsageLimitExceeded,
+        _ => CodexErrorInfo::ResponseTooManyFailedAttempts {
+            http_status_code: Some(status.as_u16()),
+        },
+    }
+}
+
+async fn emit_request_retry_status_event(
+    sess: &Session,
+    turn_context: &TurnContext,
+    status: http::StatusCode,
+    retry_number: u64,
+    max_attempts: u64,
+    details: String,
+) {
+    sess.send_event(
+        turn_context,
+        EventMsg::StreamError(StreamErrorEvent {
+            message: request_retry_message_for_status(status, retry_number, max_attempts),
+            codex_error_info: Some(request_retry_error_info_for_status(status)),
+            additional_details: Some(details),
+        }),
+    )
+    .await;
+}
+
+async fn emit_transport_request_retry_status_event(
+    sess: &Session,
+    turn_context: &TurnContext,
+    retry_number: u64,
+    max_attempts: u64,
+    details: String,
+) {
+    sess.send_event(
+        turn_context,
+        EventMsg::StreamError(StreamErrorEvent {
+            message: format!("Reconnecting... {retry_number}/{max_attempts}"),
+            codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: None,
+            }),
+            additional_details: Some(details),
+        }),
+    )
+    .await;
+}
+
+fn install_request_retry_notifier(
+    client_session: &mut ModelClientSession,
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+) {
+    client_session.set_request_retry_notifier(Some(Arc::new({
+        let sess = Arc::clone(sess);
+        let turn_context = Arc::clone(turn_context);
+        move |event| {
+            let sess = Arc::clone(&sess);
+            let turn_context = Arc::clone(&turn_context);
+            tokio::spawn(async move {
+                if let Some(status) = event.status {
+                    emit_request_retry_status_event(
+                        &sess,
+                        &turn_context,
+                        status,
+                        event.retry_number,
+                        event.max_attempts,
+                        event.details,
+                    )
+                    .await;
+                } else {
+                    emit_transport_request_retry_status_event(
+                        &sess,
+                        &turn_context,
+                        event.retry_number,
+                        event.max_attempts,
+                        event.details,
+                    )
+                    .await;
+                }
+            });
+        }
+    })));
 }
 
 /// Agent messages are text-only today; concatenate all text entries.

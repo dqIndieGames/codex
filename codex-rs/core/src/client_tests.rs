@@ -1,6 +1,9 @@
 use super::AuthRequestTelemetryContext;
+use super::ApiTelemetry;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
+use super::RequestRetryEvent;
+use super::RequestRouteTelemetry;
 use super::UnauthorizedRecoveryExecution;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
@@ -11,8 +14,11 @@ use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
 use codex_api::ApiError;
+use codex_api::RequestTelemetry;
 use codex_api::ResponseEvent;
+use codex_api::TransportError;
 use codex_app_server_protocol::AuthMode;
+use codex_login::AuthEnvTelemetry;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::BearerAuthProvider;
@@ -477,6 +483,51 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
     assert!(auth_context.retry_after_unauthorized);
     assert_eq!(auth_context.recovery_mode, Some("managed"));
     assert_eq!(auth_context.recovery_phase, Some("refresh_token"));
+}
+
+#[test]
+fn api_telemetry_notifies_streaming_request_retry() {
+    let retry_events = Arc::new(Mutex::new(Vec::<RequestRetryEvent>::new()));
+    let notifier = {
+        let retry_events = Arc::clone(&retry_events);
+        Arc::new(move |event| {
+            retry_events.lock().unwrap().push(event);
+        })
+    };
+    let telemetry = ApiTelemetry::new(
+        test_session_telemetry(),
+        AuthRequestTelemetryContext::new(
+            None,
+            &BearerAuthProvider::for_test(None, None),
+            PendingUnauthorizedRetry::default(),
+        ),
+        RequestRouteTelemetry::for_endpoint("/responses"),
+        AuthEnvTelemetry::default(),
+        Some(notifier),
+    );
+    let error = TransportError::Http {
+        status: http::StatusCode::SERVICE_UNAVAILABLE,
+        url: Some("https://example.com/v1/responses".to_string()),
+        headers: None,
+        body: Some("busy".to_string()),
+    };
+
+    telemetry.on_request_retry(
+        1,
+        3,
+        Some(http::StatusCode::SERVICE_UNAVAILABLE),
+        &error,
+    );
+
+    let retry_events = retry_events.lock().unwrap();
+    assert_eq!(retry_events.len(), 1);
+    assert_eq!(retry_events[0].retry_number, 1);
+    assert_eq!(retry_events[0].max_attempts, 3);
+    assert_eq!(
+        retry_events[0].status,
+        Some(http::StatusCode::SERVICE_UNAVAILABLE)
+    );
+    assert!(retry_events[0].details.contains("503"));
 }
 
 fn model_client_with_counting_attestation(

@@ -49,6 +49,30 @@ pub async fn create_mock_responses_server_sequence_unchecked(responses: Vec<Stri
     server
 }
 
+/// Same as `create_mock_responses_server_sequence_unchecked`, but starts with one 503 response
+/// before returning the provided successful Responses API sequence.
+pub async fn create_mock_responses_server_sequence_after_one_503(
+    responses: Vec<String>,
+) -> MockServer {
+    let server = responses::start_mock_server().await;
+
+    let seq_responder = SeqResponder {
+        num_calls: AtomicUsize::new(0),
+        responses,
+    };
+
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses$"))
+        .respond_with(One503ThenSeqResponder {
+            first_call_seen: AtomicUsize::new(0),
+            seq_responder,
+        })
+        .mount(&server)
+        .await;
+
+    server
+}
+
 struct SeqResponder {
     num_calls: AtomicUsize,
     responses: Vec<String>,
@@ -61,6 +85,21 @@ impl Respond for SeqResponder {
             Some(response) => responses::sse_response(response.clone()),
             None => panic!("no response for {call_num}"),
         }
+    }
+}
+
+struct One503ThenSeqResponder {
+    first_call_seen: AtomicUsize,
+    seq_responder: SeqResponder,
+}
+
+impl Respond for One503ThenSeqResponder {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        if self.first_call_seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            return ResponseTemplate::new(503).set_body_string("temporarily unavailable");
+        }
+
+        self.seq_responder.respond(request)
     }
 }
 

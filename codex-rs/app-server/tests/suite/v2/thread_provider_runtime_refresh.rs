@@ -1,11 +1,18 @@
 use anyhow::Result;
 use app_test_support::McpProcess;
+use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
+use app_test_support::create_mock_responses_server_sequence_after_one_503;
 use app_test_support::create_request_user_input_sse_response;
 use app_test_support::to_response;
+use codex_app_server_protocol::ConfigBatchWriteParams;
+use codex_app_server_protocol::ConfigEdit;
+use codex_app_server_protocol::ConfigWriteResponse;
+use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::MergeStrategy;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadProviderRuntimeRefreshAllLoadedParams;
@@ -18,6 +25,8 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_app_server_protocol::WriteStatus;
+use serde_json::json;
 use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -42,6 +51,26 @@ fn write_provider_refresh_config_with_agent_config(
     base_url: &str,
     token: &str,
     relative_agent_config_file: Option<&str>,
+) -> std::io::Result<()> {
+    write_provider_refresh_config_with_agent_config_and_request_retries(
+        codex_home,
+        server_uri,
+        base_url,
+        token,
+        relative_agent_config_file,
+        /*request_max_retries*/ 0,
+        /*supports_websockets*/ true,
+    )
+}
+
+fn write_provider_refresh_config_with_agent_config_and_request_retries(
+    codex_home: &Path,
+    server_uri: &str,
+    base_url: &str,
+    token: &str,
+    relative_agent_config_file: Option<&str>,
+    request_max_retries: u64,
+    supports_websockets: bool,
 ) -> std::io::Result<()> {
     if let Some(relative_agent_config_file) = relative_agent_config_file {
         let role_config_path = codex_home.join(relative_agent_config_file);
@@ -71,8 +100,8 @@ name = "Mock provider for test"
 base_url = "{base_url}"
 experimental_bearer_token = "{token}"
 wire_api = "responses"
-supports_websockets = true
-request_max_retries = 0
+supports_websockets = {supports_websockets}
+request_max_retries = {request_max_retries}
 stream_max_retries = 0
 "#
     );
@@ -165,6 +194,68 @@ async fn refresh_all_loaded(
     )
     .await??;
     to_response(response)
+}
+
+async fn run_text_turn(mcp: &mut McpProcess, thread_id: &str, text: &str) -> Result<()> {
+    let request_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread_id.to_string(),
+            input: vec![V2UserInput::Text {
+                text: text.to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let TurnStartResponse { turn } = to_response(response)?;
+    assert!(!turn.id.is_empty());
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    Ok(())
+}
+
+async fn start_text_turn(
+    mcp: &mut McpProcess,
+    thread_id: &str,
+    text: &str,
+) -> Result<String> {
+    let request_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread_id.to_string(),
+            input: vec![V2UserInput::Text {
+                text: text.to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let TurnStartResponse { turn } = to_response(response)?;
+    assert!(!turn.id.is_empty());
+    Ok(turn.id)
+}
+
+fn response_request_authorization_headers(
+    requests: &[wiremock::Request],
+) -> Vec<Option<String>> {
+    requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .map(|request| request.header("authorization"))
+        .collect()
 }
 
 #[tokio::test]
@@ -425,6 +516,120 @@ async fn thread_provider_runtime_refresh_all_loaded_keeps_failed_threads_empty_f
     assert!(response.applied_thread_ids.contains(&active_thread_id));
     assert!(response.queued_thread_ids.is_empty());
     assert!(response.failed_threads.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_batch_write_refreshes_loaded_thread_provider_runtime() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    write_provider_refresh_config(
+        codex_home.path(),
+        &server.uri(),
+        &format!("{}/v1", server.uri()),
+        "old-token",
+    )?;
+
+    let mut mcp = init_mcp(codex_home.path()).await?;
+    let thread_id = start_thread(&mut mcp).await?;
+    run_text_turn(&mut mcp, &thread_id, "first request").await?;
+
+    let requests_before_write = server.received_requests().await.unwrap_or_default();
+    let headers_before_write = response_request_authorization_headers(&requests_before_write);
+    assert!(
+        !headers_before_write.is_empty(),
+        "expected a Responses API request before config write"
+    );
+    assert!(
+        headers_before_write
+            .iter()
+            .all(|header| header.as_deref() == Some("Bearer old-token")),
+        "requests before config write should use old token: {headers_before_write:?}"
+    );
+
+    let batch_id = mcp
+        .send_config_batch_write_request(ConfigBatchWriteParams {
+            file_path: Some(codex_home.path().join("config.toml").display().to_string()),
+            edits: vec![ConfigEdit {
+                key_path: "model_providers.mock_provider.experimental_bearer_token".to_string(),
+                value: json!("new-token"),
+                merge_strategy: MergeStrategy::Replace,
+            }],
+            expected_version: None,
+            reload_user_config: false,
+        })
+        .await?;
+    let batch_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(batch_id)),
+    )
+    .await??;
+    let batch_write: ConfigWriteResponse = to_response(batch_response)?;
+    assert_eq!(batch_write.status, WriteStatus::Ok);
+
+    run_text_turn(&mut mcp, &thread_id, "second request").await?;
+
+    let requests_after_write = server.received_requests().await.unwrap_or_default();
+    let headers_after_write = response_request_authorization_headers(&requests_after_write);
+    assert!(
+        headers_after_write.len() > headers_before_write.len(),
+        "expected another Responses API request after config write"
+    );
+    assert!(
+        headers_after_write[headers_before_write.len()..]
+            .iter()
+            .all(|header| header.as_deref() == Some("Bearer new-token")),
+        "requests after config write should use new token: {headers_after_write:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn retryable_503_request_emits_visible_retry_error_notification() -> Result<()> {
+    let responses = vec![create_final_assistant_message_sse_response("Done")?];
+    let server = create_mock_responses_server_sequence_after_one_503(responses).await;
+    let codex_home = TempDir::new()?;
+    write_provider_refresh_config_with_agent_config_and_request_retries(
+        codex_home.path(),
+        &server.uri(),
+        &format!("{}/v1", server.uri()),
+        "token",
+        /*relative_agent_config_file*/ None,
+        /*request_max_retries*/ 1,
+        /*supports_websockets*/ false,
+    )?;
+
+    let mut mcp = init_mcp(codex_home.path()).await?;
+    let thread_id = start_thread(&mut mcp).await?;
+    let turn_id = start_text_turn(&mut mcp, &thread_id, "trigger retry").await?;
+
+    let retry_notification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("error"),
+    )
+    .await??;
+    let retry_error: ErrorNotification = serde_json::from_value(
+        retry_notification
+            .params
+            .expect("error notification should include params"),
+    )?;
+    assert!(retry_error.will_retry);
+    assert_eq!(retry_error.thread_id, thread_id);
+    assert_eq!(retry_error.turn_id, turn_id);
+    assert!(retry_error.error.message.contains("503"));
+    assert!(
+        retry_error
+            .error
+            .additional_details
+            .as_deref()
+            .is_some_and(|details| details.contains("503"))
+    );
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
     Ok(())
 }
 

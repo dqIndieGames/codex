@@ -215,6 +215,16 @@ impl RequestRouteTelemetry {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RequestRetryEvent {
+    pub(crate) retry_number: u64,
+    pub(crate) max_attempts: u64,
+    pub(crate) status: Option<HttpStatusCode>,
+    pub(crate) details: String,
+}
+
+pub(crate) type RequestRetryNotifier = Arc<dyn Fn(RequestRetryEvent) + Send + Sync>;
+
 /// A session-scoped client for model-provider API calls.
 ///
 /// This holds configuration and state that should be shared across turns within a Codex session
@@ -248,6 +258,7 @@ pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
     provider_runtime_generation: u64,
+    request_retry_notifier: Option<RequestRetryNotifier>,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -382,6 +393,7 @@ impl ModelClient {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
             provider_runtime_generation: self.current_provider_runtime_generation(),
+            request_retry_notifier: None,
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -745,6 +757,7 @@ impl ModelClient {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            None,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry;
         request_telemetry
@@ -1009,6 +1022,13 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
+    pub(crate) fn set_request_retry_notifier(
+        &mut self,
+        notifier: Option<RequestRetryNotifier>,
+    ) {
+        self.request_retry_notifier = notifier;
+    }
+
     fn sync_provider_runtime_generation(&mut self, runtime_generation: u64) {
         if self.provider_runtime_generation == runtime_generation {
             return;
@@ -1337,6 +1357,7 @@ impl ModelClientSession {
                 request_auth_context,
                 RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
                 self.client.state.auth_env_telemetry.clone(),
+                self.request_retry_notifier.clone(),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let mut options = self
@@ -1564,12 +1585,14 @@ impl ModelClientSession {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        request_retry_notifier: Option<RequestRetryNotifier>,
     ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
         let telemetry = Arc::new(ApiTelemetry::new(
             session_telemetry.clone(),
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            request_retry_notifier,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry.clone();
         let sse_telemetry: Arc<dyn SseTelemetry> = telemetry;
@@ -1588,6 +1611,7 @@ impl ModelClientSession {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            None,
         ));
         let websocket_telemetry: Arc<dyn WebsocketTelemetry> = telemetry;
         websocket_telemetry
@@ -2189,6 +2213,7 @@ struct ApiTelemetry {
     auth_context: AuthRequestTelemetryContext,
     request_route_telemetry: RequestRouteTelemetry,
     auth_env_telemetry: AuthEnvTelemetry,
+    request_retry_notifier: Option<RequestRetryNotifier>,
 }
 
 impl ApiTelemetry {
@@ -2197,12 +2222,14 @@ impl ApiTelemetry {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        request_retry_notifier: Option<RequestRetryNotifier>,
     ) -> Self {
         Self {
             session_telemetry,
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            request_retry_notifier,
         }
     }
 }
@@ -2264,6 +2291,23 @@ impl RequestTelemetry for ApiTelemetry {
             },
             &self.auth_env_telemetry,
         );
+    }
+
+    fn on_request_retry(
+        &self,
+        retry_number: u64,
+        max_attempts: u64,
+        status: Option<HttpStatusCode>,
+        error: &TransportError,
+    ) {
+        if let Some(notifier) = self.request_retry_notifier.as_ref() {
+            notifier(RequestRetryEvent {
+                retry_number,
+                max_attempts,
+                status,
+                details: telemetry_transport_error_message(error),
+            });
+        }
     }
 }
 

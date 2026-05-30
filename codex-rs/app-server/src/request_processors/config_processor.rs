@@ -183,6 +183,19 @@ impl ConfigRequestProcessor {
     pub(crate) async fn handle_config_mutation(&self) {
         self.thread_manager.plugins_manager().clear_cache();
         self.thread_manager.skills_manager().clear_cache();
+        let report = self
+            .thread_manager
+            .refresh_all_loaded_provider_runtime()
+            .await;
+        if !report.failed_threads.is_empty() {
+            tracing::warn!(
+                total_threads = report.total_threads,
+                applied_threads = report.applied_thread_ids.len(),
+                queued_threads = report.queued_thread_ids.len(),
+                failed_threads = report.failed_threads.len(),
+                "provider runtime refresh after config mutation failed for some loaded threads"
+            );
+        }
     }
 
     async fn handle_config_mutation_result<T>(

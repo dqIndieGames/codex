@@ -29,6 +29,7 @@ pub use mcp_process::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
 pub use mcp_process::McpProcess;
 pub use mock_model_server::create_mock_responses_server_repeating_assistant;
 pub use mock_model_server::create_mock_responses_server_sequence;
+pub use mock_model_server::create_mock_responses_server_sequence_after_one_503;
 pub use mock_model_server::create_mock_responses_server_sequence_unchecked;
 pub use models_cache::write_models_cache;
 pub use models_cache::write_models_cache_with_models;
