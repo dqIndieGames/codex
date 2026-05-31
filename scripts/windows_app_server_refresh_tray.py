@@ -34,6 +34,8 @@ REQUIRED_REGISTRATION_FIELDS = {
     "started_at",
     "heartbeat_at",
 }
+SMART_APPLY_PROVIDER_OP = "apply_provider_runtime_from_effective_provider"
+REFRESH_ALL_LOADED_THREADS_OP = "refresh_all_loaded_threads"
 STANDARD_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 TABLE_HEADER_RE = re.compile(r"^\s*\[(?P<name>[^\[\]]+)\]\s*(?:#.*)?$")
 ARRAY_TABLE_HEADER_RE = re.compile(r"^\s*\[\[(?P<name>[^\[\]]+)\]\]\s*(?:#.*)?$")
@@ -631,6 +633,9 @@ def apply_selected_provider_to_config(
     source_provider_id: str,
     codex_home: Path | None = None,
     registry_dir: Path | None = None,
+    pid_checker: Callable[[int], bool] = is_pid_alive,
+    ping_checker: Callable[[str], bool] = ping_instance,
+    send_request: Callable[[str, dict[str, Any]], dict[str, Any]] = send_control_request,
 ) -> dict[str, Any]:
     source_provider_id = source_provider_id.strip()
     if not source_provider_id:
@@ -777,7 +782,12 @@ def apply_selected_provider_to_config(
                 "refresh_summary": None,
             }
 
-    refresh_summary = refresh_all_instances(registry_dir=registry_dir)
+    refresh_summary = refresh_all_instances(
+        registry_dir=registry_dir,
+        pid_checker=pid_checker,
+        ping_checker=ping_checker,
+        send_request=send_request,
+    )
     return {
         "ok": True,
         "message": None,
@@ -802,41 +812,86 @@ def show_message(title: str, message: str, icon_flag: int = MB_ICONINFORMATION) 
     )
 
 
-def refresh_all_instances(registry_dir: Path | None = None) -> dict[str, Any]:
-    registrations = enumerate_live_registrations(registry_dir=registry_dir)
-    summary = {
-        "total_instances": len(registrations),
+def unsupported_control_operation(response: dict[str, Any], op: str) -> bool:
+    if bool(response.get("ok")):
+        return False
+    for key in ("error", "message"):
+        value = response.get(key)
+        if isinstance(value, str) and "unsupported control operation" in value and op in value:
+            return True
+    return False
+
+
+def smart_apply_wrote_config(response: dict[str, Any]) -> bool:
+    return response.get("outcome") in {"success", "partial_failure"}
+
+
+def empty_refresh_summary(total_instances: int = 0) -> dict[str, Any]:
+    return {
+        "total_instances": total_instances,
         "success_instances": 0,
         "failed_instances": 0,
         "applied_threads": 0,
         "queued_threads": 0,
         "failed_threads": 0,
         "details": [],
+        "smart_apply_instances": 0,
+        "fallback_instances": 0,
     }
+
+
+def add_refresh_response_counts(
+    summary: dict[str, Any],
+    response: dict[str, Any],
+) -> bool:
+    failed_threads = response.get("failed_threads")
+    applied_thread_ids = response.get("applied_thread_ids")
+    queued_thread_ids = response.get("queued_thread_ids")
+    instance_ok = bool(response.get("ok")) and isinstance(failed_threads, list) and not failed_threads
+    if isinstance(applied_thread_ids, list):
+        summary["applied_threads"] += len(applied_thread_ids)
+    if isinstance(queued_thread_ids, list):
+        summary["queued_threads"] += len(queued_thread_ids)
+    if isinstance(failed_threads, list):
+        summary["failed_threads"] += len(failed_threads)
+    if instance_ok:
+        summary["success_instances"] += 1
+    else:
+        summary["failed_instances"] += 1
+    return instance_ok
+
+
+def registrations_for_refresh(
+    registry_dir: Path | None = None,
+    pid_checker: Callable[[int], bool] = is_pid_alive,
+    ping_checker: Callable[[str], bool] = ping_instance,
+) -> list[dict[str, Any]]:
+    return enumerate_live_registrations(
+        registry_dir=registry_dir,
+        pid_checker=pid_checker,
+        ping_checker=ping_checker,
+    )
+
+
+def refresh_registrations(
+    registrations: list[dict[str, Any]],
+    send_request: Callable[[str, dict[str, Any]], dict[str, Any]] = send_control_request,
+    *,
+    method: str = "refresh_all_loaded_threads",
+) -> dict[str, Any]:
+    summary = empty_refresh_summary(len(registrations))
 
     for registration in registrations:
         instance_id = str(registration["instance_id"])
         endpoint = str(registration["control_endpoint"])
         try:
-            response = send_control_request(endpoint, {"op": "refresh_all_loaded_threads"})
-            failed_threads = response.get("failed_threads")
-            applied_thread_ids = response.get("applied_thread_ids")
-            queued_thread_ids = response.get("queued_thread_ids")
-            instance_ok = bool(response.get("ok")) and isinstance(failed_threads, list) and not failed_threads
-            if isinstance(applied_thread_ids, list):
-                summary["applied_threads"] += len(applied_thread_ids)
-            if isinstance(queued_thread_ids, list):
-                summary["queued_threads"] += len(queued_thread_ids)
-            if isinstance(failed_threads, list):
-                summary["failed_threads"] += len(failed_threads)
-            if instance_ok:
-                summary["success_instances"] += 1
-            else:
-                summary["failed_instances"] += 1
+            response = send_request(endpoint, {"op": REFRESH_ALL_LOADED_THREADS_OP})
+            instance_ok = add_refresh_response_counts(summary, response)
             summary["details"].append(
                 {
                     "instance_id": instance_id,
                     "ok": instance_ok,
+                    "method": method,
                     "response": response,
                 }
             )
@@ -846,6 +901,7 @@ def refresh_all_instances(registry_dir: Path | None = None) -> dict[str, Any]:
                 {
                     "instance_id": instance_id,
                     "ok": False,
+                    "method": method,
                     "error": str(exc),
                 }
             )
@@ -853,11 +909,269 @@ def refresh_all_instances(registry_dir: Path | None = None) -> dict[str, Any]:
     return summary
 
 
+def merge_refresh_summaries(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> dict[str, Any]:
+    merged = left.copy()
+    merged["total_instances"] = int(left.get("total_instances", 0))
+    for key in (
+        "success_instances",
+        "failed_instances",
+        "applied_threads",
+        "queued_threads",
+        "failed_threads",
+        "smart_apply_instances",
+        "fallback_instances",
+    ):
+        merged[key] = int(left.get(key, 0)) + int(right.get(key, 0))
+    merged["details"] = list(left.get("details") or []) + list(right.get("details") or [])
+    return merged
+
+
+def refresh_all_instances(
+    registry_dir: Path | None = None,
+    pid_checker: Callable[[int], bool] = is_pid_alive,
+    ping_checker: Callable[[str], bool] = ping_instance,
+    send_request: Callable[[str, dict[str, Any]], dict[str, Any]] = send_control_request,
+) -> dict[str, Any]:
+    registrations = registrations_for_refresh(
+        registry_dir=registry_dir,
+        pid_checker=pid_checker,
+        ping_checker=ping_checker,
+    )
+    return refresh_registrations(registrations, send_request)
+
+
+def apply_provider_runtime_smart_first(
+    source_provider_id: str,
+    codex_home: Path | None = None,
+    registry_dir: Path | None = None,
+    pid_checker: Callable[[int], bool] = is_pid_alive,
+    ping_checker: Callable[[str], bool] = ping_instance,
+    send_request: Callable[[str, dict[str, Any]], dict[str, Any]] = send_control_request,
+) -> dict[str, Any]:
+    source_provider_id = source_provider_id.strip()
+    if not source_provider_id:
+        return {
+            "ok": False,
+            "message": "source provider 不存在",
+            "source_provider_id": None,
+            "current_model_provider_id": None,
+            "config_path": str(config_toml_path(codex_home)),
+            "config_changed": False,
+            "apply_strategy": "invalid_source_provider",
+            "refresh_summary": None,
+        }
+
+    registrations = registrations_for_refresh(
+        registry_dir=registry_dir,
+        pid_checker=pid_checker,
+        ping_checker=ping_checker,
+    )
+    if not registrations:
+        legacy = apply_selected_provider_to_config(
+            source_provider_id,
+            codex_home=codex_home,
+            registry_dir=registry_dir,
+            pid_checker=pid_checker,
+            ping_checker=ping_checker,
+            send_request=send_request,
+        )
+        legacy["apply_strategy"] = "legacy_config_write_no_live_instances"
+        return legacy
+
+    summary = {
+        **empty_refresh_summary(len(registrations)),
+        "smart_apply_instances": 0,
+        "fallback_instances": 0,
+    }
+    unsupported_registrations: list[dict[str, Any]] = []
+    current_model_provider_id: str | None = None
+    supported_attempts = 0
+    unsupported_attempts = 0
+    smart_apply_config_writes = 0
+
+    for registration in registrations:
+        instance_id = str(registration["instance_id"])
+        endpoint = str(registration["control_endpoint"])
+        try:
+            response = send_request(
+                endpoint,
+                {
+                    "op": SMART_APPLY_PROVIDER_OP,
+                    "source_provider_id": source_provider_id,
+                },
+            )
+        except Exception as exc:
+            summary["failed_instances"] += 1
+            summary["details"].append(
+                {
+                    "instance_id": instance_id,
+                    "ok": False,
+                    "method": "smart_apply",
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        if unsupported_control_operation(response, SMART_APPLY_PROVIDER_OP):
+            unsupported_attempts += 1
+            unsupported_registrations.append(registration)
+            summary["details"].append(
+                {
+                    "instance_id": instance_id,
+                    "ok": False,
+                    "method": "smart_apply_unsupported",
+                    "response": response,
+                }
+            )
+            continue
+
+        supported_attempts += 1
+        summary["smart_apply_instances"] += 1
+        if isinstance(response.get("current_model_provider_id"), str):
+            current_model_provider_id = str(response["current_model_provider_id"])
+        instance_ok = add_refresh_response_counts(summary, response)
+        summary["details"].append(
+            {
+                "instance_id": instance_id,
+                "ok": instance_ok,
+                "method": "smart_apply",
+                "response": response,
+            }
+        )
+        if smart_apply_wrote_config(response):
+            smart_apply_config_writes += 1
+
+    if supported_attempts == 0 and unsupported_attempts == len(registrations):
+        legacy = apply_selected_provider_to_config(
+            source_provider_id,
+            codex_home=codex_home,
+            registry_dir=registry_dir,
+            pid_checker=pid_checker,
+            ping_checker=ping_checker,
+            send_request=send_request,
+        )
+        legacy["apply_strategy"] = "legacy_config_write"
+        refresh_summary = legacy.get("refresh_summary")
+        if isinstance(refresh_summary, dict):
+            refresh_summary["fallback_instances"] = int(
+                refresh_summary.get("total_instances", 0)
+            )
+            legacy["fallback_instances"] = refresh_summary["fallback_instances"]
+            legacy["success_instances"] = int(refresh_summary.get("success_instances", 0))
+            legacy["failed_instances"] = int(refresh_summary.get("failed_instances", 0))
+            legacy["applied_threads"] = int(refresh_summary.get("applied_threads", 0))
+            legacy["queued_threads"] = int(refresh_summary.get("queued_threads", 0))
+            legacy["failed_threads"] = int(refresh_summary.get("failed_threads", 0))
+        return legacy
+
+    if unsupported_registrations and smart_apply_config_writes > 0:
+        fallback_summary = refresh_registrations(
+            unsupported_registrations,
+            send_request,
+            method="legacy_refresh_after_smart_apply",
+        )
+        fallback_summary["fallback_instances"] = len(unsupported_registrations)
+        summary = merge_refresh_summaries(summary, fallback_summary)
+
+    ok = smart_apply_config_writes > 0
+    if not ok:
+        return {
+            "ok": False,
+            "message": "app-server 智能 provider apply 未成功刷新任何实例",
+            "source_provider_id": source_provider_id,
+            "current_model_provider_id": current_model_provider_id,
+            "config_path": str(config_toml_path(codex_home)),
+            "config_changed": False,
+            "apply_strategy": "app_server_smart_apply",
+            "refresh_summary": summary,
+            "success_instances": summary["success_instances"],
+            "failed_instances": summary["failed_instances"],
+            "smart_apply_instances": summary["smart_apply_instances"],
+            "fallback_instances": summary["fallback_instances"],
+            "applied_threads": summary["applied_threads"],
+            "queued_threads": summary["queued_threads"],
+            "failed_threads": summary["failed_threads"],
+        }
+
+    return {
+        "ok": True,
+        "message": None,
+        "source_provider_id": source_provider_id,
+        "current_model_provider_id": current_model_provider_id,
+        "config_path": str(config_toml_path(codex_home)),
+        "config_changed": True,
+        "apply_strategy": "app_server_smart_apply",
+        "refresh_summary": summary,
+        "success_instances": summary["success_instances"],
+        "failed_instances": summary["failed_instances"],
+        "smart_apply_instances": summary["smart_apply_instances"],
+        "fallback_instances": summary["fallback_instances"],
+        "applied_threads": summary["applied_threads"],
+        "queued_threads": summary["queued_threads"],
+        "failed_threads": summary["failed_threads"],
+    }
+
+
+def format_result_message(success_instances: int, failed_instances: int) -> str:
+    return (
+        "刷新全部 app-server 完成\n\n"
+        f"成功实例：{success_instances}\n"
+        f"失败实例：{failed_instances}"
+    )
+
+
 def short_error_text(message: str, limit: int = 96) -> str:
     collapsed = " ".join(message.split())
     if len(collapsed) <= limit:
         return collapsed
     return f"{collapsed[: limit - 3]}..."
+
+
+def failed_detail_lines_from_refresh_summary(summary: dict[str, Any]) -> list[str]:
+    failed_detail_lines: list[str] = []
+    details = summary.get("details")
+    if not isinstance(details, list):
+        return failed_detail_lines
+
+    for detail in details:
+        if not isinstance(detail, dict) or bool(detail.get("ok")):
+            continue
+        instance_id = str(detail.get("instance_id") or "unknown")
+        error_text = detail.get("error")
+        if isinstance(error_text, str) and error_text:
+            failed_detail_lines.append(
+                f"- {instance_id}: {short_error_text(error_text, 120)}"
+            )
+            continue
+
+        response = detail.get("response")
+        if isinstance(response, dict):
+            response_message = response.get("message")
+            if isinstance(response_message, str) and response_message:
+                failed_detail_lines.append(
+                    f"- {instance_id}: {short_error_text(response_message, 120)}"
+                )
+                continue
+
+            response_error = response.get("error")
+            if isinstance(response_error, str) and response_error:
+                failed_detail_lines.append(
+                    f"- {instance_id}: {short_error_text(response_error, 120)}"
+                )
+                continue
+
+            failed_threads_value = response.get("failed_threads")
+            if isinstance(failed_threads_value, list) and failed_threads_value:
+                failed_detail_lines.append(
+                    f"- {instance_id}: failed_threads={len(failed_threads_value)}"
+                )
+                continue
+        failed_detail_lines.append(f"- {instance_id}: refresh 返回失败")
+
+    return failed_detail_lines
 
 
 
@@ -889,7 +1203,17 @@ def format_refresh_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
 def format_apply_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
     title = "Codex Provider Apply"
     if not bool(summary.get("ok")):
-        message = str(summary.get("message") or "应用 provider 失败")
+        lines = [str(summary.get("message") or "应用 provider 失败")]
+        refresh_summary = summary.get("refresh_summary")
+        if isinstance(refresh_summary, dict):
+            detail_lines = failed_detail_lines_from_refresh_summary(refresh_summary)
+            if detail_lines:
+                lines.extend(["", "失败明细:"])
+                lines.extend(detail_lines[:5])
+                remaining = len(detail_lines) - 5
+                if remaining > 0:
+                    lines.append(f"... 另有 {remaining} 个失败实例")
+        message = "\n".join(lines)
         return title, message, MB_ICONERROR
 
     refresh_summary = summary.get("refresh_summary") or {}
@@ -899,20 +1223,38 @@ def format_apply_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
     applied_threads = int(refresh_summary.get("applied_threads", 0))
     queued_threads = int(refresh_summary.get("queued_threads", 0))
     failed_threads = int(refresh_summary.get("failed_threads", 0))
+    smart_apply_instances = int(refresh_summary.get("smart_apply_instances", 0))
+    fallback_instances = int(refresh_summary.get("fallback_instances", 0))
     config_changed = bool(summary.get("config_changed"))
+    apply_strategy = str(summary.get("apply_strategy") or "legacy_config_write")
     source_provider_id = str(summary.get("source_provider_id") or "unknown")
     current_model_provider_id = str(
         summary.get("current_model_provider_id") or "unknown"
     )
     config_path = str(summary.get("config_path") or config_toml_path())
 
+    if apply_strategy == "app_server_smart_apply":
+        apply_label = "app-server 智能刷新"
+    elif apply_strategy == "legacy_config_write_no_live_instances":
+        apply_label = "Python 配置写入（无 live 实例）"
+    elif apply_strategy == "legacy_config_write":
+        apply_label = "Python 配置写入 + 旧刷新"
+    else:
+        apply_label = apply_strategy
+
     if total_instances == 0:
         headline = (
-            "已写入 target provider，两字段已更新，未刷新任何实例"
+            "已写入 target provider，两字段已更新，未刷新任何 live 实例"
             if config_changed
-            else "target provider 已是所选值，未修改配置，未刷新任何实例"
+            else "target provider 已是所选值，未修改配置，未刷新任何 live 实例"
         )
         icon_flag = MB_ICONINFORMATION
+    elif apply_strategy == "app_server_smart_apply" and failed_instances == 0:
+        headline = "已通过当前 app-server 智能应用 provider，并已刷新实例"
+        icon_flag = MB_ICONINFORMATION
+    elif apply_strategy == "app_server_smart_apply":
+        headline = "已通过当前 app-server 智能应用 provider，但实例刷新部分失败"
+        icon_flag = MB_ICONWARNING
     elif failed_instances == 0:
         headline = (
             "已写入 target provider，并已刷新实例"
@@ -931,6 +1273,7 @@ def format_apply_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
     lines = [
         headline,
         "",
+        f"应用方式: {apply_label}",
         f"source provider: {source_provider_id}",
         f"target model_provider: {current_model_provider_id}",
         f"配置文件: {config_path}",
@@ -942,36 +1285,15 @@ def format_apply_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
                 f"实例总数: {total_instances}",
                 f"成功实例: {success_instances}",
                 f"失败实例: {failed_instances}",
+                f"智能 apply 实例: {smart_apply_instances}",
+                f"旧刷新实例: {fallback_instances}",
                 f"Applied 线程: {applied_threads}",
                 f"Queued 线程: {queued_threads}",
                 f"Failed 线程: {failed_threads}",
             ]
         )
     if failed_instances > 0:
-        failed_detail_lines: list[str] = []
-        details = refresh_summary.get("details")
-        if isinstance(details, list):
-            for detail in details:
-                if not isinstance(detail, dict) or bool(detail.get("ok")):
-                    continue
-                instance_id = str(detail.get("instance_id") or "unknown")
-                error_text = detail.get("error")
-                if isinstance(error_text, str) and error_text:
-                    failed_detail_lines.append(
-                        f"- {instance_id}: {short_error_text(error_text, 120)}"
-                    )
-                    continue
-
-                response = detail.get("response")
-                if isinstance(response, dict):
-                    failed_threads_value = response.get("failed_threads")
-                    if isinstance(failed_threads_value, list) and failed_threads_value:
-                        failed_detail_lines.append(
-                            f"- {instance_id}: failed_threads={len(failed_threads_value)}"
-                        )
-                        continue
-                failed_detail_lines.append(f"- {instance_id}: refresh 返回失败")
-
+        failed_detail_lines = failed_detail_lines_from_refresh_summary(refresh_summary)
         if failed_detail_lines:
             lines.extend(["", "刷新失败明细:"])
             lines.extend(failed_detail_lines[:5])
@@ -1042,7 +1364,7 @@ def create_tray_icon():
             return
 
         def worker() -> None:
-            summary = apply_selected_provider_to_config(selected_provider_id)
+            summary = apply_provider_runtime_smart_first(selected_provider_id)
             reload_catalog()
             rebuild_menu(icon)
             title, message, icon_flag = format_apply_summary(summary)
