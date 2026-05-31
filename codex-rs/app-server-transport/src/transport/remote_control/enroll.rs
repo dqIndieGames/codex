@@ -13,6 +13,7 @@ use tracing::warn;
 
 const REMOTE_CONTROL_ENROLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const REMOTE_CONTROL_RESPONSE_BODY_MAX_BYTES: usize = 4096;
+const APP_SERVER_DISPLAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local3");
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const OAI_REQUEST_ID_HEADER: &str = "x-oai-request-id";
@@ -201,7 +202,7 @@ pub(super) async fn enroll_remote_control_server(
         name: server_name.to_string(),
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
-        app_server_version: env!("CARGO_PKG_VERSION"),
+        app_server_version: APP_SERVER_DISPLAY_VERSION,
         installation_id: installation_id.to_string(),
     };
     let client = build_reqwest_client();

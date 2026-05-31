@@ -6,8 +6,8 @@ use super::parse_codex_version;
 #[test]
 fn parses_codex_cli_version_output() {
     assert_eq!(
-        parse_codex_version("codex 1.2.3\n").expect("version"),
-        "1.2.3"
+        parse_codex_version("codex-cli 1.2.3-local3\n").expect("version"),
+        "1.2.3-local3"
     );
 }
 

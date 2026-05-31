@@ -20,6 +20,7 @@ use crate::ResumeThreadParams;
 use crate::ThreadMetadataPatch;
 
 const IMAGE_ONLY_USER_MESSAGE_PLACEHOLDER: &str = "[Image]";
+const CODEX_DISPLAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local3");
 #[cfg(not(test))]
 const THREAD_UPDATED_AT_TOUCH_INTERVAL: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -73,7 +74,7 @@ impl ThreadMetadataSync {
             agent_role: Some(params.source.get_agent_role()),
             agent_path: Some(params.source.get_agent_path().map(Into::into)),
             cwd: Some(cwd.clone()),
-            cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            cli_version: Some(CODEX_DISPLAY_VERSION.to_string()),
             git_info: git_info.map(git_info_patch_from_observation),
             memory_mode: Some(params.metadata.memory_mode),
             dynamic_tools,

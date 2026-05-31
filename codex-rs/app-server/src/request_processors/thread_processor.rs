@@ -5,6 +5,7 @@ use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
+const CODEX_DISPLAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local3");
 const PERSIST_EXTENDED_HISTORY_DEPRECATION_SUMMARY: &str =
     "persistExtendedHistory is deprecated and ignored";
 const PERSIST_EXTENDED_HISTORY_DEPRECATION_DETAILS: &str =
@@ -4225,7 +4226,7 @@ fn build_thread_from_snapshot(
         status: ThreadStatus::NotLoaded,
         path,
         cwd: config_snapshot.cwd.clone(),
-        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        cli_version: CODEX_DISPLAY_VERSION.to_string(),
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),
         source: config_snapshot.session_source.clone().into(),

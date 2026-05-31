@@ -240,18 +240,29 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($expectedVersion)) {
             throw "Failed to read expected version from codex-rs/Cargo.toml"
           }
+          $expectedDisplayVersion = "$expectedVersion-local3"
           $version = & $exe --version
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
           Write-Host $version
-          if ($version -notmatch [regex]::Escape($expectedVersion)) {
-            throw "Expected $expectedVersion version output from $exe, got: $version"
+          if ($version -notmatch [regex]::Escape($expectedDisplayVersion)) {
+            throw "Expected $expectedDisplayVersion version output from $exe, got: $version"
           }
 
           & $exe --help | Select-Object -First 30
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
+          }
+
+          $appServerExe = "dist/${{ matrix.target }}/codex-app-server-${{ matrix.target }}.exe"
+          $appServerVersion = & $appServerExe --version
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          Write-Host $appServerVersion
+          if ($appServerVersion -notmatch [regex]::Escape($expectedDisplayVersion)) {
+            throw "Expected $expectedDisplayVersion version output from $appServerExe, got: $appServerVersion"
           }
 
       - name: Install DotSlash
@@ -273,6 +284,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          codex_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -1)"
+          if [[ -z "$codex_version" ]]; then
+            echo "Failed to read Codex version from codex-rs/Cargo.toml" >&2
+            exit 1
+          fi
 
           case "${{ matrix.target }}" in
             aarch64-pc-windows-msvc)
@@ -296,7 +312,7 @@ jobs:
             stage-runtime \
             "$stage_dir" \
             "dist/${{ matrix.target }}/codex-package-${{ matrix.target }}.tar.gz" \
-            --codex-version "${GITHUB_REF_NAME}" \
+            --codex-version "$codex_version" \
             --platform-tag "$platform_tag"
           "${RUNNER_TEMP}/python-runtime-build-venv/Scripts/python.exe" -m build --wheel --outdir "$wheel_dir" "$stage_dir"
 

@@ -56,6 +56,7 @@ async fn initialize_uses_client_info_name_as_originator() -> Result<()> {
     } = to_response::<InitializeResponse>(response)?;
 
     assert!(user_agent.starts_with("codex_vscode/"));
+    assert!(user_agent.contains(&format!("{}-local3", env!("CARGO_PKG_VERSION"))));
     assert_eq!(response_codex_home, expected_codex_home);
     assert_eq!(platform_family, std::env::consts::FAMILY);
     assert_eq!(platform_os, std::env::consts::OS);
@@ -86,6 +87,7 @@ async fn initialize_probe_does_not_override_originator() -> Result<()> {
     let InitializeResponse { user_agent, .. } = to_response::<InitializeResponse>(response)?;
 
     assert!(user_agent.starts_with("codex_cli_rs/"));
+    assert!(user_agent.contains(&format!("{}-local3", env!("CARGO_PKG_VERSION"))));
     Ok(())
 }
 
@@ -113,6 +115,7 @@ async fn initialize_codex_backend_does_not_override_originator() -> Result<()> {
     let InitializeResponse { user_agent, .. } = to_response::<InitializeResponse>(response)?;
 
     assert!(user_agent.starts_with("codex_cli_rs/"));
+    assert!(user_agent.contains(&format!("{}-local3", env!("CARGO_PKG_VERSION"))));
     Ok(())
 }
 
@@ -153,6 +156,7 @@ async fn initialize_respects_originator_override_env_var() -> Result<()> {
     } = to_response::<InitializeResponse>(response)?;
 
     assert!(user_agent.starts_with("codex_originator_via_env_var/"));
+    assert!(user_agent.contains(&format!("{}-local3", env!("CARGO_PKG_VERSION"))));
     assert_eq!(response_codex_home, expected_codex_home);
     assert_eq!(platform_family, std::env::consts::FAMILY);
     assert_eq!(platform_os, std::env::consts::OS);

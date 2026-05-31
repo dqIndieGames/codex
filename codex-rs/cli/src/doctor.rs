@@ -115,6 +115,7 @@ const COLOR_ENV_VARS: &[&str] = &[
 const TERMINAL_DIMENSION_ENV_VARS: &[&str] = &["COLUMNS", "LINES"];
 const TERMINFO_ENV_VARS: &[&str] = &["TERMINFO", "TERMINFO_DIRS"];
 const LOCALE_ENV_VARS: &[&str] = &["LC_ALL", "LC_CTYPE", "LANG"];
+const CODEX_CLI_DISPLAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local3");
 #[cfg(windows)]
 const NPM_COMMAND: &str = "npm.cmd";
 #[cfg(not(windows))]
@@ -486,7 +487,7 @@ async fn build_report(
         schema_version: 1,
         generated_at: generated_at(),
         overall_status,
-        codex_version: env!("CARGO_PKG_VERSION").to_string(),
+        codex_version: codex_cli_display_version(),
         checks,
     }
 }
@@ -549,6 +550,10 @@ fn config_overrides_from_interactive(
         additional_writable_roots: interactive.add_dir.clone(),
         ..Default::default()
     }
+}
+
+fn codex_cli_display_version() -> String {
+    CODEX_CLI_DISPLAY_VERSION.to_string()
 }
 
 /// JSON support report emitted by `codex doctor --json`.
@@ -3268,6 +3273,22 @@ mod tests {
         assert_eq!(
             json["checks"]["mcp.config"]["issues"][0]["remedy"],
             "Check https://example.com/help."
+        );
+    }
+
+    #[test]
+    fn doctor_display_version_surfaces_use_local3_suffix() {
+        let display_version = codex_cli_display_version();
+        let runtime = runtime_check();
+
+        assert_eq!(
+            display_version,
+            format!("{}-local3", env!("CARGO_PKG_VERSION"))
+        );
+        assert!(
+            runtime
+                .details
+                .contains(&format!("version: {display_version}"))
         );
     }
 

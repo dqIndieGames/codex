@@ -32,6 +32,7 @@ const UPDATE_PID_FILE_NAME: &str = "app-server-updater.pid";
 const OPERATION_LOCK_FILE_NAME: &str = "daemon.lock";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const STATE_DIR_NAME: &str = "app-server-daemon";
+const CODEX_DISPLAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local3");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleCommand {
@@ -608,7 +609,7 @@ impl Daemon {
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
             socket_path: self.socket_path.clone(),
-            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            cli_version: CODEX_DISPLAY_VERSION.to_string(),
             app_server_version: info.app_server_version,
         })
     }
@@ -750,7 +751,7 @@ impl Daemon {
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
             socket_path: self.socket_path.clone(),
-            cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            cli_version: Some(CODEX_DISPLAY_VERSION.to_string()),
             app_server_version,
         }
     }
@@ -767,7 +768,7 @@ impl Daemon {
             backend,
             remote_control_enabled,
             socket_path: self.socket_path.clone(),
-            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            cli_version: CODEX_DISPLAY_VERSION.to_string(),
             app_server_version,
         }
     }

@@ -146,7 +146,7 @@ async fn poll_for_token(
 }
 
 fn print_device_code_prompt(verification_url: &str, code: &str) {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = concat!(env!("CARGO_PKG_VERSION"), "-local3");
     println!(
         "\nWelcome to Codex [v{ANSI_GRAY}{version}{ANSI_RESET}]\n{ANSI_GRAY}OpenAI's command-line coding agent{ANSI_RESET}\n\
 \nFollow these steps to sign in with ChatGPT using device code authorization:\n\

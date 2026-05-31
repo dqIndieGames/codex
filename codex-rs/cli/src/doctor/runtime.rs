@@ -17,6 +17,8 @@ use super::describe_install_context;
 use super::doctor_install_context;
 use super::push_path_detail;
 
+const CODEX_DISPLAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local3");
+
 /// Builds the process provenance row for the current Codex executable.
 ///
 /// This check is informational and should not fail on its own; inconsistent
@@ -29,7 +31,7 @@ pub(super) fn runtime_check() -> DoctorCheck {
     let platform = format!("{os}-{arch}");
     let install_method = install_method_name(&install_context);
     let mut details = vec![
-        format!("version: {}", env!("CARGO_PKG_VERSION")),
+        format!("version: {CODEX_DISPLAY_VERSION}"),
         format!("platform: {platform}"),
         format!(
             "install method: {}",

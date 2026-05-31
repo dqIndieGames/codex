@@ -7,7 +7,7 @@ use pretty_assertions::assert_eq;
 fn test_get_codex_user_agent() {
     let user_agent = get_codex_user_agent();
     let originator = originator().value;
-    let prefix = format!("{originator}/");
+    let prefix = format!("{originator}/{CODEX_DISPLAY_VERSION}");
     assert!(user_agent.starts_with(&prefix));
 }
 
@@ -118,7 +118,7 @@ fn test_macos() {
     let user_agent = get_codex_user_agent();
     let originator = regex_lite::escape(originator().value.as_str());
     let re = Regex::new(&format!(
-        r"^{originator}/\d+\.\d+\.\d+ \(Mac OS \d+\.\d+\.\d+; (x86_64|arm64)\) (\S+)$"
+        r"^{originator}/\d+\.\d+\.\d+-local3 \(Mac OS \d+\.\d+\.\d+; (x86_64|arm64)\) (\S+)$"
     ))
     .unwrap();
     assert!(re.is_match(&user_agent));
