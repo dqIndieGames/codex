@@ -622,7 +622,11 @@ async fn retryable_503_request_emits_visible_retry_error_notification() -> Resul
             .error
             .additional_details
             .as_deref()
-            .is_some_and(|details| details.contains("503"))
+            .is_some_and(|details| details.contains("HTTP 503 Service Unavailable, retrying"))
+    );
+    assert_ne!(
+        retry_error.error.additional_details.as_deref(),
+        Some("http 503")
     );
 
     timeout(

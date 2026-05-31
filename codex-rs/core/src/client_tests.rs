@@ -43,6 +43,8 @@ use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
 use futures::StreamExt;
+use http::HeaderMap;
+use http::HeaderValue;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -505,11 +507,13 @@ fn api_telemetry_notifies_streaming_request_retry() {
         AuthEnvTelemetry::default(),
         Some(notifier),
     );
+    let mut headers = HeaderMap::new();
+    headers.insert("x-request-id", HeaderValue::from_static("req-503"));
     let error = TransportError::Http {
         status: http::StatusCode::SERVICE_UNAVAILABLE,
-        url: Some("https://example.com/v1/responses".to_string()),
-        headers: None,
-        body: Some("busy".to_string()),
+        url: Some("https://example.com/v1/responses?api_key=secret".to_string()),
+        headers: Some(headers),
+        body: Some(r#"{"error":{"message":"secret token leaked"}}"#.to_string()),
     };
 
     telemetry.on_request_retry(
@@ -527,7 +531,15 @@ fn api_telemetry_notifies_streaming_request_retry() {
         retry_events[0].status,
         Some(http::StatusCode::SERVICE_UNAVAILABLE)
     );
-    assert!(retry_events[0].details.contains("503"));
+    assert!(
+        retry_events[0]
+            .details
+            .contains("HTTP 503 Service Unavailable, retrying")
+    );
+    assert!(retry_events[0].details.contains("endpoint: example.com/responses"));
+    assert!(retry_events[0].details.contains("request id: req-503"));
+    assert!(!retry_events[0].details.contains("secret token leaked"));
+    assert!(!retry_events[0].details.contains("api_key"));
 }
 
 fn model_client_with_counting_attestation(

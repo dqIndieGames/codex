@@ -1321,10 +1321,23 @@ fn request_retry_message_for_status(
     retry_number: u64,
     max_attempts: u64,
 ) -> String {
-    format!(
-        "{} retry {retry_number}/{max_attempts}",
-        status.as_u16()
-    )
+    retry_status_message(status.as_u16(), retry_number, max_attempts)
+}
+
+fn retry_status_message(status_code: u16, retry_number: u64, max_attempts: u64) -> String {
+    if max_attempts == u64::MAX {
+        format!("{status_code} retry {retry_number} (unbounded)")
+    } else {
+        format!("{status_code} retry {retry_number}/{max_attempts}")
+    }
+}
+
+fn transport_retry_status_message(retry_number: u64, max_attempts: u64) -> String {
+    if max_attempts == u64::MAX {
+        format!("Reconnecting... {retry_number} (unbounded)")
+    } else {
+        format!("Reconnecting... {retry_number}/{max_attempts}")
+    }
 }
 
 fn request_retry_error_info_for_status(status: http::StatusCode) -> CodexErrorInfo {
@@ -1365,7 +1378,7 @@ async fn emit_transport_request_retry_status_event(
     sess.send_event(
         turn_context,
         EventMsg::StreamError(StreamErrorEvent {
-            message: format!("Reconnecting... {retry_number}/{max_attempts}"),
+            message: transport_retry_status_message(retry_number, max_attempts),
             codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
                 http_status_code: None,
             }),
@@ -1501,6 +1514,29 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         | EventMsg::CollabCloseEnd(_)
         | EventMsg::CollabResumeBegin(_)
         | EventMsg::CollabResumeEnd(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod retry_status_message_tests {
+    use super::retry_status_message;
+    use super::transport_retry_status_message;
+
+    #[test]
+    fn retry_status_message_does_not_expose_unbounded_retry_sentinel() {
+        let message = retry_status_message(429, 4, u64::MAX);
+
+        assert_eq!(message, "429 retry 4 (unbounded)");
+        assert!(!message.contains(&u64::MAX.to_string()));
+    }
+
+    #[test]
+    fn retry_status_message_keeps_bounded_retry_count() {
+        assert_eq!(retry_status_message(503, 1, 4), "503 retry 1/4");
+        assert_eq!(
+            transport_retry_status_message(2, u64::MAX),
+            "Reconnecting... 2 (unbounded)"
+        );
     }
 }
 

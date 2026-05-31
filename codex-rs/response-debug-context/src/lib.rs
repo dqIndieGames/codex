@@ -70,6 +70,96 @@ pub fn telemetry_transport_error_message(error: &TransportError) -> String {
     }
 }
 
+pub fn user_visible_transport_retry_details(error: &TransportError) -> String {
+    match error {
+        TransportError::Http { status, url, .. } => {
+            let mut details = format!(
+                "HTTP {} {}, retrying",
+                status.as_u16(),
+                http_status_reason(*status)
+            );
+            if let Some(endpoint) = safe_endpoint_from_url(url.as_deref()) {
+                details.push_str(&format!(", endpoint: {endpoint}"));
+            }
+            let context = extract_response_debug_context(error);
+            if let Some(request_id) = context.request_id {
+                details.push_str(&format!(", request id: {request_id}"));
+            }
+            if let Some(cf_ray) = context.cf_ray {
+                details.push_str(&format!(", cf-ray: {cf_ray}"));
+            }
+            if let Some(auth_error) = context.auth_error {
+                details.push_str(&format!(", auth error: {auth_error}"));
+            }
+            if let Some(auth_error_code) = context.auth_error_code {
+                details.push_str(&format!(", auth error code: {auth_error_code}"));
+            }
+            details
+        }
+        TransportError::RetryLimit => "Retry limit reached".to_string(),
+        TransportError::Timeout => "Request timed out, retrying".to_string(),
+        TransportError::Network(_) => "Network error, retrying".to_string(),
+        TransportError::Build(_) => "Request build error".to_string(),
+    }
+}
+
+fn http_status_reason(status: http::StatusCode) -> &'static str {
+    match status {
+        http::StatusCode::BAD_REQUEST => "Bad Request",
+        http::StatusCode::UNAUTHORIZED => "Unauthorized",
+        http::StatusCode::PAYMENT_REQUIRED => "Payment Required",
+        http::StatusCode::FORBIDDEN => "Forbidden",
+        http::StatusCode::NOT_FOUND => "Not Found",
+        http::StatusCode::REQUEST_TIMEOUT => "Request Timeout",
+        http::StatusCode::CONFLICT => "Conflict",
+        http::StatusCode::TOO_MANY_REQUESTS => "Too Many Requests",
+        http::StatusCode::INTERNAL_SERVER_ERROR => "Internal Server Error",
+        http::StatusCode::BAD_GATEWAY => "Bad Gateway",
+        http::StatusCode::SERVICE_UNAVAILABLE => "Service Unavailable",
+        http::StatusCode::GATEWAY_TIMEOUT => "Gateway Timeout",
+        _ if status.is_client_error() => "Client Error",
+        _ if status.is_server_error() => "Server Error",
+        _ => "HTTP Error",
+    }
+}
+
+fn safe_endpoint_from_url(url: Option<&str>) -> Option<String> {
+    let raw = url?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let without_scheme = raw
+        .split_once("://")
+        .map(|(_, tail)| tail)
+        .unwrap_or(raw);
+    let without_fragment = without_scheme.split('#').next().unwrap_or(without_scheme);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    let without_userinfo = without_query
+        .rsplit_once('@')
+        .map(|(_, tail)| tail)
+        .unwrap_or(without_query);
+    let mut host_and_path = without_userinfo.splitn(2, '/');
+    let host = host_and_path.next()?.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let path = host_and_path.next().unwrap_or_default();
+    let route = if path.contains("chat/completions") {
+        "/chat/completions"
+    } else if path.contains("responses") {
+        "/responses"
+    } else if path.contains("models") {
+        "/models"
+    } else {
+        ""
+    };
+    Some(format!("{host}{route}"))
+}
+
 pub fn telemetry_api_error_message(error: &ApiError) -> String {
     match error {
         ApiError::Transport(transport) => telemetry_transport_error_message(transport),
@@ -92,6 +182,7 @@ mod tests {
     use super::extract_response_debug_context;
     use super::telemetry_api_error_message;
     use super::telemetry_transport_error_message;
+    use super::user_visible_transport_retry_details;
     use codex_api::ApiError;
     use codex_api::TransportError;
     use http::HeaderMap;
@@ -145,6 +236,51 @@ mod tests {
             telemetry_api_error_message(&ApiError::Transport(transport)),
             "http 401"
         );
+    }
+
+    #[test]
+    fn user_visible_retry_details_describe_http_without_body_or_query_secrets() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", HeaderValue::from_static("req-429"));
+        headers.insert("cf-ray", HeaderValue::from_static("ray-429"));
+        let transport = TransportError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: Some(
+                "https://user:secret@example.com/v1/responses?api_key=secret".to_string(),
+            ),
+            headers: Some(headers),
+            body: Some(r#"{"error":{"message":"secret token leaked"}}"#.to_string()),
+        };
+
+        let details = user_visible_transport_retry_details(&transport);
+        assert!(details.contains("HTTP 429 Too Many Requests, retrying"));
+        assert!(details.contains("endpoint: example.com/responses"));
+        assert!(details.contains("request id: req-429"));
+        assert!(details.contains("cf-ray: ray-429"));
+        assert!(!details.contains("secret token leaked"));
+        assert!(!details.contains("api_key"));
+        assert!(!details.contains("user:secret"));
+    }
+
+    #[test]
+    fn user_visible_retry_details_do_not_expose_non_http_error_strings() {
+        let network = TransportError::Network(
+            "error sending request for url (https://user:secret@example.com/v1/responses?api_key=secret&token=leaked)"
+                .to_string(),
+        );
+        let build = TransportError::Build(
+            "invalid header value for authorization bearer secret-token".to_string(),
+        );
+
+        let network_details = user_visible_transport_retry_details(&network);
+        assert_eq!(network_details, "Network error, retrying");
+        assert!(!network_details.contains("api_key"));
+        assert!(!network_details.contains("token"));
+        assert!(!network_details.contains("user:secret"));
+
+        let build_details = user_visible_transport_retry_details(&build);
+        assert_eq!(build_details, "Request build error");
+        assert!(!build_details.contains("secret-token"));
     }
 
     #[test]

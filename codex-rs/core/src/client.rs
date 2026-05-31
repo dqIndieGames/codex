@@ -132,6 +132,7 @@ use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::extract_response_debug_context_from_api_error;
 use codex_response_debug_context::telemetry_api_error_message;
 use codex_response_debug_context::telemetry_transport_error_message;
+use codex_response_debug_context::user_visible_transport_retry_details;
 
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 pub const X_CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
@@ -2305,7 +2306,7 @@ impl RequestTelemetry for ApiTelemetry {
                 retry_number,
                 max_attempts,
                 status,
-                details: telemetry_transport_error_message(error),
+                details: user_visible_transport_retry_details(error),
             });
         }
     }

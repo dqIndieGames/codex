@@ -28,3 +28,11 @@
 - Provider 的 `base_url` 与 `experimental_bearer_token` 写入后，不能只清 plugin/skill cache；必须刷新 loaded threads 的 provider runtime。否则已经打开的窗口或会话会继续拿旧 URL/token 发请求。
 - Provider refresh 的结果要区分两件事：配置字段是否已经保存、当前是否真的刷新到了 live instance。没有 live instance 时仍然是保存成功，但必须明确提示“未刷新任何实例”。
 - Windows tray 的 provider apply 必须优先调用 app-server 控制面的 `apply_provider_runtime_from_effective_provider`，让实际运行中的 app-server 自己完成 effective config 读取、写入、reload user config 和 loaded thread refresh；只有所有 live instance 都明确不支持该控制操作时，才回退到 Python 直接改 `config.toml` 再发 `refresh_all_loaded_threads`。否则真实 `codex.exe` 被 IFEO、wrapper、runtime selector 或 Windows App 重定向后，用户会看到“配置像是改了，但当前会话仍拿旧 URL/token”。
+
+## 2026-05-31 retry 错误显示经验
+
+- 无界 retry 不能把内部哨兵值显示给用户；`u64::MAX` 只代表“不设上限”，用户界面禁止出现 `18446744073709551615`，应显示为 `unbounded` 或省略最大次数。否则用户会把内部实现数字误认为异常错误码。
+- retry 标题和详情要分工清楚；标题说明“HTTP 状态 + 当前第几次 retry + 是否无界”，详情说明“状态含义 + 正在自动重试 + 安全诊断字段”。不能出现标题是 `429 retry 4/18446744073709551615`、详情只有 `http 429` 这种难以排查的组合。
+- telemetry/log 的短字符串不能直接当用户详情；`http 429`、`http 503` 适合内部统计，不足以给用户解释发生了什么。用户可见详情至少应包含 `HTTP 429 Too Many Requests, retrying` 或 `HTTP 503 Service Unavailable, retrying` 这类人话状态。
+- HTTP response body 不能原样放进用户详情；body 可能包含 token、API key、auth error 或 provider 返回的敏感内容。允许展示的诊断信息应限制在状态码、标准 reason、去 query/userinfo 的 endpoint、request id、cf-ray、auth error 和 auth error code 等安全字段。
+- app-server/TUI/Windows App 的 `willRetry=true` 中间态必须继续可见；修复文案时不能回退成只写 telemetry/log，也不能把请求级 HTTP retry 和 stream/WebSocket reconnect 混在一起隐藏。
