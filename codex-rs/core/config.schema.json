@@ -843,6 +843,16 @@
       },
       "type": "object"
     },
+    "LoggingConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "app_server_stderr": {
+          "description": "When `true`, enables app-server stderr tracing output.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "FileSystemAccessMode": {
       "description": "Access mode for a filesystem entry.\n\nWhen two equally specific entries target the same path, we compare these by conflict precedence rather than by capability breadth: `deny` beats `write`, and `write` beats `read`.",
       "oneOf": [
@@ -4857,6 +4867,14 @@
         }
       ],
       "description": "When `true`, enables local SQLite log database collection. Defaults to `false`."
+    },
+    "logging": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/LoggingConfigToml"
+        }
+      ],
+      "description": "Optional logging sinks. Stderr logging is disabled by default."
     },
     "marketplaces": {
       "additionalProperties": {

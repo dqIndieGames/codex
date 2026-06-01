@@ -1147,11 +1147,13 @@ impl Session {
                 Some(turn_environment) => McpRuntimeContext::new(
                     Arc::clone(&sess.services.environment_manager),
                     turn_environment.cwd.to_path_buf(),
-                ),
+                )
+                .with_codex_self_exe(config.codex_self_exe.clone()),
                 None => McpRuntimeContext::new(
                     Arc::clone(&sess.services.environment_manager),
                     session_configuration.cwd.to_path_buf(),
-                ),
+                )
+                .with_codex_self_exe(config.codex_self_exe.clone()),
             };
             let (mcp_connection_manager, cancel_token) = McpConnectionManager::new(
                 &mcp_servers,

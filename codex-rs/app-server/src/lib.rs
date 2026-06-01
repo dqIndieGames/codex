@@ -621,22 +621,25 @@ pub async fn run_main_with_transport_options(
 
     let feedback = CodexFeedback::new();
 
-    // Install a simple subscriber so `tracing` output is visible. Users can
-    // control the log level with `RUST_LOG` and switch to JSON logs with
-    // `LOG_FORMAT=json`.
-    let stderr_fmt: StderrLogLayer = match log_format_from_env() {
-        LogFormat::Json => tracing_subscriber::fmt::layer()
-            .json()
-            .with_writer(std::io::stderr)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL)
-            .with_filter(default_app_server_env_filter())
-            .boxed(),
-        LogFormat::Default => tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL)
-            .with_filter(default_app_server_env_filter())
-            .boxed(),
-    };
+    // Stderr logging is intentionally opt-in for the desktop app-server. When
+    // enabled, users can control the log level with `RUST_LOG` and switch to
+    // JSON logs with `LOG_FORMAT=json`.
+    let stderr_fmt: Option<StderrLogLayer> =
+        config
+            .app_server_stderr_enabled
+            .then(|| match log_format_from_env() {
+                LogFormat::Json => tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(std::io::stderr)
+                    .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL)
+                    .with_filter(default_app_server_env_filter())
+                    .boxed(),
+                LogFormat::Default => tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL)
+                    .with_filter(default_app_server_env_filter())
+                    .boxed(),
+            });
 
     let feedback_layer = config.feedback_enabled.then(|| feedback.logger_layer());
     let feedback_metadata_layer = config.feedback_enabled.then(|| feedback.metadata_layer());
@@ -1083,6 +1086,7 @@ pub async fn run_main_with_transport_options(
                 }
             }
 
+            processor.clear_runtime_references();
             if !shutdown_state.forced() {
                 futures::future::join_all(
                     connections

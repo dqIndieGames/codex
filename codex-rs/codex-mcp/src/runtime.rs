@@ -38,6 +38,7 @@ pub struct SandboxState {
 pub struct McpRuntimeContext {
     environment_manager: Arc<EnvironmentManager>,
     local_stdio_fallback_cwd: PathBuf,
+    codex_self_exe: Option<PathBuf>,
 }
 
 impl McpRuntimeContext {
@@ -48,11 +49,21 @@ impl McpRuntimeContext {
         Self {
             environment_manager,
             local_stdio_fallback_cwd,
+            codex_self_exe: None,
         }
+    }
+
+    pub fn with_codex_self_exe(mut self, codex_self_exe: Option<PathBuf>) -> Self {
+        self.codex_self_exe = codex_self_exe;
+        self
     }
 
     pub(crate) fn local_stdio_fallback_cwd(&self) -> PathBuf {
         self.local_stdio_fallback_cwd.clone()
+    }
+
+    pub(crate) fn codex_self_exe(&self) -> Option<&PathBuf> {
+        self.codex_self_exe.as_ref()
     }
 
     pub(crate) fn resolve_server_environment(

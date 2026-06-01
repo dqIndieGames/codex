@@ -991,6 +991,10 @@ pub struct Config {
     /// Defaults to `false`.
     pub log_db_enabled: bool,
 
+    /// When `true`, app-server installs the stderr tracing layer.
+    /// Defaults to `false`.
+    pub app_server_stderr_enabled: bool,
+
     /// When `true`, rollout JSONL writers may skip per-line flushes while preserving accepted
     /// append, persist, flush, and shutdown durability barriers.
     /// Defaults to `true`.
@@ -3562,6 +3566,11 @@ impl Config {
                 .log_db
                 .as_ref()
                 .and_then(|log_db| log_db.enabled)
+                .unwrap_or(false),
+            app_server_stderr_enabled: cfg
+                .logging
+                .as_ref()
+                .and_then(|logging| logging.app_server_stderr)
                 .unwrap_or(false),
             rollout_batch_flush_enabled: cfg
                 .runtime_optimizations

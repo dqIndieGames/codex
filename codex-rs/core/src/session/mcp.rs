@@ -329,12 +329,14 @@ impl Session {
             Some(turn_environment) => McpRuntimeContext::new(
                 Arc::clone(&self.services.environment_manager),
                 turn_environment.cwd.to_path_buf(),
-            ),
+            )
+            .with_codex_self_exe(turn_context.codex_self_exe.clone()),
             None => McpRuntimeContext::new(
                 Arc::clone(&self.services.environment_manager),
                 #[allow(deprecated)]
                 turn_context.cwd.to_path_buf(),
-            ),
+            )
+            .with_codex_self_exe(turn_context.codex_self_exe.clone()),
         };
         {
             let mut guard = self.services.mcp_startup_cancellation_token.lock().await;

@@ -14,6 +14,7 @@ use crate::types::AuthCredentialsStoreMode;
 use crate::types::FeedbackConfigToml;
 use crate::types::History;
 use crate::types::LogDbConfigToml;
+use crate::types::LoggingConfigToml;
 use crate::types::MarketplaceConfig;
 use crate::types::McpServerConfig;
 use crate::types::MemoriesToml;
@@ -477,6 +478,9 @@ pub struct ConfigToml {
     /// When `true`, enables local SQLite log database collection.
     /// Defaults to `false`.
     pub log_db: Option<LogDbConfigToml>,
+
+    /// Optional logging sinks. Stderr logging is disabled by default.
+    pub logging: Option<LoggingConfigToml>,
 
     /// Optional runtime load-reduction features. Each optimization has its own safe default.
     pub runtime_optimizations: Option<RuntimeOptimizationsConfigToml>,

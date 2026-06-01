@@ -67,6 +67,8 @@ use tracing::warn;
 /// MCP server capability indicating that Codex should include [`SandboxState`]
 /// in tool-call request `_meta` under this key.
 pub const MCP_SANDBOX_STATE_META_CAPABILITY: &str = "codex/sandbox-state-meta";
+const NODE_REPL_MCP_SERVER_NAME: &str = "node_repl";
+const CODEX_CLI_PATH_ENV_VAR: &str = "CODEX_CLI_PATH";
 
 pub(crate) const MCP_TOOLS_LIST_DURATION_METRIC: &str = "codex.mcp.tools.list.duration_ms";
 pub(crate) const MCP_TOOLS_FETCH_UNCACHED_DURATION_METRIC: &str =
@@ -582,11 +584,23 @@ async fn make_rmcp_client(
         } => {
             let command_os: OsString = command.into();
             let args_os: Vec<OsString> = args.into_iter().map(Into::into).collect();
-            let env_os = env.map(|env| {
-                env.into_iter()
-                    .map(|(key, value)| (key.into(), value.into()))
-                    .collect::<HashMap<_, _>>()
-            });
+            let env_os = {
+                let mut env = env.unwrap_or_default();
+                if is_local_environment && server_name == NODE_REPL_MCP_SERVER_NAME {
+                    if let Some(codex_self_exe) = runtime_context.codex_self_exe() {
+                        env.insert(
+                            CODEX_CLI_PATH_ENV_VAR.to_string(),
+                            codex_self_exe.to_string_lossy().into_owned(),
+                        );
+                    }
+                }
+                (!env.is_empty()).then(|| {
+                    env
+                        .into_iter()
+                        .map(|(key, value)| (key.into(), value.into()))
+                        .collect::<HashMap<_, _>>()
+                })
+            };
             let launcher = if is_local_environment {
                 // TODO(starr): Unify local stdio MCP launch with
                 // `ExecutorStdioServerLauncher` once the executor-backed path

@@ -45,3 +45,11 @@
 - GitHub workflow 不能把 `GITHUB_REF_NAME` 当 Python wheel 的 Codex 版本；手动从 `main` 分支触发时它是 `main`，不符合 PEP 440，会导致 wheel 打包失败。云端打包应从 `codex-rs/Cargo.toml` 读取裸 semver，再把 local3 只用于用户可见版本输出。
 - Windows release smoke test 必须明确断言 `-local3`，不能只检查输出里包含裸 `0.135.0`；否则 `0.135.0` 和 `0.135.0-local3` 都会通过，无法阻止本地身份后缀回退。
 - GitHub Actions artifact 只是单次 workflow 的临时产物，不会自动显示在 Releases 页面；如果用户要从 Releases 页面下载，云端编译成功后必须单独创建 GitHub Release，并把已验证的 artifact 上传为 release assets。
+
+## 2026-06-02 app-server stderr 与 node_repl 清理经验
+
+- local3 app-server stderr 默认必须关闭，包括 `warn` 级别；只有用户在 `config.toml` 显式配置 `[logging] app_server_stderr = true` 时才安装 stderr tracing layer。否则 `RUST_LOG=warn` 或 `LOG_FORMAT=json` 只能作为显式开启后的日志细节，不能让 Windows App 默认恢复 stderr 噪声。
+- node_repl MCP 必须自动继承当前 local3 CLI 路径；启动 `[mcp_servers.node_repl]` 时，运行时应把 `CODEX_CLI_PATH` 覆盖为当前 `Config.codex_self_exe`。否则用户实际运行的是 local3，但 node_repl 子进程仍可能启动 AppData 旧版 `codex.exe`，表现成刷新、诊断或 app-server 行为不一致。
+- node_repl 的 CLI 路径继承只作用于 server 名为 `node_repl` 的 MCP；不要全局改写其他 MCP server 的 env。其他 server 可能依赖用户手写的 `CODEX_CLI_PATH` 或同名变量，默认不应被 local3 接管。
+- “只补清理遗漏”指复用已有 shutdown 机制：主 app-server 退出时补调已有 `clear_runtime_references()`，释放外部 auth、apps runtime 和 skills watcher 引用；不新增 idle timeout，不全局扫描/kill `node_repl.exe`，不因为当前 UI 订阅断开就杀 still-loaded threads。
+- 云端构建验证时，本地禁止编译；应推送 GitHub Actions 编译，下载云端产物后做实际 exe smoke test。重点看默认 stderr 是否安静、显式开启后是否可诊断、`codex.exe --version` 是否仍带 `-local3`、node_repl 子进程是否跟随当前 local3 CLI。

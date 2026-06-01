@@ -208,6 +208,13 @@ pub struct LogDbConfigToml {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
+pub struct LoggingConfigToml {
+    /// When `true`, enables app-server stderr tracing output.
+    pub app_server_stderr: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct RuntimeOptimizationsConfigToml {
     /// When `true`, rollout JSONL writes skip per-line flushes and flush at batch barriers.
     pub rollout_batch_flush: Option<bool>,

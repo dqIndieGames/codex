@@ -279,6 +279,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         analytics_enabled: Some(false),
         feedback_enabled: false,
         log_db_enabled: false,
+        app_server_stderr_enabled: false,
         rollout_batch_flush_enabled: false,
         app_server_notification_coalescing_enabled: true,
         tool_suggest: ToolSuggestConfig::default(),

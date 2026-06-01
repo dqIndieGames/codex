@@ -219,7 +219,8 @@ impl McpRequestProcessor {
         // as the local stdio fallback; named environment stdio MCPs must
         // declare their own absolute cwd.
         let runtime_context =
-            McpRuntimeContext::new(Arc::clone(&environment_manager), config.cwd.to_path_buf());
+            McpRuntimeContext::new(Arc::clone(&environment_manager), config.cwd.to_path_buf())
+                .with_codex_self_exe(config.codex_self_exe.clone());
 
         tokio::spawn(async move {
             Self::list_mcp_server_status_task(
@@ -368,7 +369,8 @@ impl McpRequestProcessor {
         // environment. Use config cwd only as the local stdio fallback; named
         // environment stdio MCPs must declare their own absolute cwd.
         let runtime_context =
-            McpRuntimeContext::new(Arc::clone(&environment_manager), config.cwd.to_path_buf());
+            McpRuntimeContext::new(Arc::clone(&environment_manager), config.cwd.to_path_buf())
+                .with_codex_self_exe(config.codex_self_exe.clone());
         let request_id = request_id.clone();
 
         tokio::spawn(async move {
