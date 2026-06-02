@@ -1039,9 +1039,10 @@ impl ModelClient {
         );
         let websocket_connect_timeout = self.current_provider().info().websocket_connect_timeout();
         let start = Instant::now();
+        let websocket_client = ApiWebSocketResponsesClient::new(api_provider, api_auth);
         let connect_future = tokio::time::timeout(
             websocket_connect_timeout,
-            ApiWebSocketResponsesClient::new(api_provider, api_auth).connect(
+            websocket_client.connect(
                 headers,
                 codex_login::default_client::default_headers(),
                 turn_state,
@@ -1665,7 +1666,7 @@ impl ModelClientSession {
                 ws_payload.generate = Some(false);
             }
 
-            match self
+            let websocket_connection_result = self
                 .websocket_connection(WebsocketConnectParams {
                     session_telemetry,
                     api_provider: client_setup.api_provider,
@@ -1677,36 +1678,41 @@ impl ModelClientSession {
                         RESPONSES_ENDPOINT,
                     ),
                 })
-                .await
-            {
+                .await;
+            match websocket_connection_result {
                 Ok(_) => {}
-                Err(err)
+                Err(err) => {
                     if self.provider_runtime_generation
-                        != self.client.current_provider_runtime_generation() =>
-                {
-                    debug!("restarting websocket connect after provider runtime refresh: {err}");
-                    pending_retry = PendingUnauthorizedRetry::default();
-                    continue;
+                        != self.client.current_provider_runtime_generation()
+                    {
+                        debug!(
+                            "restarting websocket connect after provider runtime refresh: {err}"
+                        );
+                        pending_retry = PendingUnauthorizedRetry::default();
+                        continue;
+                    }
+                    match err {
+                        ApiError::Transport(TransportError::Http { status, .. })
+                            if status == StatusCode::UPGRADE_REQUIRED =>
+                        {
+                            return Ok(WebsocketStreamOutcome::FallbackToHttp);
+                        }
+                        ApiError::Transport(
+                            unauthorized_transport @ TransportError::Http { status, .. },
+                        ) if status == StatusCode::UNAUTHORIZED => {
+                            pending_retry = PendingUnauthorizedRetry::from_recovery(
+                                handle_unauthorized(
+                                    unauthorized_transport,
+                                    &mut auth_recovery,
+                                    session_telemetry,
+                                )
+                                .await?,
+                            );
+                            continue;
+                        }
+                        err => return Err(map_api_error(err)),
+                    }
                 }
-                Err(ApiError::Transport(TransportError::Http { status, .. }))
-                    if status == StatusCode::UPGRADE_REQUIRED =>
-                {
-                    return Ok(WebsocketStreamOutcome::FallbackToHttp);
-                }
-                Err(ApiError::Transport(
-                    unauthorized_transport @ TransportError::Http { status, .. },
-                )) if status == StatusCode::UNAUTHORIZED => {
-                    pending_retry = PendingUnauthorizedRetry::from_recovery(
-                        handle_unauthorized(
-                            unauthorized_transport,
-                            &mut auth_recovery,
-                            session_telemetry,
-                        )
-                        .await?,
-                    );
-                    continue;
-                }
-                Err(err) => return Err(map_api_error(err)),
             }
             if self.provider_runtime_generation != self.client.current_provider_runtime_generation()
             {
