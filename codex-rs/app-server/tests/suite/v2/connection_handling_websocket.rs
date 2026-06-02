@@ -389,6 +389,8 @@ pub(super) async fn spawn_websocket_server_with_args(
     let mut cmd = Command::new(program);
     cmd.arg("--listen")
         .arg(listen_url)
+        .arg("-c")
+        .arg("logging.app_server_stderr=true")
         .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
         .args(extra_args)
         .stdin(Stdio::null())

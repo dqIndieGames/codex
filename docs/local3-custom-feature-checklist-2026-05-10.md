@@ -48,7 +48,7 @@
 
 ## 2026-06-02 app-server stderr 与 node_repl 清理经验
 
-- local3 app-server stderr 默认必须关闭，包括 `warn` 级别；只有用户在 `config.toml` 显式配置 `[logging] app_server_stderr = true` 时才安装 stderr tracing layer。否则 `RUST_LOG=warn` 或 `LOG_FORMAT=json` 只能作为显式开启后的日志细节，不能让 Windows App 默认恢复 stderr 噪声。
+- local3 app-server stderr 默认必须关闭，包括 `warn` 级别和 WebSocket 启动 banner；只有用户在 `config.toml` 显式配置 `[logging] app_server_stderr = true` 时才安装 stderr tracing layer 并允许 app-server 把监听地址/readyz/healthz 这类启动诊断写到 stderr。否则 `RUST_LOG=warn` 或 `LOG_FORMAT=json` 只能作为显式开启后的日志细节，不能让 Windows App 默认恢复 stderr 噪声。
 - node_repl MCP 必须自动继承当前 local3 CLI 路径；启动 `[mcp_servers.node_repl]` 时，运行时应把 `CODEX_CLI_PATH` 覆盖为当前 `Config.codex_self_exe`。否则用户实际运行的是 local3，但 node_repl 子进程仍可能启动 AppData 旧版 `codex.exe`，表现成刷新、诊断或 app-server 行为不一致。
 - node_repl 的 CLI 路径继承只作用于 server 名为 `node_repl` 的 MCP；不要全局改写其他 MCP server 的 env。其他 server 可能依赖用户手写的 `CODEX_CLI_PATH` 或同名变量，默认不应被 local3 接管。
 - “只补清理遗漏”指复用已有 shutdown 机制：主 app-server 退出时补调已有 `clear_runtime_references()`，释放外部 auth、apps runtime 和 skills watcher 引用；不新增 idle timeout，不全局扫描/kill `node_repl.exe`，不因为当前 UI 订阅断开就杀 still-loaded threads。

@@ -131,6 +131,7 @@ pub async fn start_websocket_acceptor(
     transport_event_tx: mpsc::Sender<TransportEvent>,
     shutdown_token: CancellationToken,
     auth_policy: WebsocketAuthPolicy,
+    print_startup_banner: bool,
 ) -> IoResult<JoinHandle<()>> {
     if is_unauthenticated_non_loopback_listener(bind_address, &auth_policy) {
         return Err(std::io::Error::new(
@@ -142,7 +143,9 @@ pub async fn start_websocket_acceptor(
     }
     let listener = TcpListener::bind(bind_address).await?;
     let local_addr = listener.local_addr()?;
-    print_websocket_startup_banner(local_addr);
+    if print_startup_banner {
+        print_websocket_startup_banner(local_addr);
+    }
     info!("app-server websocket listening on ws://{local_addr}");
 
     let router = Router::new()
