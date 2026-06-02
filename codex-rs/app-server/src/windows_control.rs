@@ -9,6 +9,7 @@ use codex_app_server_protocol::ConfigReadParams;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::MergeStrategy;
 use codex_core::ProviderRuntimeRefreshAllLoadedReport;
+use codex_core::ProviderRuntimeRefreshScope;
 use codex_core::ThreadManager;
 use serde::Deserialize;
 use serde::Serialize;
@@ -55,6 +56,16 @@ struct ControlRequest {
     op: String,
     #[serde(default)]
     source_provider_id: Option<String>,
+    #[serde(default)]
+    scope: Option<ControlRefreshScope>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ControlRefreshScope {
+    All,
+    Console,
+    AppServer,
 }
 
 #[derive(Debug, Serialize)]
@@ -294,7 +305,23 @@ async fn handle_named_pipe_client(
     let response = match request.op.as_str() {
         "ping" => serde_json::to_vec(&PingResponse { ok: true }).map_err(io::Error::other)?,
         "refresh_all_loaded_threads" => {
-            let report = thread_manager.refresh_all_loaded_provider_runtime().await;
+            let report = thread_manager
+                .refresh_loaded_provider_runtime(core_refresh_scope(
+                    request.scope.unwrap_or(ControlRefreshScope::All),
+                ))
+                .await;
+            serde_json::to_vec(&refresh_response_from_report(report)).map_err(io::Error::other)?
+        }
+        "refresh_console_loaded_threads" => {
+            let report = thread_manager
+                .refresh_loaded_provider_runtime(ProviderRuntimeRefreshScope::Console)
+                .await;
+            serde_json::to_vec(&refresh_response_from_report(report)).map_err(io::Error::other)?
+        }
+        "refresh_app_server_loaded_threads" => {
+            let report = thread_manager
+                .refresh_loaded_provider_runtime(ProviderRuntimeRefreshScope::AppServer)
+                .await;
             serde_json::to_vec(&refresh_response_from_report(report)).map_err(io::Error::other)?
         }
         "list_effective_providers" => {
@@ -328,6 +355,15 @@ async fn handle_named_pipe_client(
     write_half.write_all(b"\n").await?;
     write_half.flush().await?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn core_refresh_scope(scope: ControlRefreshScope) -> ProviderRuntimeRefreshScope {
+    match scope {
+        ControlRefreshScope::All => ProviderRuntimeRefreshScope::All,
+        ControlRefreshScope::Console => ProviderRuntimeRefreshScope::Console,
+        ControlRefreshScope::AppServer => ProviderRuntimeRefreshScope::AppServer,
+    }
 }
 
 #[cfg(windows)]
@@ -532,8 +568,11 @@ async fn apply_provider_runtime_from_effective_provider(
         );
     }
 
-    let refresh_response =
-        refresh_response_from_report(thread_manager.refresh_all_loaded_provider_runtime().await);
+    let refresh_response = refresh_response_from_report(
+        thread_manager
+            .refresh_loaded_provider_runtime(ProviderRuntimeRefreshScope::All)
+            .await,
+    );
     let outcome = if refresh_response.failed_threads.is_empty() {
         "success"
     } else {

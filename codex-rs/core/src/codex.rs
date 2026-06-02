@@ -38,6 +38,8 @@ use crate::realtime_conversation::handle_close as handle_realtime_conversation_c
 use crate::realtime_conversation::handle_start as handle_realtime_conversation_start;
 use crate::realtime_conversation::handle_text as handle_realtime_conversation_text;
 use crate::render_skills_section;
+use crate::responses_retry::ResponsesStreamRequest;
+use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::rollout::session_index;
 use crate::skills_load_input_from_config;
 use crate::stream_events_utils::HandleOutputCtx;
@@ -364,7 +366,6 @@ use crate::turn_timing::TurnTimingState;
 use crate::turn_timing::record_turn_ttfm_metric;
 use crate::turn_timing::record_turn_ttft_metric;
 use crate::unified_exec::UnifiedExecProcessManager;
-use crate::util::retry_delay_for_error;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_async_utils::OrCancelExt;
 use codex_git_utils::get_git_repo_root;
@@ -6662,40 +6663,17 @@ async fn run_sampling_request(
             return Err(err);
         }
 
-        let fallback_retry_threshold = turn_context.provider.stream_fallback_retry_threshold();
-        let retry_budget = turn_context.provider.stream_retry_budget();
-        if retries >= fallback_retry_threshold
-            && client_session.try_switch_fallback_transport(
-                &turn_context.session_telemetry,
-                &turn_context.model_info,
-            )
-        {
-            sess.send_event(
-                &turn_context,
-                EventMsg::Warning(WarningEvent {
-                    message: format!("Falling back from WebSockets to HTTPS transport. {err:#}"),
-                }),
-            )
-            .await;
-            retries = 0;
-            continue;
-        }
-        if retry_budget.is_some_and(|max_retries| retries >= max_retries) {
-            return Err(err);
-        }
-
-        retries += 1;
-        let delay = retry_delay_for_error(&err, retries);
-        emit_retryable_stream_error(
-            sess.as_ref(),
-            &turn_context,
-            retries,
-            fallback_retry_threshold,
-            client_session.responses_websocket_enabled(),
+        handle_retryable_response_stream_error(
+            &mut retries,
+            turn_context.provider.stream_fallback_retry_threshold(),
+            turn_context.provider.stream_retry_budget(),
             err,
+            client_session,
+            &sess,
+            &turn_context,
+            ResponsesStreamRequest::Sampling,
         )
-        .await;
-        tokio::time::sleep(delay).await;
+        .await?;
     }
 }
 
@@ -7504,44 +7482,6 @@ async fn emit_transport_retry_status_event(
         }),
     )
     .await;
-}
-
-async fn emit_retryable_stream_error(
-    sess: &Session,
-    turn_context: &TurnContext,
-    retry_number: u64,
-    fallback_retry_threshold: u64,
-    websocket_retry_chain_active: bool,
-    err: CodexErr,
-) {
-    // Keep intermediate websocket reconnect churn internal until the retry that
-    // is about to trigger fallback. Surfacing every step regresses the
-    // websocket fallback UX and pollutes retry history.
-    if websocket_retry_chain_active && retry_number > 1 && retry_number < fallback_retry_threshold {
-        return;
-    }
-
-    let details = err.to_string();
-    let websocket_handshake_status = matches!(
-        &err,
-        CodexErr::UnexpectedStatus(err)
-            if err
-                .url
-                .as_deref()
-                .is_some_and(|url| url.starts_with("ws://") || url.starts_with("wss://"))
-    );
-    if websocket_handshake_status {
-        emit_transport_retry_status_event(sess, turn_context, retry_number, details).await;
-        return;
-    }
-    if let Some(status) = err
-        .http_status_code_value()
-        .and_then(|value| http::StatusCode::from_u16(value).ok())
-    {
-        emit_retry_status_event(sess, turn_context, status, retry_number, details).await;
-    } else {
-        emit_transport_retry_status_event(sess, turn_context, retry_number, details).await;
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

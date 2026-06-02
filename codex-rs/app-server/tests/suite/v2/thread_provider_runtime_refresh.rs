@@ -30,6 +30,10 @@ use serde_json::json;
 use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
+use wiremock::Mock;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path_regex;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
@@ -223,11 +227,7 @@ async fn run_text_turn(mcp: &mut McpProcess, thread_id: &str, text: &str) -> Res
     Ok(())
 }
 
-async fn start_text_turn(
-    mcp: &mut McpProcess,
-    thread_id: &str,
-    text: &str,
-) -> Result<String> {
+async fn start_text_turn(mcp: &mut McpProcess, thread_id: &str, text: &str) -> Result<String> {
     let request_id = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread_id.to_string(),
@@ -248,9 +248,7 @@ async fn start_text_turn(
     Ok(turn.id)
 }
 
-fn response_request_authorization_headers(
-    requests: &[wiremock::Request],
-) -> Vec<Option<String>> {
+fn response_request_authorization_headers(requests: &[wiremock::Request]) -> Vec<Option<String>> {
     requests
         .iter()
         .filter(|request| request.url.path().ends_with("/responses"))
@@ -634,6 +632,81 @@ async fn retryable_503_request_emits_visible_retry_error_notification() -> Resul
         mcp.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_runtime_refresh_interrupts_active_request_retry_and_rebuilds_provider()
+-> Result<()> {
+    let old_server = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses$"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("old provider unavailable"))
+        .mount(&old_server)
+        .await;
+
+    let new_server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    write_provider_refresh_config_with_agent_config_and_request_retries(
+        codex_home.path(),
+        &old_server.uri(),
+        &format!("{}/v1", old_server.uri()),
+        "old-token",
+        /*relative_agent_config_file*/ None,
+        /*request_max_retries*/ 5,
+        /*supports_websockets*/ false,
+    )?;
+
+    let mut mcp = init_mcp(codex_home.path()).await?;
+    let thread_id = start_thread(&mut mcp).await?;
+    let turn_id = start_text_turn(&mut mcp, &thread_id, "trigger retry then refresh").await?;
+
+    let retry_notification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("error"),
+    )
+    .await??;
+    let retry_error: ErrorNotification = serde_json::from_value(
+        retry_notification
+            .params
+            .expect("error notification should include params"),
+    )?;
+    assert!(retry_error.will_retry);
+    assert_eq!(retry_error.thread_id, thread_id);
+    assert_eq!(retry_error.turn_id, turn_id);
+    assert!(retry_error.error.message.contains("503"));
+
+    write_provider_refresh_config_with_agent_config_and_request_retries(
+        codex_home.path(),
+        &new_server.uri(),
+        &format!("{}/v1", new_server.uri()),
+        "new-token",
+        /*relative_agent_config_file*/ None,
+        /*request_max_retries*/ 5,
+        /*supports_websockets*/ false,
+    )?;
+
+    let refresh_response = refresh_thread(&mut mcp, &thread_id).await?;
+    assert_eq!(refresh_response.thread_id, thread_id);
+    assert_eq!(
+        refresh_response.status,
+        ThreadProviderRuntimeRefreshStatus::Applied
+    );
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let new_requests = new_server.received_requests().await.unwrap_or_default();
+    let new_headers = response_request_authorization_headers(&new_requests);
+    assert!(
+        new_headers
+            .iter()
+            .any(|header| header.as_deref() == Some("Bearer new-token")),
+        "refreshed request should use new provider token: {new_headers:?}"
+    );
     Ok(())
 }
 

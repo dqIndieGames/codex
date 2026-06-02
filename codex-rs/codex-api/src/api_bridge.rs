@@ -163,6 +163,7 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                 status: http::StatusCode::INTERNAL_SERVER_ERROR,
                 request_id: None,
             }),
+            TransportError::RetryInterrupted(msg) => CodexErr::Stream(msg, None),
             TransportError::Timeout => CodexErr::RequestTimeout,
             TransportError::Network(msg) | TransportError::Build(msg) => {
                 CodexErr::Stream(msg, None)

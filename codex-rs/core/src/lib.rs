@@ -25,6 +25,7 @@ pub use codex_thread::ProviderRuntimeRefreshAllLoadedReport;
 pub use codex_thread::ProviderRuntimeRefreshFailure;
 pub use codex_thread::ProviderRuntimeRefreshStatus;
 pub use codex_thread::ThreadConfigSnapshot;
+pub use thread_manager::ProviderRuntimeRefreshScope;
 pub use session::turn_context::TurnContext;
 mod agent;
 mod attestation;

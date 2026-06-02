@@ -64,6 +64,7 @@ pub fn telemetry_transport_error_message(error: &TransportError) -> String {
     match error {
         TransportError::Http { status, .. } => format!("http {}", status.as_u16()),
         TransportError::RetryLimit => "retry limit reached".to_string(),
+        TransportError::RetryInterrupted(err) => err.to_string(),
         TransportError::Timeout => "timeout".to_string(),
         TransportError::Network(err) => err.to_string(),
         TransportError::Build(err) => err.to_string(),
@@ -97,6 +98,7 @@ pub fn user_visible_transport_retry_details(error: &TransportError) -> String {
             details
         }
         TransportError::RetryLimit => "Retry limit reached".to_string(),
+        TransportError::RetryInterrupted(_) => "Request retry interrupted".to_string(),
         TransportError::Timeout => "Request timed out, retrying".to_string(),
         TransportError::Network(_) => "Network error, retrying".to_string(),
         TransportError::Build(_) => "Request build error".to_string(),
@@ -129,10 +131,7 @@ fn safe_endpoint_from_url(url: Option<&str>) -> Option<String> {
         return None;
     }
 
-    let without_scheme = raw
-        .split_once("://")
-        .map(|(_, tail)| tail)
-        .unwrap_or(raw);
+    let without_scheme = raw.split_once("://").map(|(_, tail)| tail).unwrap_or(raw);
     let without_fragment = without_scheme.split('#').next().unwrap_or(without_scheme);
     let without_query = without_fragment
         .split('?')
@@ -245,9 +244,7 @@ mod tests {
         headers.insert("cf-ray", HeaderValue::from_static("ray-429"));
         let transport = TransportError::Http {
             status: StatusCode::TOO_MANY_REQUESTS,
-            url: Some(
-                "https://user:secret@example.com/v1/responses?api_key=secret".to_string(),
-            ),
+            url: Some("https://user:secret@example.com/v1/responses?api_key=secret".to_string()),
             headers: Some(headers),
             body: Some(r#"{"error":{"message":"secret token leaked"}}"#.to_string()),
         };

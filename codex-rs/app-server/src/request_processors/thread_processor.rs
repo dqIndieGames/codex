@@ -600,9 +600,14 @@ impl ThreadRequestProcessor {
 
     pub(crate) async fn thread_provider_runtime_refresh_all_loaded(
         &self,
-        _params: ThreadProviderRuntimeRefreshAllLoadedParams,
+        params: ThreadProviderRuntimeRefreshAllLoadedParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        let report = self.thread_manager.refresh_all_loaded_provider_runtime().await;
+        let report = self
+            .thread_manager
+            .refresh_loaded_provider_runtime(core_provider_runtime_refresh_scope(
+                params.scope,
+            ))
+            .await;
         Ok(Some(
             ThreadProviderRuntimeRefreshAllLoadedResponse {
                 total_threads: u32::try_from(report.total_threads).unwrap_or(u32::MAX),
@@ -1384,7 +1389,7 @@ impl ThreadRequestProcessor {
         params: ThreadArchiveParams,
     ) -> Result<(ThreadArchiveResponse, Vec<String>), JSONRPCErrorError> {
         let thread_id = ThreadId::from_string(&params.thread_id)
-            .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+            .map_err(|err| invalid_request(format!("invalid session id: {err}")))?;
 
         let mut thread_ids = vec![thread_id];
         if let Some(state_db_ctx) = self.state_db.as_ref() {
@@ -1393,7 +1398,7 @@ impl ThreadRequestProcessor {
                 .await
                 .map_err(|err| {
                     internal_error(format!(
-                        "failed to list spawned descendants for thread id {thread_id}: {err}"
+                        "failed to list spawned descendants for session {thread_id}: {err}"
                     ))
                 })?;
             let mut seen = HashSet::from([thread_id]);
@@ -1705,7 +1710,7 @@ impl ThreadRequestProcessor {
         params: ThreadUnarchiveParams,
     ) -> Result<(ThreadUnarchiveResponse, String), JSONRPCErrorError> {
         let thread_id = ThreadId::from_string(&params.thread_id)
-            .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+            .map_err(|err| invalid_request(format!("invalid session id: {err}")))?;
 
         let fallback_provider = self.config.model_provider_id.clone();
         let stored_thread = self
@@ -2317,8 +2322,6 @@ impl ThreadRequestProcessor {
             sort_direction,
             items_view,
         } = params;
-        let items_view = items_view.unwrap_or(TurnItemsView::Summary);
-
         let thread_uuid = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
 
@@ -2346,60 +2349,20 @@ impl ThreadRequestProcessor {
         } else {
             None
         };
-        let mut turns = reconstruct_thread_turns_for_turns_list(
+        build_thread_turns_page_response(
             &items,
             self.thread_watch_manager
                 .loaded_status_for_thread(&thread_uuid.to_string())
                 .await,
             has_live_running_thread,
             active_turn,
-        );
-        for turn in &mut turns {
-            match items_view {
-                TurnItemsView::NotLoaded => {
-                    turn.items.clear();
-                    turn.items_view = TurnItemsView::NotLoaded;
-                }
-                TurnItemsView::Summary => {
-                    let first_user_message = turn
-                        .items
-                        .iter()
-                        .find(|item| matches!(item, ThreadItem::UserMessage { .. }))
-                        .cloned();
-                    let final_agent_message = turn
-                        .items
-                        .iter()
-                        .rev()
-                        .find(|item| matches!(item, ThreadItem::AgentMessage { .. }))
-                        .cloned();
-                    turn.items = match (first_user_message, final_agent_message) {
-                        (Some(user_message), Some(agent_message))
-                            if user_message.id() != agent_message.id() =>
-                        {
-                            vec![user_message, agent_message]
-                        }
-                        (Some(user_message), _) => vec![user_message],
-                        (None, Some(agent_message)) => vec![agent_message],
-                        (None, None) => Vec::new(),
-                    };
-                    turn.items_view = TurnItemsView::Summary;
-                }
-                TurnItemsView::Full => {
-                    turn.items_view = TurnItemsView::Full;
-                }
-            }
-        }
-        let page = paginate_thread_turns(
-            turns,
-            cursor.as_deref(),
-            limit,
-            sort_direction.unwrap_or(SortDirection::Desc),
-        )?;
-        Ok(ThreadTurnsListResponse {
-            data: page.turns,
-            next_cursor: page.next_cursor,
-            backwards_cursor: page.backwards_cursor,
-        })
+            ThreadTurnsPageOptions {
+                cursor: cursor.as_deref(),
+                limit,
+                sort_direction: sort_direction.unwrap_or(SortDirection::Desc),
+                items_view: items_view.unwrap_or(TurnItemsView::Summary),
+            },
+        )
     }
 
     async fn load_thread_turns_list_history(
@@ -2607,6 +2570,7 @@ impl ThreadRequestProcessor {
             developer_instructions,
             personality,
             exclude_turns,
+            initial_turns_page,
             persist_extended_history: _persist_extended_history,
         } = params;
         let include_turns = !exclude_turns;
@@ -2761,8 +2725,28 @@ impl ThreadRequestProcessor {
                     config_snapshot.active_permission_profile,
                 );
                 let token_usage_thread = include_turns.then(|| thread.clone());
+                let mut initial_turns_page = if let Some(params) = initial_turns_page.as_ref() {
+                    match build_thread_resume_initial_turns_page(
+                        &response_history.get_rollout_items(),
+                        thread.status.clone(),
+                        /*has_live_running_thread*/ false,
+                        /*active_turn*/ None,
+                        params,
+                    ) {
+                        Ok(page) => Some(page),
+                        Err(error) => {
+                            self.outgoing.send_error(request_id, error).await;
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    None
+                };
                 if redact_resume_payloads {
-                    redact_thread_resume_payloads(&mut thread);
+                    redact_thread_resume_payloads(&mut thread.turns);
+                    if let Some(initial_turns_page) = initial_turns_page.as_mut() {
+                        redact_thread_resume_payloads(&mut initial_turns_page.data);
+                    }
                 }
 
                 let response = ThreadResumeResponse {
@@ -2778,6 +2762,7 @@ impl ThreadRequestProcessor {
                     sandbox,
                     active_permission_profile,
                     reasoning_effort: session_configured.reasoning_effort,
+                    initial_turns_page,
                 };
 
                 let connection_id = request_id.connection_id;
@@ -3002,6 +2987,7 @@ impl ThreadRequestProcessor {
                     emit_thread_goal_update,
                     thread_goal_state_db,
                     include_turns: !params.exclude_turns,
+                    initial_turns_page: params.initial_turns_page.clone(),
                     redact_resume_payloads,
                 }),
             );
@@ -3063,7 +3049,7 @@ impl ThreadRequestProcessor {
             let existing_thread_id = match ThreadId::from_string(thread_id) {
                 Ok(id) => id,
                 Err(err) => {
-                    return Err(invalid_request(format!("invalid thread id: {err}")));
+                    return Err(invalid_request(format!("invalid session id: {err}")));
                 }
             };
             let params = StoreReadThreadParams {
@@ -3074,7 +3060,15 @@ impl ThreadRequestProcessor {
             self.thread_store.read_thread(params).await
         };
 
-        result.map_err(thread_store_resume_read_error)
+        let stored_thread = result.map_err(thread_store_resume_read_error)?;
+        if stored_thread.archived_at.is_some() {
+            let thread_id = stored_thread.thread_id;
+            return Err(invalid_request(format!(
+                "session {thread_id} is archived. Run `codex unarchive {thread_id}` to unarchive it first."
+            )));
+        }
+
+        Ok(stored_thread)
     }
 
     async fn stored_thread_to_initial_history(
@@ -3568,7 +3562,9 @@ impl ThreadRequestProcessor {
                     Some(providers)
                 }
             }
-            None => Some(vec![self.config.model_provider_id.clone()]),
+            // `None` means "no provider filter" so resume and history surfaces
+            // keep showing sessions created under other providers.
+            None => None,
         };
         let (allowed_sources_vec, source_kind_filter) = compute_source_filters(source_kinds);
         let allowed_sources = allowed_sources_vec.as_slice();
@@ -3782,6 +3778,95 @@ fn parse_thread_turns_cursor(cursor: &str) -> Result<ThreadTurnsCursor, JSONRPCE
     serde_json::from_str(cursor).map_err(|_| invalid_request(format!("invalid cursor: {cursor}")))
 }
 
+struct ThreadTurnsPageOptions<'a> {
+    cursor: Option<&'a str>,
+    limit: Option<u32>,
+    sort_direction: SortDirection,
+    items_view: TurnItemsView,
+}
+
+fn build_thread_turns_page_response(
+    items: &[RolloutItem],
+    loaded_status: ThreadStatus,
+    has_live_running_thread: bool,
+    active_turn: Option<Turn>,
+    options: ThreadTurnsPageOptions<'_>,
+) -> Result<ThreadTurnsListResponse, JSONRPCErrorError> {
+    let mut turns = reconstruct_thread_turns_for_turns_list(
+        items,
+        loaded_status,
+        has_live_running_thread,
+        active_turn,
+    );
+    apply_thread_turns_items_view(&mut turns, options.items_view);
+    let page = paginate_thread_turns(turns, options.cursor, options.limit, options.sort_direction)?;
+    Ok(ThreadTurnsListResponse {
+        data: page.turns,
+        next_cursor: page.next_cursor,
+        backwards_cursor: page.backwards_cursor,
+    })
+}
+
+pub(super) fn build_thread_resume_initial_turns_page(
+    items: &[RolloutItem],
+    loaded_status: ThreadStatus,
+    has_live_running_thread: bool,
+    active_turn: Option<Turn>,
+    params: &ThreadResumeInitialTurnsPageParams,
+) -> Result<codex_app_server_protocol::TurnsPage, JSONRPCErrorError> {
+    build_thread_turns_page_response(
+        items,
+        loaded_status,
+        has_live_running_thread,
+        active_turn,
+        ThreadTurnsPageOptions {
+            cursor: None,
+            limit: params.limit,
+            sort_direction: params.sort_direction.unwrap_or(SortDirection::Desc),
+            items_view: params.items_view.unwrap_or(TurnItemsView::Summary),
+        },
+    )
+    .map(Into::into)
+}
+
+fn apply_thread_turns_items_view(turns: &mut [Turn], items_view: TurnItemsView) {
+    for turn in turns {
+        match items_view {
+            TurnItemsView::NotLoaded => {
+                turn.items.clear();
+                turn.items_view = TurnItemsView::NotLoaded;
+            }
+            TurnItemsView::Summary => {
+                let first_user_message = turn
+                    .items
+                    .iter()
+                    .find(|item| matches!(item, ThreadItem::UserMessage { .. }))
+                    .cloned();
+                let final_agent_message = turn
+                    .items
+                    .iter()
+                    .rev()
+                    .find(|item| matches!(item, ThreadItem::AgentMessage { .. }))
+                    .cloned();
+                turn.items = match (first_user_message, final_agent_message) {
+                    (Some(user_message), Some(agent_message))
+                        if user_message.id() != agent_message.id() =>
+                    {
+                        vec![user_message, agent_message]
+                    }
+                    (Some(user_message), _) => vec![user_message],
+                    (None, Some(agent_message)) => vec![agent_message],
+                    (None, None) => Vec::new(),
+                };
+                turn.items_view = TurnItemsView::Summary;
+            }
+            TurnItemsView::Full => {
+                turn.items_view = TurnItemsView::Full;
+            }
+        }
+    }
+}
+
 fn reconstruct_thread_turns_for_turns_list(
     items: &[RolloutItem],
     loaded_status: ThreadStatus,
@@ -3970,7 +4055,19 @@ fn thread_store_archive_error(operation: &str, err: ThreadStoreError) -> JSONRPC
         ThreadStoreError::Unsupported {
             operation: unsupported_operation,
         } => unsupported_thread_store_operation(unsupported_operation),
-        err => internal_error(format!("failed to {operation} thread: {err}")),
+        err => internal_error(format!("failed to {operation} session: {err}")),
+    }
+}
+
+fn core_provider_runtime_refresh_scope(
+    scope: Option<ThreadProviderRuntimeRefreshScope>,
+) -> CoreProviderRuntimeRefreshScope {
+    match scope.unwrap_or(ThreadProviderRuntimeRefreshScope::All) {
+        ThreadProviderRuntimeRefreshScope::All => CoreProviderRuntimeRefreshScope::All,
+        ThreadProviderRuntimeRefreshScope::Console => CoreProviderRuntimeRefreshScope::Console,
+        ThreadProviderRuntimeRefreshScope::AppServer => {
+            CoreProviderRuntimeRefreshScope::AppServer
+        }
     }
 }
 

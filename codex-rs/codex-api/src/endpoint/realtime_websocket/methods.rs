@@ -17,6 +17,7 @@ use crate::error::ApiError;
 use crate::provider::Provider;
 use codex_client::backoff;
 use codex_client::maybe_build_rustls_client_config_with_custom_ca;
+use codex_client::TransportError;
 use codex_protocol::protocol::RealtimeTranscriptDelta;
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 use futures::SinkExt;
@@ -27,6 +28,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -46,6 +48,8 @@ use tungstenite::protocol::WebSocketConfig;
 use url::Url;
 
 const REALTIME_WIRE_LOG_TARGET: &str = "codex_api::realtime_websocket::wire";
+const REALTIME_RETRY_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+pub type RequestRetryGuard = Arc<dyn Fn() -> bool + Send + Sync>;
 
 struct WsStream {
     tx_command: mpsc::Sender<WsCommand>,
@@ -550,12 +554,54 @@ fn contains_transcript_entry(entries: &[RealtimeTranscriptEntry], role: &str, te
 
 pub struct RealtimeWebsocketClient {
     provider: Provider,
+    request_retry_guard: Option<RequestRetryGuard>,
 }
 
 impl RealtimeWebsocketClient {
     pub fn new(provider: Provider) -> Self {
         Self {
             provider: provider.with_retry_max_attempts(/*max_attempts*/ 1),
+            request_retry_guard: None,
+        }
+    }
+
+    pub fn with_request_retry_guard(
+        mut self,
+        guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Self {
+        self.request_retry_guard = guard;
+        self
+    }
+
+    fn request_retry_interrupted(&self) -> ApiError {
+        ApiError::Transport(TransportError::RetryInterrupted(
+            "provider runtime changed during realtime websocket retry".to_string(),
+        ))
+    }
+
+    fn can_continue_request_retry(&self) -> bool {
+        self.request_retry_guard
+            .as_ref()
+            .is_none_or(|guard| guard())
+    }
+
+    async fn sleep_retry_delay(&self, delay: Duration) -> Result<(), ApiError> {
+        if delay.is_zero() {
+            return Ok(());
+        }
+
+        let start = tokio::time::Instant::now();
+        loop {
+            if !self.can_continue_request_retry() {
+                return Err(self.request_retry_interrupted());
+            }
+
+            let elapsed = start.elapsed();
+            if elapsed >= delay {
+                return Ok(());
+            }
+
+            sleep((delay - elapsed).min(REALTIME_RETRY_INTERRUPT_POLL_INTERVAL)).await;
         }
     }
 
@@ -587,6 +633,9 @@ impl RealtimeWebsocketClient {
         // socket. Once joined, the returned connection is the same reader/writer state that the
         // ordinary websocket start path uses.
         for attempt in 0..=self.provider.retry.max_attempts {
+            if !self.can_continue_request_retry() {
+                return Err(self.request_retry_interrupted());
+            }
             let result = self
                 .connect_webrtc_sideband_once(
                     config.clone(),
@@ -598,6 +647,9 @@ impl RealtimeWebsocketClient {
             match result {
                 Ok(connection) => return Ok(connection),
                 Err(err) if attempt < self.provider.retry.max_attempts => {
+                    if !self.can_continue_request_retry() {
+                        return Err(self.request_retry_interrupted());
+                    }
                     let delay = backoff(self.provider.retry.base_delay, attempt + 1);
                     warn!(
                         attempt = attempt + 1,
@@ -605,7 +657,7 @@ impl RealtimeWebsocketClient {
                         delay_ms = delay.as_millis(),
                         "realtime sideband websocket connect failed; retrying: {err}"
                     );
-                    sleep(delay).await;
+                    self.sleep_retry_delay(delay).await?;
                 }
                 Err(err) => return Err(err),
             }
@@ -643,6 +695,10 @@ impl RealtimeWebsocketClient {
         extra_headers: HeaderMap,
         default_headers: HeaderMap,
     ) -> Result<RealtimeWebsocketConnection, ApiError> {
+        if !self.can_continue_request_retry() {
+            return Err(self.request_retry_interrupted());
+        }
+
         ensure_rustls_crypto_provider();
 
         let mut request = ws_url
@@ -657,6 +713,9 @@ impl RealtimeWebsocketClient {
         request.headers_mut().extend(headers);
 
         info!("connecting realtime websocket: {ws_url}");
+        if !self.can_continue_request_retry() {
+            return Err(self.request_retry_interrupted());
+        }
         // Realtime websocket TLS should honor the same custom-CA env vars as the rest of Codex's
         // outbound HTTPS and websocket traffic.
         let connector = maybe_build_rustls_client_config_with_custom_ca()
@@ -670,6 +729,9 @@ impl RealtimeWebsocketClient {
         )
         .await
         .map_err(|err| ApiError::Stream(format!("failed to connect realtime websocket: {err}")))?;
+        if !self.can_continue_request_retry() {
+            return Err(self.request_retry_interrupted());
+        }
         info!(
             ws_url = %ws_url,
             status = %response.status(),
@@ -682,6 +744,9 @@ impl RealtimeWebsocketClient {
             session_id = config.session_id.as_deref().unwrap_or("<none>"),
             "realtime websocket sending session.update"
         );
+        if !self.can_continue_request_retry() {
+            return Err(self.request_retry_interrupted());
+        }
         connection
             .writer
             .send_session_update(

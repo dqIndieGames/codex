@@ -328,6 +328,7 @@ async fn run_remote_compaction_request_v2(
                 if let Err(err) = handle_retryable_response_stream_error(
                     &mut retries,
                     max_retries,
+                    Some(max_retries),
                     err,
                     client_session,
                     sess,

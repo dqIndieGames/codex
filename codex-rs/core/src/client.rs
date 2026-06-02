@@ -31,6 +31,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use arc_swap::ArcSwap;
 use codex_api::ApiError;
 use codex_api::AuthProvider;
 use codex_api::CompactClient as ApiCompactClient;
@@ -62,7 +63,6 @@ use codex_api::build_session_headers;
 use codex_api::create_text_param_for_request;
 use codex_api::response_create_client_metadata;
 use codex_app_server_protocol::AuthMode;
-use arc_swap::ArcSwap;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::RefreshTokenError;
@@ -152,7 +152,9 @@ const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.
 const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
+const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
 const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
+const WEBSOCKET_CONNECT_REFRESH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(test)]
 pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
     Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
@@ -225,6 +227,7 @@ pub(crate) struct RequestRetryEvent {
 }
 
 pub(crate) type RequestRetryNotifier = Arc<dyn Fn(RequestRetryEvent) + Send + Sync>;
+type RequestRetryGuard = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// A session-scoped client for model-provider API calls.
 ///
@@ -240,6 +243,7 @@ pub(crate) type RequestRetryNotifier = Arc<dyn Fn(RequestRetryEvent) + Send + Sy
 #[derive(Debug, Clone)]
 pub struct ModelClient {
     state: Arc<ModelClientState>,
+    prompt_cache_key_override: Option<String>,
 }
 
 /// A turn-scoped streaming session created from a [`ModelClient`].
@@ -318,6 +322,15 @@ pub(crate) struct RealtimeWebrtcCallStart {
     pub(crate) sdp: String,
     pub(crate) call_id: String,
     pub(crate) sideband_headers: ApiHeaderMap,
+    pub(crate) sideband_api_provider: ApiProvider,
+    pub(crate) provider_runtime_generation: u64,
+}
+
+pub(crate) struct RealtimeWebsocketRuntimeSetup {
+    pub(crate) auth: Option<CodexAuth>,
+    pub(crate) provider_info: ModelProviderInfo,
+    pub(crate) api_provider: ApiProvider,
+    pub(crate) provider_runtime_generation: u64,
 }
 
 /// Reuses the API-auth material that created the WebRTC call for the sideband WebSocket join.
@@ -382,7 +395,22 @@ impl ModelClient {
                 disable_websockets: AtomicBool::new(false),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
             }),
+            prompt_cache_key_override: None,
         }
+    }
+
+    pub(crate) fn with_prompt_cache_key_override(
+        mut self,
+        prompt_cache_key_override: Option<String>,
+    ) -> Self {
+        self.prompt_cache_key_override = prompt_cache_key_override;
+        self
+    }
+
+    fn prompt_cache_key(&self) -> String {
+        self.prompt_cache_key_override
+            .clone()
+            .unwrap_or_else(|| self.state.thread_id.to_string())
     }
 
     /// Creates a fresh turn-scoped streaming session.
@@ -411,8 +439,38 @@ impl ModelClient {
         self.state.provider.load_full()
     }
 
-    fn current_provider_runtime_generation(&self) -> u64 {
-        self.state.provider_runtime_generation.load(Ordering::Acquire)
+    pub(crate) fn current_provider_runtime_generation(&self) -> u64 {
+        self.state
+            .provider_runtime_generation
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn request_retry_guard(&self, runtime_generation: u64) -> RequestRetryGuard {
+        let client = self.clone();
+        Arc::new(move || client.current_provider_runtime_generation() == runtime_generation)
+    }
+
+    pub(crate) async fn current_realtime_websocket_runtime_setup(
+        &self,
+        realtime_ws_base_url: Option<String>,
+    ) -> Result<RealtimeWebsocketRuntimeSetup> {
+        loop {
+            let provider_handle = self.current_provider_handle();
+            let auth = provider_handle.provider.auth().await;
+            let provider_info = provider_handle.provider.info().clone();
+            let mut api_provider = provider_info.to_api_provider(Some(AuthMode::ApiKey))?;
+            if let Some(realtime_ws_base_url) = realtime_ws_base_url.as_ref() {
+                api_provider.base_url = realtime_ws_base_url.clone();
+            }
+            if provider_handle.runtime_generation == self.current_provider_runtime_generation() {
+                return Ok(RealtimeWebsocketRuntimeSetup {
+                    auth,
+                    provider_info,
+                    api_provider,
+                    provider_runtime_generation: provider_handle.runtime_generation,
+                });
+            }
+        }
     }
 
     pub(crate) fn refresh_provider_runtime(
@@ -513,110 +571,161 @@ impl ModelClient {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
-        let client_setup = self.current_client_setup().await?;
-        let transport = ReqwestTransport::new(build_reqwest_client());
-        let request_telemetry = Self::build_request_telemetry(
-            session_telemetry,
-            AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-                client_setup.api_auth.as_ref(),
-                PendingUnauthorizedRetry::default(),
-            ),
-            RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
-            self.state.auth_env_telemetry.clone(),
-        );
-        let request = self.build_responses_request(
-            &client_setup.api_provider,
-            prompt,
-            model_info,
-            settings.effort,
-            settings.summary,
-            settings.service_tier,
-        )?;
-        let ResponsesApiRequest {
-            model,
-            instructions,
-            input,
-            tools,
-            parallel_tool_calls,
-            reasoning,
-            service_tier,
-            prompt_cache_key,
-            text,
-            ..
-        } = request;
-        let payload = ApiCompactionInput {
-            model: &model,
-            input: &input,
-            instructions: &instructions,
-            tools,
-            parallel_tool_calls,
-            reasoning,
-            service_tier: service_tier.as_deref(),
-            prompt_cache_key: prompt_cache_key.as_deref(),
-            text,
-        };
+        loop {
+            let client_setup = self.current_client_setup().await?;
+            let runtime_generation = client_setup.provider_runtime_generation;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_telemetry = Self::build_request_telemetry(
+                session_telemetry,
+                AuthRequestTelemetryContext::new(
+                    client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                    client_setup.api_auth.as_ref(),
+                    PendingUnauthorizedRetry::default(),
+                ),
+                RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
+                self.state.auth_env_telemetry.clone(),
+                Some(self.request_retry_guard(runtime_generation)),
+            );
+            let request = self.build_responses_request(
+                &client_setup.api_provider,
+                prompt,
+                model_info,
+                settings.effort,
+                settings.summary,
+                settings.service_tier.clone(),
+            )?;
+            let ResponsesApiRequest {
+                model,
+                instructions,
+                input,
+                tools,
+                parallel_tool_calls,
+                reasoning,
+                service_tier,
+                prompt_cache_key,
+                text,
+                ..
+            } = request;
+            let payload = ApiCompactionInput {
+                model: &model,
+                input: &input,
+                instructions: &instructions,
+                tools,
+                parallel_tool_calls,
+                reasoning,
+                service_tier: service_tier.as_deref(),
+                prompt_cache_key: prompt_cache_key.as_deref(),
+                text,
+            };
 
-        let mut extra_headers = ApiHeaderMap::new();
-        if let Ok(header_value) = HeaderValue::from_str(&self.state.installation_id) {
-            extra_headers.insert(X_CODEX_INSTALLATION_ID_HEADER, header_value);
+            let mut extra_headers = ApiHeaderMap::new();
+            if let Ok(header_value) = HeaderValue::from_str(&self.state.installation_id) {
+                extra_headers.insert(X_CODEX_INSTALLATION_ID_HEADER, header_value);
+            }
+            extra_headers.extend(build_responses_headers(
+                self.state.beta_features_header.as_deref(),
+                /*turn_state*/ None,
+                parse_turn_metadata_header(turn_metadata_header).as_ref(),
+            ));
+            extra_headers.extend(self.build_responses_identity_headers());
+            extra_headers.extend(build_session_headers(
+                Some(self.state.session_id.to_string()),
+                Some(self.state.thread_id.to_string()),
+            ));
+            if let Some(header_value) = self.generate_attestation_header_for().await {
+                extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
+            }
+            let compact_request_timeout = client_setup
+                .api_provider
+                .stream_idle_timeout
+                .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER);
+            let client =
+                ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                    .with_telemetry(Some(request_telemetry));
+            let trace_attempt = compaction_trace.start_attempt(&payload);
+            match client
+                .compact_input(&payload, extra_headers, compact_request_timeout)
+                .await
+            {
+                Ok(output_items) => {
+                    trace_attempt.record_completed(&output_items);
+                    return Ok(output_items);
+                }
+                Err(ApiError::Transport(TransportError::RetryInterrupted(reason)))
+                    if self.current_provider_runtime_generation() != runtime_generation =>
+                {
+                    trace_attempt.record_failed(&reason);
+                    debug!("restarting compaction after provider runtime refresh: {reason}");
+                    continue;
+                }
+                Err(err) => {
+                    let mapped = map_api_error(err);
+                    trace_attempt.record_failed(&mapped);
+                    return Err(mapped);
+                }
+            }
         }
-        extra_headers.extend(build_responses_headers(
-            self.state.beta_features_header.as_deref(),
-            /*turn_state*/ None,
-            parse_turn_metadata_header(turn_metadata_header).as_ref(),
-        ));
-        extra_headers.extend(self.build_responses_identity_headers());
-        extra_headers.extend(build_session_headers(
-            Some(self.state.session_id.to_string()),
-            Some(self.state.thread_id.to_string()),
-        ));
-        if let Some(header_value) = self.generate_attestation_header_for().await {
-            extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
-        }
-        let compact_request_timeout = client_setup
-            .api_provider
-            .stream_idle_timeout
-            .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER);
-        let client =
-            ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                .with_telemetry(Some(request_telemetry));
-        let trace_attempt = compaction_trace.start_attempt(&payload);
-        let result = client
-            .compact_input(&payload, extra_headers, compact_request_timeout)
-            .await
-            .map_err(map_api_error);
-        trace_attempt.record_result(result.as_deref());
-        result
     }
 
     pub(crate) async fn create_realtime_call_with_headers(
         &self,
         sdp: String,
         session_config: ApiRealtimeSessionConfig,
-        mut extra_headers: ApiHeaderMap,
+        extra_headers: ApiHeaderMap,
+        session_telemetry: &SessionTelemetry,
     ) -> Result<RealtimeWebrtcCallStart> {
         // Create the media call over HTTP first, then retain matching auth so realtime can attach
         // the server-side control WebSocket to the call id from that HTTP response.
-        let client_setup = self.current_client_setup().await?;
-        if let Some(header_value) = self.generate_attestation_header_for().await {
-            extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
+        loop {
+            let client_setup = self.current_client_setup().await?;
+            let runtime_generation = client_setup.provider_runtime_generation;
+            let mut request_headers = extra_headers.clone();
+            if let Some(header_value) = self.generate_attestation_header_for().await {
+                request_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
+            }
+            let mut sideband_headers = request_headers.clone();
+            sideband_headers.extend(sideband_websocket_auth_headers(
+                client_setup.api_auth.as_ref(),
+            ));
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_telemetry = Self::build_request_telemetry(
+                session_telemetry,
+                AuthRequestTelemetryContext::new(
+                    client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                    client_setup.api_auth.as_ref(),
+                    PendingUnauthorizedRetry::default(),
+                ),
+                RequestRouteTelemetry::for_endpoint(REALTIME_CALLS_ENDPOINT),
+                self.state.auth_env_telemetry.clone(),
+                Some(self.request_retry_guard(runtime_generation)),
+            );
+            match ApiRealtimeCallClient::new(
+                transport,
+                client_setup.api_provider.clone(),
+                client_setup.api_auth,
+            )
+            .with_telemetry(Some(request_telemetry))
+            .create_with_session_and_headers(sdp.clone(), session_config.clone(), request_headers)
+            .await
+            {
+                Ok(response) => {
+                    return Ok(RealtimeWebrtcCallStart {
+                        sdp: response.sdp,
+                        call_id: response.call_id,
+                        sideband_headers,
+                        sideband_api_provider: client_setup.api_provider,
+                        provider_runtime_generation: runtime_generation,
+                    });
+                }
+                Err(ApiError::Transport(TransportError::RetryInterrupted(reason)))
+                    if self.current_provider_runtime_generation() != runtime_generation =>
+                {
+                    debug!("restarting realtime call after provider runtime refresh: {reason}");
+                    continue;
+                }
+                Err(err) => return Err(map_api_error(err)),
+            }
         }
-        let mut sideband_headers = extra_headers.clone();
-        sideband_headers.extend(sideband_websocket_auth_headers(
-            client_setup.api_auth.as_ref(),
-        ));
-        let transport = ReqwestTransport::new(build_reqwest_client());
-        let response =
-            ApiRealtimeCallClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                .create_with_session_and_headers(sdp, session_config, extra_headers)
-                .await
-                .map_err(map_api_error)?;
-        Ok(RealtimeWebrtcCallStart {
-            sdp: response.sdp,
-            call_id: response.call_id,
-            sideband_headers,
-        })
     }
 
     /// Builds memory summaries for each provided normalized raw memory.
@@ -636,35 +745,48 @@ impl ModelClient {
             return Ok(Vec::new());
         }
 
-        let client_setup = self.current_client_setup().await?;
-        let transport = ReqwestTransport::new(build_reqwest_client());
-        let request_telemetry = Self::build_request_telemetry(
-            session_telemetry,
-            AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-                client_setup.api_auth.as_ref(),
-                PendingUnauthorizedRetry::default(),
-            ),
-            RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
-            self.state.auth_env_telemetry.clone(),
-        );
-        let client =
-            ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                .with_telemetry(Some(request_telemetry));
+        loop {
+            let client_setup = self.current_client_setup().await?;
+            let runtime_generation = client_setup.provider_runtime_generation;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_telemetry = Self::build_request_telemetry(
+                session_telemetry,
+                AuthRequestTelemetryContext::new(
+                    client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                    client_setup.api_auth.as_ref(),
+                    PendingUnauthorizedRetry::default(),
+                ),
+                RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
+                self.state.auth_env_telemetry.clone(),
+                Some(self.request_retry_guard(runtime_generation)),
+            );
+            let client =
+                ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                    .with_telemetry(Some(request_telemetry));
 
-        let payload = ApiMemorySummarizeInput {
-            model: model_info.slug.clone(),
-            raw_memories,
-            reasoning: effort.map(|effort| Reasoning {
-                effort: Some(effort),
-                summary: None,
-            }),
-        };
+            let payload = ApiMemorySummarizeInput {
+                model: model_info.slug.clone(),
+                raw_memories: raw_memories.clone(),
+                reasoning: effort.map(|effort| Reasoning {
+                    effort: Some(effort),
+                    summary: None,
+                }),
+            };
 
-        client
-            .summarize_input(&payload, self.build_subagent_headers())
-            .await
-            .map_err(map_api_error)
+            match client
+                .summarize_input(&payload, self.build_subagent_headers())
+                .await
+            {
+                Ok(output) => return Ok(output),
+                Err(ApiError::Transport(TransportError::RetryInterrupted(reason)))
+                    if self.current_provider_runtime_generation() != runtime_generation =>
+                {
+                    debug!("restarting memory summarization after provider runtime refresh: {reason}");
+                    continue;
+                }
+                Err(err) => return Err(map_api_error(err)),
+            }
+        }
     }
 
     fn build_subagent_headers(&self) -> ApiHeaderMap {
@@ -752,6 +874,7 @@ impl ModelClient {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        request_retry_guard: Option<RequestRetryGuard>,
     ) -> Arc<dyn RequestTelemetry> {
         let telemetry = Arc::new(ApiTelemetry::new(
             session_telemetry.clone(),
@@ -759,6 +882,7 @@ impl ModelClient {
             request_route_telemetry,
             auth_env_telemetry,
             None,
+            request_retry_guard,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry;
         request_telemetry
@@ -817,7 +941,7 @@ impl ModelClient {
             &prompt.output_schema,
             prompt.output_schema_strict,
         );
-        let prompt_cache_key = Some(self.state.thread_id.to_string());
+        let prompt_cache_key = Some(self.prompt_cache_key());
         let service_tier = if self
             .state
             .force_service_tier_priority
@@ -892,22 +1016,30 @@ impl ModelClient {
         turn_metadata_header: Option<&str>,
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
+        runtime_generation: u64,
     ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
+        if self.current_provider_runtime_generation() != runtime_generation {
+            return Err(ApiError::Transport(TransportError::RetryInterrupted(
+                "provider runtime changed during websocket connect".to_string(),
+            )));
+        }
         let headers = self
             .build_websocket_headers(turn_state.as_ref(), turn_metadata_header)
             .await;
+        if self.current_provider_runtime_generation() != runtime_generation {
+            return Err(ApiError::Transport(TransportError::RetryInterrupted(
+                "provider runtime changed during websocket connect".to_string(),
+            )));
+        }
         let websocket_telemetry = ModelClientSession::build_websocket_telemetry(
             session_telemetry,
             auth_context,
             request_route_telemetry,
             self.state.auth_env_telemetry.clone(),
         );
-        let websocket_connect_timeout = self
-            .current_provider()
-            .info()
-            .websocket_connect_timeout();
+        let websocket_connect_timeout = self.current_provider().info().websocket_connect_timeout();
         let start = Instant::now();
-        let result = match tokio::time::timeout(
+        let connect_future = tokio::time::timeout(
             websocket_connect_timeout,
             ApiWebSocketResponsesClient::new(api_provider, api_auth).connect(
                 headers,
@@ -915,11 +1047,24 @@ impl ModelClient {
                 turn_state,
                 Some(websocket_telemetry),
             ),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(ApiError::Transport(TransportError::Timeout)),
+        );
+        tokio::pin!(connect_future);
+        let result = loop {
+            tokio::select! {
+                result = &mut connect_future => {
+                    break match result {
+                        Ok(result) => result,
+                        Err(_) => Err(ApiError::Transport(TransportError::Timeout)),
+                    };
+                }
+                _ = tokio::time::sleep(WEBSOCKET_CONNECT_REFRESH_POLL_INTERVAL) => {
+                    if self.current_provider_runtime_generation() != runtime_generation {
+                        break Err(ApiError::Transport(TransportError::RetryInterrupted(
+                            "provider runtime changed during websocket connect".to_string(),
+                        )));
+                    }
+                }
+            }
         };
         let error_message = result.as_ref().err().map(telemetry_api_error_message);
         let response_debug = result
@@ -1023,11 +1168,21 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
-    pub(crate) fn set_request_retry_notifier(
-        &mut self,
-        notifier: Option<RequestRetryNotifier>,
-    ) {
+    pub(crate) fn set_request_retry_notifier(&mut self, notifier: Option<RequestRetryNotifier>) {
         self.request_retry_notifier = notifier;
+    }
+
+    fn request_retry_guard(&self, runtime_generation: u64) -> RequestRetryGuard {
+        let client = self.client.clone();
+        Arc::new(move || client.current_provider_runtime_generation() == runtime_generation)
+    }
+
+    pub(crate) fn provider_runtime_changed(&self) -> bool {
+        self.provider_runtime_generation != self.client.current_provider_runtime_generation()
+    }
+
+    pub(crate) fn sync_latest_provider_runtime_generation(&mut self) {
+        self.sync_provider_runtime_generation(self.client.current_provider_runtime_generation());
     }
 
     fn sync_provider_runtime_generation(&mut self, runtime_generation: u64) {
@@ -1217,6 +1372,7 @@ impl ModelClientSession {
                 /*turn_metadata_header*/ None,
                 auth_context,
                 RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
+                client_setup.provider_runtime_generation,
             )
             .await?;
         self.websocket_session.connection = Some(connection);
@@ -1273,6 +1429,7 @@ impl ModelClientSession {
                     turn_metadata_header,
                     auth_context,
                     request_route_telemetry,
+                    self.provider_runtime_generation,
                 )
                 .await
             {
@@ -1359,6 +1516,7 @@ impl ModelClientSession {
                 RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
                 self.client.state.auth_env_telemetry.clone(),
                 self.request_retry_notifier.clone(),
+                Some(self.request_retry_guard(client_setup.provider_runtime_generation)),
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let mut options = self
@@ -1390,6 +1548,7 @@ impl ModelClientSession {
                         stream,
                         session_telemetry.clone(),
                         inference_trace_attempt,
+                        self.request_retry_guard(client_setup.provider_runtime_generation),
                     );
                     return Ok(stream);
                 }
@@ -1411,6 +1570,18 @@ impl ModelClientSession {
                         )
                         .await?,
                     );
+                    continue;
+                }
+                Err(ApiError::Transport(TransportError::RetryInterrupted(reason)))
+                    if self.provider_runtime_generation
+                        != self.client.current_provider_runtime_generation() =>
+                {
+                    inference_trace_attempt.record_cancelled(
+                        reason,
+                        /*upstream_request_id*/ None,
+                        &[],
+                    );
+                    pending_retry = PendingUnauthorizedRetry::default();
                     continue;
                 }
                 Err(err) => {
@@ -1509,6 +1680,14 @@ impl ModelClientSession {
                 .await
             {
                 Ok(_) => {}
+                Err(err)
+                    if self.provider_runtime_generation
+                        != self.client.current_provider_runtime_generation() =>
+                {
+                    debug!("restarting websocket connect after provider runtime refresh: {err}");
+                    pending_retry = PendingUnauthorizedRetry::default();
+                    continue;
+                }
                 Err(ApiError::Transport(TransportError::Http { status, .. }))
                     if status == StatusCode::UPGRADE_REQUIRED =>
                 {
@@ -1528,6 +1707,11 @@ impl ModelClientSession {
                     continue;
                 }
                 Err(err) => return Err(map_api_error(err)),
+            }
+            if self.provider_runtime_generation != self.client.current_provider_runtime_generation()
+            {
+                pending_retry = PendingUnauthorizedRetry::default();
+                continue;
             }
 
             let (mut ws_request, previous_response_id_from_untraced_warmup) =
@@ -1574,6 +1758,7 @@ impl ModelClientSession {
                 stream_result,
                 session_telemetry.clone(),
                 inference_trace_attempt,
+                self.request_retry_guard(client_setup.provider_runtime_generation),
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
@@ -1587,6 +1772,7 @@ impl ModelClientSession {
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
         request_retry_notifier: Option<RequestRetryNotifier>,
+        request_retry_guard: Option<RequestRetryGuard>,
     ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
         let telemetry = Arc::new(ApiTelemetry::new(
             session_telemetry.clone(),
@@ -1594,6 +1780,7 @@ impl ModelClientSession {
             request_route_telemetry,
             auth_env_telemetry,
             request_retry_notifier,
+            request_retry_guard,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry.clone();
         let sse_telemetry: Arc<dyn SseTelemetry> = telemetry;
@@ -1612,6 +1799,7 @@ impl ModelClientSession {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            None,
             None,
         ));
         let websocket_telemetry: Arc<dyn WebsocketTelemetry> = telemetry;
@@ -1830,19 +2018,9 @@ fn subagent_header_value(session_source: &SessionSource) -> Option<String> {
 }
 
 fn parent_thread_id_header_value(session_source: &SessionSource) -> Option<String> {
-    match session_source {
-        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
-        }) => Some(parent_thread_id.to_string()),
-        SessionSource::Cli
-        | SessionSource::VSCode
-        | SessionSource::Exec
-        | SessionSource::Mcp
-        | SessionSource::Custom(_)
-        | SessionSource::Internal(_)
-        | SessionSource::SubAgent(_)
-        | SessionSource::Unknown => None,
-    }
+    session_source
+        .parent_thread_id()
+        .map(|parent_thread_id| parent_thread_id.to_string())
 }
 
 const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
@@ -1852,6 +2030,7 @@ fn map_response_stream(
     api_stream: codex_api::ResponseStream,
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
+    runtime_guard: RequestRetryGuard,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let codex_api::ResponseStream {
         rx_event,
@@ -1866,6 +2045,7 @@ fn map_response_stream(
         api_stream,
         session_telemetry,
         inference_trace_attempt,
+        runtime_guard,
     )
 }
 
@@ -1874,6 +2054,7 @@ fn map_response_events<S>(
     api_stream: S,
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
+    runtime_guard: RequestRetryGuard,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>)
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
@@ -1905,6 +2086,22 @@ where
                         &items_added,
                     );
                     return;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                    if !runtime_guard() {
+                        let mapped = CodexErr::Stream(
+                            "provider runtime changed during response stream".to_string(),
+                            None,
+                        );
+                        inference_trace_attempt.record_cancelled(
+                            "provider runtime changed during response stream",
+                            upstream_request_id,
+                            &items_added,
+                        );
+                        let _ = tx_event.send(Err(mapped)).await;
+                        return;
+                    }
+                    continue;
                 }
                 event = api_stream.next() => event,
             };
@@ -2215,6 +2412,7 @@ struct ApiTelemetry {
     request_route_telemetry: RequestRouteTelemetry,
     auth_env_telemetry: AuthEnvTelemetry,
     request_retry_notifier: Option<RequestRetryNotifier>,
+    request_retry_guard: Option<RequestRetryGuard>,
 }
 
 impl ApiTelemetry {
@@ -2224,6 +2422,7 @@ impl ApiTelemetry {
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
         request_retry_notifier: Option<RequestRetryNotifier>,
+        request_retry_guard: Option<RequestRetryGuard>,
     ) -> Self {
         Self {
             session_telemetry,
@@ -2231,6 +2430,7 @@ impl ApiTelemetry {
             request_route_telemetry,
             auth_env_telemetry,
             request_retry_notifier,
+            request_retry_guard,
         }
     }
 }
@@ -2309,6 +2509,12 @@ impl RequestTelemetry for ApiTelemetry {
                 details: user_visible_transport_retry_details(error),
             });
         }
+    }
+
+    fn can_continue_request_retry(&self) -> bool {
+        self.request_retry_guard
+            .as_ref()
+            .is_none_or(|guard| guard())
     }
 }
 

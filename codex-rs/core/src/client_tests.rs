@@ -1,5 +1,5 @@
-use super::AuthRequestTelemetryContext;
 use super::ApiTelemetry;
+use super::AuthRequestTelemetryContext;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::RequestRetryEvent;
@@ -355,6 +355,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         api_stream,
         test_session_telemetry(),
         attempt,
+        Arc::new(|| true),
     );
 
     let observed = stream
@@ -404,6 +405,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         api_stream,
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
+        Arc::new(|| true),
     );
 
     while stream.next().await.is_some() {}
@@ -445,6 +447,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         api_stream,
         test_session_telemetry(),
         attempt,
+        Arc::new(|| true),
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
@@ -516,12 +519,7 @@ fn api_telemetry_notifies_streaming_request_retry() {
         body: Some(r#"{"error":{"message":"secret token leaked"}}"#.to_string()),
     };
 
-    telemetry.on_request_retry(
-        1,
-        3,
-        Some(http::StatusCode::SERVICE_UNAVAILABLE),
-        &error,
-    );
+    telemetry.on_request_retry(1, 3, Some(http::StatusCode::SERVICE_UNAVAILABLE), &error);
 
     let retry_events = retry_events.lock().unwrap();
     assert_eq!(retry_events.len(), 1);
@@ -536,7 +534,11 @@ fn api_telemetry_notifies_streaming_request_retry() {
             .details
             .contains("HTTP 503 Service Unavailable, retrying")
     );
-    assert!(retry_events[0].details.contains("endpoint: example.com/responses"));
+    assert!(
+        retry_events[0]
+            .details
+            .contains("endpoint: example.com/responses")
+    );
     assert!(retry_events[0].details.contains("request id: req-503"));
     assert!(!retry_events[0].details.contains("secret token leaked"));
     assert!(!retry_events[0].details.contains("api_key"));

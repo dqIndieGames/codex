@@ -36,6 +36,16 @@ REQUIRED_REGISTRATION_FIELDS = {
 }
 SMART_APPLY_PROVIDER_OP = "apply_provider_runtime_from_effective_provider"
 REFRESH_ALL_LOADED_THREADS_OP = "refresh_all_loaded_threads"
+REFRESH_CONSOLE_LOADED_THREADS_OP = "refresh_console_loaded_threads"
+REFRESH_APP_SERVER_LOADED_THREADS_OP = "refresh_app_server_loaded_threads"
+REFRESH_SCOPE_ALL = "all"
+REFRESH_SCOPE_CONSOLE = "console"
+REFRESH_SCOPE_APP_SERVER = "appServer"
+REFRESH_SCOPE_LABELS = {
+    REFRESH_SCOPE_ALL: "刷新全部 app-server",
+    REFRESH_SCOPE_CONSOLE: "只刷新 Codex 控制台",
+    REFRESH_SCOPE_APP_SERVER: "只刷新 Windows App app-server",
+}
 STANDARD_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 TABLE_HEADER_RE = re.compile(r"^\s*\[(?P<name>[^\[\]]+)\]\s*(?:#.*)?$")
 ARRAY_TABLE_HEADER_RE = re.compile(r"^\s*\[\[(?P<name>[^\[\]]+)\]\]\s*(?:#.*)?$")
@@ -877,21 +887,26 @@ def refresh_registrations(
     registrations: list[dict[str, Any]],
     send_request: Callable[[str, dict[str, Any]], dict[str, Any]] = send_control_request,
     *,
-    method: str = "refresh_all_loaded_threads",
+    op: str = REFRESH_ALL_LOADED_THREADS_OP,
+    scope: str = REFRESH_SCOPE_ALL,
+    method: str | None = None,
 ) -> dict[str, Any]:
     summary = empty_refresh_summary(len(registrations))
+    summary["scope"] = scope
+    method_name = method or op
 
     for registration in registrations:
         instance_id = str(registration["instance_id"])
         endpoint = str(registration["control_endpoint"])
         try:
-            response = send_request(endpoint, {"op": REFRESH_ALL_LOADED_THREADS_OP})
+            response = send_request(endpoint, {"op": op, "scope": scope})
             instance_ok = add_refresh_response_counts(summary, response)
             summary["details"].append(
                 {
                     "instance_id": instance_id,
                     "ok": instance_ok,
-                    "method": method,
+                    "method": method_name,
+                    "scope": scope,
                     "response": response,
                 }
             )
@@ -901,7 +916,8 @@ def refresh_registrations(
                 {
                     "instance_id": instance_id,
                     "ok": False,
-                    "method": method,
+                    "method": method_name,
+                    "scope": scope,
                     "error": str(exc),
                 }
             )
@@ -934,13 +950,48 @@ def refresh_all_instances(
     pid_checker: Callable[[int], bool] = is_pid_alive,
     ping_checker: Callable[[str], bool] = ping_instance,
     send_request: Callable[[str, dict[str, Any]], dict[str, Any]] = send_control_request,
+    *,
+    scope: str = REFRESH_SCOPE_ALL,
+    op: str = REFRESH_ALL_LOADED_THREADS_OP,
 ) -> dict[str, Any]:
     registrations = registrations_for_refresh(
         registry_dir=registry_dir,
         pid_checker=pid_checker,
         ping_checker=ping_checker,
     )
-    return refresh_registrations(registrations, send_request)
+    return refresh_registrations(registrations, send_request, op=op, scope=scope)
+
+
+def refresh_console_instances(
+    registry_dir: Path | None = None,
+    pid_checker: Callable[[int], bool] = is_pid_alive,
+    ping_checker: Callable[[str], bool] = ping_instance,
+    send_request: Callable[[str, dict[str, Any]], dict[str, Any]] = send_control_request,
+) -> dict[str, Any]:
+    return refresh_all_instances(
+        registry_dir=registry_dir,
+        pid_checker=pid_checker,
+        ping_checker=ping_checker,
+        send_request=send_request,
+        scope=REFRESH_SCOPE_CONSOLE,
+        op=REFRESH_CONSOLE_LOADED_THREADS_OP,
+    )
+
+
+def refresh_app_server_instances(
+    registry_dir: Path | None = None,
+    pid_checker: Callable[[int], bool] = is_pid_alive,
+    ping_checker: Callable[[str], bool] = ping_instance,
+    send_request: Callable[[str, dict[str, Any]], dict[str, Any]] = send_control_request,
+) -> dict[str, Any]:
+    return refresh_all_instances(
+        registry_dir=registry_dir,
+        pid_checker=pid_checker,
+        ping_checker=ping_checker,
+        send_request=send_request,
+        scope=REFRESH_SCOPE_APP_SERVER,
+        op=REFRESH_APP_SERVER_LOADED_THREADS_OP,
+    )
 
 
 def apply_provider_runtime_smart_first(
@@ -1123,6 +1174,10 @@ def format_result_message(success_instances: int, failed_instances: int) -> str:
     )
 
 
+def refresh_scope_label(scope: str | None) -> str:
+    return REFRESH_SCOPE_LABELS.get(scope or REFRESH_SCOPE_ALL, REFRESH_SCOPE_LABELS[REFRESH_SCOPE_ALL])
+
+
 def short_error_text(message: str, limit: int = 96) -> str:
     collapsed = " ".join(message.split())
     if len(collapsed) <= limit:
@@ -1183,13 +1238,14 @@ def format_refresh_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
     applied_threads = int(summary.get("applied_threads", 0))
     queued_threads = int(summary.get("queued_threads", 0))
     failed_threads = int(summary.get("failed_threads", 0))
+    scope_label = refresh_scope_label(summary.get("scope") if isinstance(summary.get("scope"), str) else None)
     title = "Codex App Server Refresh"
     icon_flag = MB_ICONINFORMATION if failed_instances == 0 else MB_ICONWARNING
     if total_instances == 0:
-        message = "未发现 live app-server 实例。\n\n实例总数: 0"
+        message = f"{scope_label}\n\n未发现 live app-server 实例。\n\n实例总数: 0"
     else:
         message = (
-            "刷新全部 app-server 完成\n\n"
+            f"{scope_label} 完成\n\n"
             f"实例总数: {total_instances}\n"
             f"成功实例: {success_instances}\n"
             f"失败实例: {failed_instances}\n"
@@ -1337,6 +1393,21 @@ def create_tray_icon():
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def refresh_action(
+        refresh_fn: Callable[[], dict[str, Any]],
+    ) -> Callable[[pystray.Icon, Any], None]:
+        def action(icon: pystray.Icon, _item: Any) -> None:
+            def worker() -> None:
+                summary = refresh_fn()
+                reload_catalog()
+                rebuild_menu(icon)
+                title, message, icon_flag = format_refresh_summary(summary)
+                show_message(title, message, icon_flag)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        return action
+
     def handle_apply(icon: pystray.Icon, _item: Any) -> None:
         snapshot = state.snapshot()
         selected_provider_id = snapshot.get("selected_provider_id")
@@ -1444,6 +1515,14 @@ def create_tray_icon():
         )
         return pystray.Menu(
             pystray.MenuItem("刷新全部 app-server", handle_refresh),
+            pystray.MenuItem(
+                "只刷新 Codex 控制台",
+                refresh_action(refresh_console_instances),
+            ),
+            pystray.MenuItem(
+                "只刷新 Windows App app-server",
+                refresh_action(refresh_app_server_instances),
+            ),
             pystray.MenuItem(
                 f"当前 target model_provider: {current_model_provider_id}",
                 noop,

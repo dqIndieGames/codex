@@ -36,7 +36,9 @@ impl RetryOn {
                     || (self.retry_5xx && status.is_server_error())
             }
             TransportError::Timeout | TransportError::Network(_) => self.retry_transport,
-            _ => false,
+            TransportError::RetryLimit
+            | TransportError::RetryInterrupted(_)
+            | TransportError::Build(_) => false,
         }
     }
 }

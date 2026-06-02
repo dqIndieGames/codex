@@ -293,7 +293,7 @@ async fn status_permissions_non_default_workspace_write_uses_workspace_label() {
 
     assert_eq!(
         permissions_text_for(&config).as_deref(),
-        Some("Custom (workspace with network access, on-request)")
+        Some("Custom (workspace with network access, Ask for approval)")
     );
 }
 
@@ -316,7 +316,7 @@ async fn status_permissions_named_read_only_profile_shows_builtin_label() {
 
     assert_eq!(
         permissions_text_for(&config).as_deref(),
-        Some("Read Only (on-request)")
+        Some("Read Only (Ask for approval)")
     );
 }
 
@@ -346,7 +346,7 @@ async fn status_permissions_read_only_profile_shows_additional_writable_roots() 
 
     assert_eq!(
         permissions_text_for(&config).as_deref(),
-        Some("Read Only (on-request)")
+        Some("Read Only (Ask for approval)")
     );
 }
 
@@ -369,7 +369,7 @@ async fn status_permissions_named_workspace_profile_shows_builtin_label() {
 
     assert_eq!(
         permissions_text_for(&config).as_deref(),
-        Some("Workspace (on-request)")
+        Some("Workspace (Ask for approval)")
     );
 }
 
@@ -393,7 +393,7 @@ async fn status_permissions_workspace_auto_review_shows_reviewer_label() {
 
     assert_eq!(
         permissions_text_for(&config).as_deref(),
-        Some("Workspace (auto-review)")
+        Some("Workspace (Approve for me)")
     );
 }
 
@@ -422,7 +422,7 @@ async fn status_permissions_named_profile_shows_additional_writable_roots() {
 
     assert_eq!(
         permissions_text_for(&config).as_deref(),
-        Some("Workspace (on-request)")
+        Some("Workspace (Ask for approval)")
     );
 }
 
@@ -451,7 +451,10 @@ async fn status_permissions_workspace_roots_show_additional_directories() {
 
     assert_eq!(
         permissions_text_for(&config),
-        Some(format!("Workspace [{}] (on-request)", extra_root.display()))
+        Some(format!(
+            "Workspace [{}] (Ask for approval)",
+            extra_root.display()
+        ))
     );
 }
 
@@ -485,7 +488,7 @@ async fn status_permissions_workspace_roots_include_profile_defined_directories(
     assert_eq!(
         permissions_text_for(&config),
         Some(format!(
-            "Workspace [{}] (on-request)",
+            "Workspace [{}] (Ask for approval)",
             profile_root.display()
         ))
     );
@@ -515,7 +518,7 @@ async fn status_permissions_broadened_workspace_profile_shows_builtin_label() {
 
     assert_eq!(
         permissions_text_for(&config).as_deref(),
-        Some("Workspace with network access (on-request)")
+        Some("Workspace with network access (Ask for approval)")
     );
 }
 
@@ -533,7 +536,7 @@ async fn status_permissions_user_defined_profile_shows_name() {
 
     assert_eq!(
         permissions_text_for(&config).as_deref(),
-        Some("Profile locked (read-only, on-request)")
+        Some("Profile locked (read-only, Ask for approval)")
     );
 }
 
@@ -670,6 +673,25 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
         rendered.contains("https://chatgpt.com/codex/settings/usage"),
         "expected /status to show ChatGPT usage link for OpenAI-auth proxy, got: {rendered}"
     );
+
+    let wide_destinations: Vec<String> = composite
+        .display_hyperlink_lines(/*width*/ 120)
+        .into_iter()
+        .flat_map(|line| line.hyperlinks.into_iter())
+        .map(|link| link.destination)
+        .collect();
+    assert_eq!(
+        wide_destinations,
+        vec!["https://chatgpt.com/codex/settings/usage"]
+    );
+
+    let narrow_destinations: Vec<String> = composite
+        .display_hyperlink_lines(/*width*/ 24)
+        .into_iter()
+        .flat_map(|line| line.hyperlinks.into_iter())
+        .map(|link| link.destination)
+        .collect();
+    assert_eq!(narrow_destinations, Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -739,7 +761,7 @@ async fn status_permissions_full_disk_managed_with_network_is_danger_full_access
 
     assert_eq!(
         permissions_text_for(&config).as_deref(),
-        Some("Custom (danger-full-access, on-request)")
+        Some("Custom (danger-full-access, Ask for approval)")
     );
 }
 
@@ -762,7 +784,7 @@ async fn status_permissions_full_disk_managed_without_network_is_external_sandbo
 
     assert_eq!(
         permissions_text_for(&config).as_deref(),
-        Some("Custom (external-sandbox, on-request)")
+        Some("Custom (external-sandbox, Ask for approval)")
     );
 }
 

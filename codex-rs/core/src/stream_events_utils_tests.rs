@@ -400,6 +400,9 @@ fn local1_first_turn_checklist_prefix_contains_current_local3_items() {
     assert!(prefix.contains("3. 远端请求失败后的自动重试覆盖所有错误"));
     assert!(prefix.contains("9. Provider refresh 的 URL 和 token 刷新范围扩大"));
     assert!(prefix.contains("10. 无 live instance 的 provider 字段复制仍视为成功"));
+    assert!(prefix.contains("11. app-server stderr 默认保持安静"));
+    assert!(prefix.contains("12. `node_repl` MCP 自动继承当前 local3 CLI 路径"));
+    assert!(prefix.contains("13. app-server 退出时只补已有 runtime 引用清理"));
     assert!(!prefix.contains("-local2"));
     assert!(prefix.ends_with("\n\n"));
 }
@@ -411,7 +414,7 @@ fn local3_first_turn_checklist_entries_match_numbered_document() {
         .iter()
         .map(|(index, _)| *index)
         .collect::<Vec<_>>();
-    let expected_ids = (1..=10).collect::<Vec<_>>();
+    let expected_ids = (1..=13).collect::<Vec<_>>();
 
     assert_eq!(actual_ids, expected_ids);
 }

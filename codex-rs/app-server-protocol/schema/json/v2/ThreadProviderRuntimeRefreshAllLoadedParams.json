@@ -1,5 +1,27 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadProviderRuntimeRefreshScope": {
+      "enum": [
+        "all",
+        "console",
+        "appServer"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "scope": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThreadProviderRuntimeRefreshScope"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
   "title": "ThreadProviderRuntimeRefreshAllLoadedParams",
   "type": "object"
 }

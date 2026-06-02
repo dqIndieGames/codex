@@ -10,7 +10,6 @@ use async_channel::TrySendError;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_api::ApiError;
-use codex_api::Provider as ApiProvider;
 use codex_api::RealtimeAudioFrame;
 use codex_api::RealtimeEvent;
 use codex_api::RealtimeEventParser;
@@ -20,13 +19,13 @@ use codex_api::RealtimeWebsocketClient;
 use codex_api::RealtimeWebsocketEvents;
 use codex_api::RealtimeWebsocketWriter;
 use codex_api::map_api_error;
-use codex_app_server_protocol::AuthMode;
 use codex_config::config_toml::RealtimeWsMode;
 use codex_config::config_toml::RealtimeWsVersion;
 use codex_login::CodexAuth;
 use codex_login::default_client::default_headers;
 use codex_login::read_openai_api_key_from_env;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_otel::SessionTelemetry;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -78,6 +77,7 @@ const REALTIME_ACTIVE_RESPONSE_ERROR_PREFIX: &str =
 enum RealtimeConversationEnd {
     Requested,
     TransportClosed,
+    ProviderRuntimeRefresh,
     Error,
 }
 
@@ -225,10 +225,11 @@ struct ConversationState {
 }
 
 struct RealtimeStart {
-    api_provider: ApiProvider,
     extra_headers: Option<HeaderMap>,
     session_config: RealtimeSessionConfig,
     model_client: ModelClient,
+    session_telemetry: SessionTelemetry,
+    websocket_client: RealtimeWebsocketClient,
     sdp: Option<String>,
 }
 
@@ -277,10 +278,11 @@ impl RealtimeConversationManager {
 
     async fn start_inner(&self, start: RealtimeStart) -> CodexResult<RealtimeStartOutput> {
         let RealtimeStart {
-            api_provider,
             extra_headers,
             session_config,
             model_client,
+            session_telemetry,
+            websocket_client,
             sdp,
         } = start;
         let event_parser = session_config.event_parser;
@@ -306,15 +308,19 @@ impl RealtimeConversationManager {
             audio_rx,
         };
 
-        let client = RealtimeWebsocketClient::new(api_provider);
         let (task, sdp) = if let Some(sdp) = sdp {
             let call = model_client
                 .create_realtime_call_with_headers(
                     sdp,
                     session_config.clone(),
                     extra_headers.unwrap_or_default(),
+                    &session_telemetry,
                 )
                 .await?;
+            let client = RealtimeWebsocketClient::new(call.sideband_api_provider)
+                .with_request_retry_guard(Some(
+                    model_client.request_retry_guard(call.provider_runtime_generation),
+                ));
             let task = spawn_webrtc_sideband_input_task(RealtimeWebrtcSidebandInputTask {
                 client,
                 session_config,
@@ -329,7 +335,7 @@ impl RealtimeConversationManager {
             });
             (task, Some(call.sdp))
         } else {
-            let connection = client
+            let connection = websocket_client
                 .connect(
                     session_config,
                     extra_headers.unwrap_or_default(),
@@ -541,6 +547,20 @@ impl RealtimeConversationManager {
         }
         Ok(())
     }
+
+    pub(crate) async fn shutdown_for_provider_runtime_refresh(&self) -> bool {
+        let state = {
+            let mut guard = self.state.lock().await;
+            guard.take()
+        };
+
+        if let Some(state) = state {
+            stop_conversation_state(state, RealtimeFanoutTaskStop::Abort).await;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 async fn stop_conversation_state(
@@ -598,34 +618,23 @@ pub(crate) async fn handle_start(
 }
 
 struct PreparedRealtimeConversationStart {
-    api_provider: ApiProvider,
-    extra_headers: Option<HeaderMap>,
     requested_realtime_session_id: Option<String>,
     version: RealtimeWsVersion,
     session_config: RealtimeSessionConfig,
     transport: ConversationStartTransport,
+    realtime_ws_base_url: Option<String>,
 }
 
 async fn prepare_realtime_start(
     sess: &Arc<Session>,
     params: ConversationStartParams,
 ) -> CodexResult<PreparedRealtimeConversationStart> {
-    let provider = sess.provider().await;
-    let auth_manager = sess
-        .services
-        .model_client
-        .auth_manager()
-        .unwrap_or_else(|| Arc::clone(&sess.services.auth_manager));
-    let auth = auth_manager.auth().await;
     let config = sess.get_config().await;
     let transport = params
         .transport
         .unwrap_or(ConversationStartTransport::Websocket);
-    let mut api_provider = provider.to_api_provider(Some(AuthMode::ApiKey))?;
-    if let Some(realtime_ws_base_url) = &config.experimental_realtime_ws_base_url {
-        api_provider.base_url = realtime_ws_base_url.clone();
-    }
     let version = config.realtime.version;
+    let realtime_ws_base_url = config.experimental_realtime_ws_base_url.clone();
     let session_config = build_realtime_session_config(
         sess,
         params.prompt,
@@ -635,30 +644,12 @@ async fn prepare_realtime_start(
     )
     .await?;
     let requested_realtime_session_id = session_config.session_id.clone();
-    let extra_headers = match transport {
-        ConversationStartTransport::Websocket => {
-            let realtime_api_key = realtime_api_key(auth.as_ref(), &provider)?;
-            realtime_request_headers(
-                requested_realtime_session_id.as_deref(),
-                Some(realtime_api_key.as_str()),
-                version,
-            )?
-        }
-        ConversationStartTransport::Webrtc { .. } => {
-            realtime_request_headers(
-                requested_realtime_session_id.as_deref(),
-                /*api_key*/ None,
-                version,
-            )?
-        }
-    };
     Ok(PreparedRealtimeConversationStart {
-        api_provider,
-        extra_headers,
         requested_realtime_session_id,
         version,
         session_config,
         transport,
+        realtime_ws_base_url,
     })
 }
 
@@ -774,26 +765,67 @@ async fn handle_start_inner(
     prepared_start: PreparedRealtimeConversationStart,
 ) -> CodexResult<()> {
     let PreparedRealtimeConversationStart {
-        api_provider,
-        extra_headers,
         requested_realtime_session_id,
         version,
         session_config,
         transport,
+        realtime_ws_base_url,
     } = prepared_start;
     info!("starting realtime conversation");
-    let sdp = match transport {
-        ConversationStartTransport::Websocket => None,
-        ConversationStartTransport::Webrtc { sdp } => Some(sdp),
+    let start_output = loop {
+        let runtime_setup = sess
+            .services
+            .model_client
+            .current_realtime_websocket_runtime_setup(realtime_ws_base_url.clone())
+            .await?;
+        let extra_headers = match &transport {
+            ConversationStartTransport::Websocket => {
+                let realtime_api_key =
+                    realtime_api_key(runtime_setup.auth.as_ref(), &runtime_setup.provider_info)?;
+                realtime_request_headers(
+                    requested_realtime_session_id.as_deref(),
+                    Some(realtime_api_key.as_str()),
+                    version,
+                )?
+            }
+            ConversationStartTransport::Webrtc { .. } => {
+                realtime_request_headers(
+                    requested_realtime_session_id.as_deref(),
+                    /*api_key*/ None,
+                    version,
+                )?
+            }
+        };
+        let websocket_client = RealtimeWebsocketClient::new(runtime_setup.api_provider)
+            .with_request_retry_guard(Some(
+                sess.services
+                    .model_client
+                    .request_retry_guard(runtime_setup.provider_runtime_generation),
+            ));
+        let sdp = match transport.clone() {
+            ConversationStartTransport::Websocket => None,
+            ConversationStartTransport::Webrtc { sdp } => Some(sdp),
+        };
+        let start = RealtimeStart {
+            extra_headers,
+            session_config: session_config.clone(),
+            model_client: sess.services.model_client.clone(),
+            session_telemetry: sess.services.session_telemetry.clone(),
+            websocket_client,
+            sdp,
+        };
+        match sess.conversation.start(start).await {
+            Ok(start_output) => break start_output,
+            Err(CodexErr::Stream(reason, _delay))
+                if sess.services.model_client.current_provider_runtime_generation()
+                    != runtime_setup.provider_runtime_generation =>
+            {
+                debug!("restarting realtime start after provider runtime refresh: {reason}");
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
     };
-    let start = RealtimeStart {
-        api_provider,
-        extra_headers,
-        session_config,
-        model_client: sess.services.model_client.clone(),
-        sdp,
-    };
-    let start_output = sess.conversation.start(start).await?;
 
     info!("realtime conversation started");
 
@@ -871,7 +903,9 @@ async fn handle_start_inner(
                 RealtimeConversationEnd::TransportClosed => {
                     info!("realtime conversation transport closed");
                 }
-                RealtimeConversationEnd::Requested | RealtimeConversationEnd::Error => {}
+                RealtimeConversationEnd::Requested
+                | RealtimeConversationEnd::ProviderRuntimeRefresh
+                | RealtimeConversationEnd::Error => {}
             }
             sess_clone
                 .conversation
@@ -1528,6 +1562,9 @@ async fn send_realtime_conversation_closed(
     let reason = match end {
         RealtimeConversationEnd::Requested => Some("requested".to_string()),
         RealtimeConversationEnd::TransportClosed => Some("transport_closed".to_string()),
+        RealtimeConversationEnd::ProviderRuntimeRefresh => {
+            Some("provider_runtime_refresh".to_string())
+        }
         RealtimeConversationEnd::Error => Some("error".to_string()),
     };
 

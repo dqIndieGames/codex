@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use crate::Prompt;
@@ -47,6 +48,7 @@ use codex_model_provider_info::ModelProviderInfo;
 pub const SUMMARIZATION_PROMPT: &str = include_str!("../templates/compact/prompt.md");
 pub const SUMMARY_PREFIX: &str = include_str!("../templates/compact/summary_prefix.md");
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+const COMPACT_RETRY_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Controls whether compaction replacement history must include initial context.
 ///
@@ -254,7 +256,7 @@ async fn run_compact_task_inner_impl(
                         e,
                     )
                     .await;
-                    tokio::time::sleep(delay).await;
+                    sleep_compaction_retry_delay(delay, &mut retries, &mut client_session).await;
                     continue;
                 } else {
                     let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
@@ -537,6 +539,32 @@ fn build_compacted_history_with_limit(
     history
 }
 
+async fn sleep_compaction_retry_delay(
+    delay: Duration,
+    retries: &mut u64,
+    client_session: &mut ModelClientSession,
+) {
+    if delay.is_zero() {
+        return;
+    }
+
+    let start = tokio::time::Instant::now();
+    loop {
+        if client_session.provider_runtime_changed() {
+            *retries = 0;
+            client_session.sync_latest_provider_runtime_generation();
+            return;
+        }
+
+        let elapsed = start.elapsed();
+        if elapsed >= delay {
+            return;
+        }
+
+        tokio::time::sleep((delay - elapsed).min(COMPACT_RETRY_INTERRUPT_POLL_INTERVAL)).await;
+    }
+}
+
 async fn drain_to_completed(
     sess: &Session,
     turn_context: &TurnContext,
@@ -568,7 +596,7 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                sess.record_into_history(std::slice::from_ref(&item), turn_context)
+                sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
                     .await;
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {

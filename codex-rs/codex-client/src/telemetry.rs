@@ -29,4 +29,14 @@ pub trait RequestTelemetry: Send + Sync {
     fn can_retry_after_unauthorized(&self) -> bool {
         false
     }
+
+    /// Returns whether the current request-level retry loop can keep using its
+    /// existing request setup.
+    ///
+    /// Implementations can return `false` when request-scoped state becomes
+    /// stale, such as after a provider runtime refresh changes the endpoint or
+    /// auth for the current session.
+    fn can_continue_request_retry(&self) -> bool {
+        true
+    }
 }

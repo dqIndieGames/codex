@@ -13,6 +13,8 @@ pub enum TransportError {
     },
     #[error("retry limit reached")]
     RetryLimit,
+    #[error("request retry interrupted: {0}")]
+    RetryInterrupted(String),
     #[error("timeout")]
     Timeout,
     #[error("network error: {0}")]

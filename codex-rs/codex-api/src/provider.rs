@@ -84,7 +84,9 @@ pub fn should_retry_request_error(
             responses_http_status_is_retryable(*status)
         }
         TransportError::Timeout | TransportError::Network(_) => true,
-        TransportError::RetryLimit | TransportError::Build(_) => false,
+        TransportError::RetryLimit
+        | TransportError::RetryInterrupted(_)
+        | TransportError::Build(_) => false,
     }
 }
 

@@ -21,6 +21,12 @@
 
 10. 无 live instance 的 provider 字段复制仍视为成功，并给出明确反馈；原来没有可刷新实例时可能让用户误以为字段写入失败，修改后只要 `base_url` 与 `experimental_bearer_token` 写入成功，即使没有任何正在运行的实例，也反馈“未刷新任何实例”，这样用户能区分“配置已保存”和“当前没有可通知的运行入口”。
 
+11. app-server stderr 默认保持安静，只有显式配置才打开后台诊断输出；原来 `warn` 日志或 WebSocket 启动 banner 可能默认写入 stderr，修改后默认不再显示 `codex app-server (WebSockets)`、`listening on`、`readyz`、`healthz` 等后台诊断文字，只有用户在 `config.toml` 配置 `[logging] app_server_stderr = true` 后才恢复这些诊断信息，这样日常使用更安静，排查问题时仍能手动打开。
+
+12. `node_repl` MCP 自动继承当前 local3 CLI 路径；原来用户实际运行 local3 时，`node_repl` 子进程仍可能使用 AppData 自动安装目录里的旧版 `codex.exe`，修改后启动 `[mcp_servers.node_repl]` 时会把 `CODEX_CLI_PATH` 指向当前 `Config.codex_self_exe`，这样 refresh、诊断和 app-server 行为跟当前 local3 版本保持一致。
+
+13. app-server 退出时只补已有 runtime 引用清理，不做激进进程管理；原来 shutdown 路径可能漏释放外部 auth、apps runtime 和 skills watcher 引用，修改后主 app-server 退出时补调已有 `clear_runtime_references()`，但不新增 idle timeout，不全局扫描或 kill `node_repl.exe`，也不因为当前 UI 订阅断开就杀仍加载的线程，这样能减少残留引用，同时避免误伤正在使用的会话。
+
 ## 2026-05-30 回归经验
 
 - 503、429、402、网络断开等请求级 retry 不能只留在 telemetry/log；用户必须看到 `willRetry=true` 的中间态提示，提示里至少包含 HTTP 状态码、当前 retry 次数、最大 retry 次数和可诊断 details。否则用户只会感觉“卡住了/后台在重试但没告诉我”。
@@ -46,10 +52,8 @@
 - Windows release smoke test 必须明确断言 `-local3`，不能只检查输出里包含裸 `0.135.0`；否则 `0.135.0` 和 `0.135.0-local3` 都会通过，无法阻止本地身份后缀回退。
 - GitHub Actions artifact 只是单次 workflow 的临时产物，不会自动显示在 Releases 页面；如果用户要从 Releases 页面下载，云端编译成功后必须单独创建 GitHub Release，并把已验证的 artifact 上传为 release assets。
 
-## 2026-06-02 app-server stderr 与 node_repl 清理经验
+## 2026-06-02 app-server stderr 与 node_repl 回归经验
 
-- local3 app-server stderr 默认必须关闭，包括 `warn` 级别和 WebSocket 启动 banner；只有用户在 `config.toml` 显式配置 `[logging] app_server_stderr = true` 时才安装 stderr tracing layer 并允许 app-server 把监听地址/readyz/healthz 这类启动诊断写到 stderr。否则 `RUST_LOG=warn` 或 `LOG_FORMAT=json` 只能作为显式开启后的日志细节，不能让 Windows App 默认恢复 stderr 噪声。
-- node_repl MCP 必须自动继承当前 local3 CLI 路径；启动 `[mcp_servers.node_repl]` 时，运行时应把 `CODEX_CLI_PATH` 覆盖为当前 `Config.codex_self_exe`。否则用户实际运行的是 local3，但 node_repl 子进程仍可能启动 AppData 旧版 `codex.exe`，表现成刷新、诊断或 app-server 行为不一致。
-- node_repl 的 CLI 路径继承只作用于 server 名为 `node_repl` 的 MCP；不要全局改写其他 MCP server 的 env。其他 server 可能依赖用户手写的 `CODEX_CLI_PATH` 或同名变量，默认不应被 local3 接管。
-- “只补清理遗漏”指复用已有 shutdown 机制：主 app-server 退出时补调已有 `clear_runtime_references()`，释放外部 auth、apps runtime 和 skills watcher 引用；不新增 idle timeout，不全局扫描/kill `node_repl.exe`，不因为当前 UI 订阅断开就杀 still-loaded threads。
-- 云端构建验证时，本地禁止编译；应推送 GitHub Actions 编译，下载云端产物后做实际 exe smoke test。重点看默认 stderr 是否安静、显式开启后是否可诊断、`codex.exe --version` 是否仍带 `-local3`、node_repl 子进程是否跟随当前 local3 CLI。
+- 检查 app-server stderr 降噪时不能只看 tracing layer；WebSocket 启动 banner 里的 `listening on`、`readyz`、`healthz` 也是 stderr 输出，必须一起验证默认静音和显式开启两种状态。
+- `node_repl` 的 CLI 路径覆盖必须按 server 名精准限制在 `node_repl`，不能全局改写其他 MCP server 的 env；否则可能破坏用户自己配置的 MCP 环境变量。
+- 云端构建验证必须下载 GitHub Actions 产物后测实际 `codex.exe`；不能用源码静态检查、本地路径旧 exe，或本地编译产物替代 release smoke test。

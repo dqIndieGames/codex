@@ -156,6 +156,112 @@ class WindowsAppServerRefreshTrayTests(unittest.TestCase):
             "刷新全部 app-server 完成\n\n成功实例：3\n失败实例：1",
         )
 
+    def test_refresh_all_instances_sends_all_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            registry_dir = Path(tempdir)
+            write_registration(registry_dir, "live.json")
+            requests: list[dict[str, object]] = []
+
+            def send_request(_endpoint: str, payload: dict[str, object]) -> dict[str, object]:
+                requests.append(payload)
+                return {
+                    "ok": True,
+                    "total_threads": 1,
+                    "applied_thread_ids": ["thread-a"],
+                    "queued_thread_ids": [],
+                    "failed_threads": [],
+                }
+
+            summary = TRAY.refresh_all_instances(
+                registry_dir=registry_dir,
+                pid_checker=lambda _pid: True,
+                ping_checker=lambda _endpoint: True,
+                send_request=send_request,
+            )
+
+            self.assertEqual(
+                requests,
+                [{"op": "refresh_all_loaded_threads", "scope": "all"}],
+            )
+            self.assertEqual(summary["scope"], "all")
+            self.assertEqual(summary["applied_threads"], 1)
+
+    def test_refresh_console_instances_sends_console_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            registry_dir = Path(tempdir)
+            write_registration(registry_dir, "live.json")
+            requests: list[dict[str, object]] = []
+
+            def send_request(_endpoint: str, payload: dict[str, object]) -> dict[str, object]:
+                requests.append(payload)
+                return {
+                    "ok": True,
+                    "total_threads": 1,
+                    "applied_thread_ids": ["thread-console"],
+                    "queued_thread_ids": [],
+                    "failed_threads": [],
+                }
+
+            summary = TRAY.refresh_console_instances(
+                registry_dir=registry_dir,
+                pid_checker=lambda _pid: True,
+                ping_checker=lambda _endpoint: True,
+                send_request=send_request,
+            )
+
+            self.assertEqual(
+                requests,
+                [{"op": "refresh_console_loaded_threads", "scope": "console"}],
+            )
+            self.assertEqual(summary["scope"], "console")
+            self.assertEqual(summary["applied_threads"], 1)
+
+    def test_refresh_app_server_instances_sends_app_server_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            registry_dir = Path(tempdir)
+            write_registration(registry_dir, "live.json")
+            requests: list[dict[str, object]] = []
+
+            def send_request(_endpoint: str, payload: dict[str, object]) -> dict[str, object]:
+                requests.append(payload)
+                return {
+                    "ok": True,
+                    "total_threads": 1,
+                    "applied_thread_ids": ["thread-app-server"],
+                    "queued_thread_ids": [],
+                    "failed_threads": [],
+                }
+
+            summary = TRAY.refresh_app_server_instances(
+                registry_dir=registry_dir,
+                pid_checker=lambda _pid: True,
+                ping_checker=lambda _endpoint: True,
+                send_request=send_request,
+            )
+
+            self.assertEqual(
+                requests,
+                [{"op": "refresh_app_server_loaded_threads", "scope": "appServer"}],
+            )
+            self.assertEqual(summary["scope"], "appServer")
+            self.assertEqual(summary["applied_threads"], 1)
+
+    def test_format_refresh_summary_names_scope(self) -> None:
+        _title, message, icon_flag = TRAY.format_refresh_summary(
+            {
+                "scope": "console",
+                "total_instances": 1,
+                "success_instances": 1,
+                "failed_instances": 0,
+                "applied_threads": 1,
+                "queued_threads": 0,
+                "failed_threads": 0,
+            }
+        )
+
+        self.assertEqual(icon_flag, TRAY.MB_ICONINFORMATION)
+        self.assertIn("只刷新 Codex 控制台 完成", message)
+
     def test_apply_provider_prefers_app_server_smart_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             registry_dir = Path(tempdir)

@@ -36,8 +36,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
-#[cfg(test)]
-use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -161,6 +159,26 @@ pub struct ThreadShutdownReport {
     pub completed: Vec<ThreadId>,
     pub submit_failed: Vec<ThreadId>,
     pub timed_out: Vec<ThreadId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRuntimeRefreshScope {
+    All,
+    Console,
+    AppServer,
+}
+
+impl ProviderRuntimeRefreshScope {
+    fn matches_session_source(self, session_source: &SessionSource) -> bool {
+        match self {
+            Self::All => true,
+            Self::Console => matches!(
+                session_source,
+                SessionSource::Cli | SessionSource::Exec | SessionSource::Custom(_)
+            ),
+            Self::AppServer => matches!(session_source, SessionSource::VSCode | SessionSource::Mcp),
+        }
+    }
 }
 
 enum ShutdownOutcome {
@@ -479,12 +497,21 @@ impl ThreadManager {
     pub async fn refresh_all_loaded_provider_runtime(
         &self,
     ) -> ProviderRuntimeRefreshAllLoadedReport {
+        self.refresh_loaded_provider_runtime(ProviderRuntimeRefreshScope::All)
+            .await
+    }
+
+    pub async fn refresh_loaded_provider_runtime(
+        &self,
+        scope: ProviderRuntimeRefreshScope,
+    ) -> ProviderRuntimeRefreshAllLoadedReport {
         let threads = self
             .state
             .threads
             .read()
             .await
             .iter()
+            .filter(|(_, thread)| scope.matches_session_source(&thread.session_source))
             .map(|(thread_id, thread)| (*thread_id, Arc::clone(thread)))
             .collect::<Vec<_>>();
 
@@ -653,12 +680,12 @@ impl ThreadManager {
         options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
     ) -> CodexResult<NewThread> {
-        let session_source = options
-            .session_source
-            .unwrap_or_else(|| self.state.session_source.clone());
-        let thread_source = options
-            .thread_source
-            .or_else(|| options.initial_history.get_resumed_thread_source());
+        let (resumed_session_source, resumed_thread_source) = options
+            .initial_history
+            .get_resumed_session_sources()
+            .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        let session_source = options.session_source.unwrap_or(resumed_session_source);
+        let thread_source = options.thread_source.or(resumed_thread_source);
         Box::pin(self.state.spawn_thread_with_source(
             options.config,
             options.initial_history,
@@ -740,17 +767,22 @@ impl ThreadManager {
             self.state.environment_manager.as_ref(),
             &config.cwd,
         );
-        let thread_source = initial_history.get_resumed_thread_source();
-        Box::pin(self.state.spawn_thread(
+        let (session_source, thread_source) = initial_history
+            .get_resumed_session_sources()
+            .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
             auth_manager,
             self.agent_control(),
+            session_source,
             /*forked_from_thread_id*/ None,
             thread_source,
             Vec::new(),
             persist_extended_history,
             /*metrics_service_name*/ None,
+            /*inherited_shell_snapshot*/ None,
+            /*inherited_exec_policy*/ None,
             parent_trace,
             environments,
             /*user_shell_override*/ None,
@@ -796,17 +828,22 @@ impl ThreadManager {
             self.state.environment_manager.as_ref(),
             &config.cwd,
         );
-        let thread_source = initial_history.get_resumed_thread_source();
-        Box::pin(self.state.spawn_thread(
+        let (session_source, thread_source) = initial_history
+            .get_resumed_session_sources()
+            .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
             auth_manager,
             self.agent_control(),
+            session_source,
             /*forked_from_thread_id*/ None,
             thread_source,
             Vec::new(),
             /*persist_extended_history*/ false,
             /*metrics_service_name*/ None,
+            /*inherited_shell_snapshot*/ None,
+            /*inherited_exec_policy*/ None,
             /*parent_trace*/ None,
             environments,
             /*user_shell_override*/ Some(user_shell_override),
@@ -1076,17 +1113,6 @@ impl ThreadManagerState {
             log.push((thread_id, op.clone()));
         }
         thread.submit(op).await
-    }
-
-    #[cfg(test)]
-    /// Append a prebuilt message to a thread by ID outside the normal user-input path.
-    pub(crate) async fn append_message(
-        &self,
-        thread_id: ThreadId,
-        message: ResponseItem,
-    ) -> CodexResult<String> {
-        let thread = self.get_thread(thread_id).await?;
-        thread.append_message(message).await
     }
 
     /// Remove a thread from the manager by ID, returning it when present.

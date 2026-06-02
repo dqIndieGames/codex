@@ -19,6 +19,7 @@ use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
@@ -32,6 +33,38 @@ use tempfile::tempdir;
 use wiremock::MockServer;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+#[test]
+fn provider_runtime_refresh_scope_matches_expected_session_sources() {
+    let console_sources = [
+        SessionSource::Cli,
+        SessionSource::Exec,
+        SessionSource::Custom("local-tool".to_string()),
+    ];
+    for source in console_sources {
+        assert!(ProviderRuntimeRefreshScope::All.matches_session_source(&source));
+        assert!(ProviderRuntimeRefreshScope::Console.matches_session_source(&source));
+        assert!(!ProviderRuntimeRefreshScope::AppServer.matches_session_source(&source));
+    }
+
+    let app_server_sources = [SessionSource::VSCode, SessionSource::Mcp];
+    for source in app_server_sources {
+        assert!(ProviderRuntimeRefreshScope::All.matches_session_source(&source));
+        assert!(!ProviderRuntimeRefreshScope::Console.matches_session_source(&source));
+        assert!(ProviderRuntimeRefreshScope::AppServer.matches_session_source(&source));
+    }
+
+    let all_only_sources = [
+        SessionSource::SubAgent(SubAgentSource::Other("reviewer".to_string())),
+        SessionSource::Internal(InternalSessionSource::MemoryConsolidation),
+        SessionSource::Unknown,
+    ];
+    for source in all_only_sources {
+        assert!(ProviderRuntimeRefreshScope::All.matches_session_source(&source));
+        assert!(!ProviderRuntimeRefreshScope::Console.matches_session_source(&source));
+        assert!(!ProviderRuntimeRefreshScope::AppServer.matches_session_source(&source));
+    }
+}
 
 fn user_msg(text: &str) -> ResponseItem {
     ResponseItem::Message {
@@ -1124,6 +1157,7 @@ fn multi_agent_v2_interrupted_marker_uses_developer_input_message() {
 fn completed_legacy_event_history_is_not_mid_turn() {
     let completed_history = InitialHistory::Forked(vec![
         RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            client_id: None,
             message: "hello".to_string(),
             images: None,
             text_elements: Vec::new(),
@@ -1152,6 +1186,7 @@ fn mixed_response_and_legacy_user_event_history_is_mid_turn() {
     let mixed_history = InitialHistory::Forked(vec![
         RolloutItem::ResponseItem(user_msg("hello")),
         RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            client_id: None,
             message: "hello".to_string(),
             images: None,
             text_elements: Vec::new(),
