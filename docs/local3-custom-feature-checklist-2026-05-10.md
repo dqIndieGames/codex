@@ -17,15 +17,19 @@
 
 8. 默认开启不影响使用的批量优化，并保留即时反馈和历史安全；原来 rollout 批量 flush 与 app-server 高频通知合并默认关闭，修改后这些优化可以默认开启，但前提是输出节奏、token usage、diff/plan 更新、命令完成状态和崩溃恢复与未开启优化时保持用户可感知等价，同时必须保留显式关闭开关；这样用户默认获得更低 I/O 和更少客户端负担，但仍能看到及时刷新和可靠历史。
 
-9. Provider refresh 的 URL 和 token 刷新范围扩大到所有正在使用的 Codex 入口；原来 provider runtime 刷新只要求覆盖 `base_url` 与 `experimental_bearer_token` 两个字段，刷新结果可能只影响部分 live instance，修改后这两个字段刷新必须对所有 app server、已经打开的 Codex 窗口/会话、以及 `codex exec` 都生效，Windows tray 从 source provider 复制字段到当前 target provider 后也要触发同一刷新口径；这样用户换 URL 或 token 后，不同入口不会继续拿旧地址或旧 token 发请求。
+9. Provider refresh 的刷新范围扩大到所有正在使用的 Codex 入口，并覆盖会影响路由和速度的关键 provider 字段；原来 provider runtime 刷新只要求覆盖 `base_url` 与 `experimental_bearer_token` 两个字段，刷新结果可能只影响部分 live instance，修改后 `base_url`、`experimental_bearer_token`、`force_service_tier_priority` 与 fast mode 相关有效配置都必须对所有 app server、已经打开的 Codex 窗口/会话、以及 `codex exec` 尽可能更快生效，Windows tray 从 source provider 复制字段到当前 target provider 后也要触发同一刷新口径；这样用户换 URL、token、优先服务层或 fast 开关后，不同入口不会继续拿旧地址、旧 token 或旧速度/服务层策略发请求。
 
-10. 无 live instance 的 provider 字段复制仍视为成功，并给出明确反馈；原来没有可刷新实例时可能让用户误以为字段写入失败，修改后只要 `base_url` 与 `experimental_bearer_token` 写入成功，即使没有任何正在运行的实例，也反馈“未刷新任何实例”，这样用户能区分“配置已保存”和“当前没有可通知的运行入口”。
+10. Provider refresh 不是只在 retry 时才生效，而是配置变化后面向所有 live runtime 的通用刷新能力；原来 refresh 容易被理解成“请求失败后的补救动作”，修改后只要 provider 有效配置发生变化，就应尽快刷新已加载线程、app-server runtime、console/exec runtime 和正在等待下一次请求的会话，即使当前没有 retry、没有报错、没有正在流式输出，也应让下一次请求使用新 provider 状态；这样用户主动切换 provider 参数后，不必靠失败重试或新开对话才能看到新配置。
 
-11. app-server stderr 默认保持安静，只有显式配置才打开后台诊断输出；原来 `warn` 日志或 WebSocket 启动 banner 可能默认写入 stderr，修改后默认不再显示 `codex app-server (WebSockets)`、`listening on`、`readyz`、`healthz` 等后台诊断文字，只有用户在 `config.toml` 配置 `[logging] app_server_stderr = true` 后才恢复这些诊断信息，这样日常使用更安静，排查问题时仍能手动打开。
+11. 连续 stream/WebSocket 断流后的恢复重点不是“3 次后断开”，而是“3 次后旋转 `prompt_cache_key`，并清掉 WebSocket 的 `previous_response_id`，让下一次重试摆脱原来的中转粘连”；原来无限 retry 只会继续带着同一个 sticky key 和可能不可靠的 previous response 继续撞同一条中转路径，修改后第 3 次可重试的 SSE/WebSocket 未完成断流后进入 route recovery，`prompt_cache_key` 从默认 thread id 派生为带 recovery generation 的新值，WebSocket retry 在 recovery 模式不携带旧 `previous_response_id`，必要时重置/切换 fallback transport，但不修改真实 thread id、session id 或用户提示词；这样用户遇到“Reconnecting... N (unbounded) / stream closed before response.completed”时，下一轮 retry 有机会换掉有问题的中转粘连，而不是只能新开对话或派生线程。
 
-12. `node_repl` MCP 自动继承当前 local3 CLI 路径；原来用户实际运行 local3 时，`node_repl` 子进程仍可能使用 AppData 自动安装目录里的旧版 `codex.exe`，修改后启动 `[mcp_servers.node_repl]` 时会把 `CODEX_CLI_PATH` 指向当前 `Config.codex_self_exe`，这样 refresh、诊断和 app-server 行为跟当前 local3 版本保持一致。
+12. 无 live instance 的 provider 字段复制仍视为成功，并给出明确反馈；原来没有可刷新实例时可能让用户误以为字段写入失败，修改后只要 provider 字段写入成功，即使没有任何正在运行的实例，也反馈“未刷新任何实例”，这样用户能区分“配置已保存”和“当前没有可通知的运行入口”。
 
-13. app-server 退出时只补已有 runtime 引用清理，不做激进进程管理；原来 shutdown 路径可能漏释放外部 auth、apps runtime 和 skills watcher 引用，修改后主 app-server 退出时补调已有 `clear_runtime_references()`，但不新增 idle timeout，不全局扫描或 kill `node_repl.exe`，也不因为当前 UI 订阅断开就杀仍加载的线程，这样能减少残留引用，同时避免误伤正在使用的会话。
+13. app-server stderr 默认保持安静，只有显式配置才打开后台诊断输出；原来 `warn` 日志或 WebSocket 启动 banner 可能默认写入 stderr，修改后默认不再显示 `codex app-server (WebSockets)`、`listening on`、`readyz`、`healthz` 等后台诊断文字，只有用户在 `config.toml` 配置 `[logging] app_server_stderr = true` 后才恢复这些诊断信息，这样日常使用更安静，排查问题时仍能手动打开。
+
+14. `node_repl` MCP 自动继承当前 local3 CLI 路径；原来用户实际运行 local3 时，`node_repl` 子进程仍可能使用 AppData 自动安装目录里的旧版 `codex.exe`，修改后启动 `[mcp_servers.node_repl]` 时会把 `CODEX_CLI_PATH` 指向当前 `Config.codex_self_exe`，这样 refresh、诊断和 app-server 行为跟当前 local3 版本保持一致。
+
+15. app-server 退出时只补已有 runtime 引用清理，不做激进进程管理；原来 shutdown 路径可能漏释放外部 auth、apps runtime 和 skills watcher 引用，修改后主 app-server 退出时补调已有 `clear_runtime_references()`，但不新增 idle timeout，不全局扫描或 kill `node_repl.exe`，也不因为当前 UI 订阅断开就杀仍加载的线程，这样能减少残留引用，同时避免误伤正在使用的会话。
 
 ## 2026-05-30 回归经验
 
@@ -57,3 +61,14 @@
 - 检查 app-server stderr 降噪时不能只看 tracing layer；WebSocket 启动 banner 里的 `listening on`、`readyz`、`healthz` 也是 stderr 输出，必须一起验证默认静音和显式开启两种状态。
 - `node_repl` 的 CLI 路径覆盖必须按 server 名精准限制在 `node_repl`，不能全局改写其他 MCP server 的 env；否则可能破坏用户自己配置的 MCP 环境变量。
 - 云端构建验证必须下载 GitHub Actions 产物后测实际 `codex.exe`；不能用源码静态检查、本地路径旧 exe，或本地编译产物替代 release smoke test。
+
+## 2026-06-03 136 更新与 refresh/retry 回归经验
+
+- 更新到官方 `rust-v0.136.0` 时不能只合版本号；local3 清单、显示版本、历史跨 provider、日志降噪、node_repl 继承和 runtime 清理都要按用户可见结果逐项复核。
+- Provider refresh 必须能打断所有正在进行的 retry：HTTP 503/429/402、无界 503、网络失败、SSE 断流/空闲、WebSocket 503/426/401 都要验证旧 endpoint/token 不再继续增长，并切到新 endpoint/token。
+- Provider refresh 的覆盖字段必须包含 `base_url`、`experimental_bearer_token`、`force_service_tier_priority` 和 fast mode 有效配置；refresh 触发也不能依赖 retry，用户主动改配置后所有 live runtime 都应尽快刷新。
+- stream/WebSocket 连续断流的补救核心是 sticky-break：第 3 次 retryable stream failure 后旋转 `prompt_cache_key`，WebSocket recovery 请求清掉 `previous_response_id`；禁止把真实 thread id/session id 改掉，也不要通过改用户 prompt 来“换内容”。
+- 用户报告的 `503 retry N (unbounded)` 必须单独建无界场景覆盖；不写 `request_max_retries` 才是 release exe 的正式无界 retry 口径，不能只用有界 retry 代替。
+- 分开刷新要保留旧的全刷，同时新增 `console` 与 `appServer` scope；动态验收至少要证明 `appServer` 能刷新 Windows App app-server thread，`console` 不误刷 app-server thread。
+- GitHub CLI 查询和触发必须显式带 `--repo dqIndieGames/codex`；否则可能落到 `openai/codex`，导致 run/release 证据查错仓库。
+- 禁止本地编译时，编译证据只能来自 GitHub Actions；本地只下载 release zip，比对 GitHub asset digest，再用下载的 `codex.exe` 做真实 smoke 与 refresh 矩阵。
