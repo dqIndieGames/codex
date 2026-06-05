@@ -1716,7 +1716,7 @@ impl Session {
             .await
         {
             self.send_event_raw(Event {
-                id: self.conversation_id.to_string(),
+                id: self.thread_id.to_string(),
                 msg: EventMsg::RealtimeConversationClosed(RealtimeConversationClosedEvent {
                     reason: Some("provider_runtime_refresh".to_string()),
                 }),
