@@ -179,6 +179,7 @@ struct ModelClientState {
     provider_runtime_generation: AtomicU64,
     auth_env_telemetry: AuthEnvTelemetry,
     session_source: SessionSource,
+    parent_thread_id: Option<ThreadId>,
     model_verbosity: Option<VerbosityConfig>,
     force_service_tier_priority: AtomicBool,
     enable_request_compression: bool,
@@ -263,6 +264,7 @@ pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
     provider_runtime_generation: u64,
+    route_recovery_generation: u64,
     request_retry_notifier: Option<RequestRetryNotifier>,
     /// Turn state for sticky routing.
     ///
@@ -357,6 +359,7 @@ impl ModelClient {
         installation_id: String,
         provider_info: ModelProviderInfo,
         session_source: SessionSource,
+        parent_thread_id: Option<ThreadId>,
         model_verbosity: Option<VerbosityConfig>,
         force_service_tier_priority: bool,
         enable_request_compression: bool,
@@ -385,6 +388,7 @@ impl ModelClient {
                 provider_runtime_generation: AtomicU64::new(0),
                 auth_env_telemetry,
                 session_source,
+                parent_thread_id,
                 model_verbosity,
                 force_service_tier_priority: AtomicBool::new(force_service_tier_priority),
                 enable_request_compression,
@@ -407,10 +411,16 @@ impl ModelClient {
         self
     }
 
-    fn prompt_cache_key(&self) -> String {
-        self.prompt_cache_key_override
+    fn prompt_cache_key(&self, route_recovery_generation: u64) -> String {
+        let base_key = self
+            .prompt_cache_key_override
             .clone()
-            .unwrap_or_else(|| self.state.thread_id.to_string())
+            .unwrap_or_else(|| self.state.thread_id.to_string());
+        if route_recovery_generation == 0 {
+            base_key
+        } else {
+            format!("{base_key}:retry-recovery:{route_recovery_generation}")
+        }
     }
 
     /// Creates a fresh turn-scoped streaming session.
@@ -422,6 +432,7 @@ impl ModelClient {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
             provider_runtime_generation: self.current_provider_runtime_generation(),
+            route_recovery_generation: 0,
             request_retry_notifier: None,
             turn_state: Arc::new(OnceLock::new()),
         }
@@ -478,9 +489,13 @@ impl ModelClient {
         mut provider_info: ModelProviderInfo,
         base_url: Option<String>,
         experimental_bearer_token: Option<String>,
+        force_service_tier_priority: bool,
     ) {
         provider_info.base_url = base_url;
         provider_info.experimental_bearer_token = experimental_bearer_token;
+        self.state
+            .force_service_tier_priority
+            .store(force_service_tier_priority, Ordering::Relaxed);
         let current_provider = self.current_provider_handle();
         let auth_manager = current_provider.provider.auth_manager();
         let runtime_generation = self
@@ -593,6 +608,7 @@ impl ModelClient {
                 settings.effort,
                 settings.summary,
                 settings.service_tier.clone(),
+                /*route_recovery_generation*/ 0,
             )?;
             let ResponsesApiRequest {
                 model,
@@ -810,7 +826,7 @@ impl ModelClient {
 
     fn build_responses_identity_headers(&self) -> ApiHeaderMap {
         let mut extra_headers = self.build_subagent_headers();
-        if let Some(parent_thread_id) = parent_thread_id_header_value(&self.state.session_source)
+        if let Some(parent_thread_id) = parent_thread_id_header_value(self.state.parent_thread_id)
             && let Ok(val) = HeaderValue::from_str(&parent_thread_id)
         {
             extra_headers.insert(X_CODEX_PARENT_THREAD_ID_HEADER, val);
@@ -837,7 +853,7 @@ impl ModelClient {
         if let Some(subagent) = subagent_header_value(&self.state.session_source) {
             client_metadata.insert(X_OPENAI_SUBAGENT_HEADER.to_string(), subagent);
         }
-        if let Some(parent_thread_id) = parent_thread_id_header_value(&self.state.session_source) {
+        if let Some(parent_thread_id) = parent_thread_id_header_value(self.state.parent_thread_id) {
             client_metadata.insert(
                 X_CODEX_PARENT_THREAD_ID_HEADER.to_string(),
                 parent_thread_id,
@@ -915,6 +931,7 @@ impl ModelClient {
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
         service_tier: Option<String>,
+        route_recovery_generation: u64,
     ) -> Result<ResponsesApiRequest> {
         let instructions = &prompt.base_instructions.text;
         let input = prompt.get_formatted_input();
@@ -941,7 +958,7 @@ impl ModelClient {
             &prompt.output_schema,
             prompt.output_schema_strict,
         );
-        let prompt_cache_key = Some(self.prompt_cache_key());
+        let prompt_cache_key = Some(self.prompt_cache_key(route_recovery_generation));
         let service_tier = if self
             .state
             .force_service_tier_priority
@@ -1186,12 +1203,18 @@ impl ModelClientSession {
         self.sync_provider_runtime_generation(self.client.current_provider_runtime_generation());
     }
 
+    pub(crate) fn activate_retry_route_recovery(&mut self) {
+        self.route_recovery_generation = self.route_recovery_generation.saturating_add(1);
+        self.reset_websocket_session();
+    }
+
     fn sync_provider_runtime_generation(&mut self, runtime_generation: u64) {
         if self.provider_runtime_generation == runtime_generation {
             return;
         }
 
         self.websocket_session = WebsocketSession::default();
+        self.route_recovery_generation = 0;
         self.turn_state = Arc::new(OnceLock::new());
         self.provider_runtime_generation = runtime_generation;
     }
@@ -1531,6 +1554,7 @@ impl ModelClientSession {
                 effort,
                 summary,
                 service_tier.clone(),
+                self.route_recovery_generation,
             )?;
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
@@ -1654,6 +1678,7 @@ impl ModelClientSession {
                 effort,
                 summary,
                 service_tier.clone(),
+                self.route_recovery_generation,
             )?;
             let mut ws_payload = ResponseCreateWsRequest {
                 client_metadata: response_create_client_metadata(
@@ -2023,10 +2048,8 @@ fn subagent_header_value(session_source: &SessionSource) -> Option<String> {
     }
 }
 
-fn parent_thread_id_header_value(session_source: &SessionSource) -> Option<String> {
-    session_source
-        .parent_thread_id()
-        .map(|parent_thread_id| parent_thread_id.to_string())
+fn parent_thread_id_header_value(parent_thread_id: Option<ThreadId>) -> Option<String> {
+    parent_thread_id.map(|parent_thread_id| parent_thread_id.to_string())
 }
 
 const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;

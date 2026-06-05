@@ -12,6 +12,7 @@ use codex_protocol::protocol::WarningEvent;
 use tracing::warn;
 
 const STREAM_RETRY_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -57,6 +58,9 @@ pub(crate) async fn handle_retryable_response_stream_error(
     if retry_budget.is_none_or(|max_retries| *retries < max_retries) {
         *retries += 1;
         let retry_count = *retries;
+        if retry_count >= ROUTE_RECOVERY_RETRY_THRESHOLD {
+            client_session.activate_retry_route_recovery();
+        }
         let display_max_retries = retry_budget.unwrap_or(u64::MAX);
         let delay = match &err {
             CodexErr::Stream(_, requested_delay) => {

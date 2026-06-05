@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::Result;
 use app_test_support::McpProcess;
 use app_test_support::create_final_assistant_message_sse_response;
@@ -6,6 +7,7 @@ use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_mock_responses_server_sequence_after_one_503;
 use app_test_support::create_request_user_input_sse_response;
 use app_test_support::to_response;
+use app_test_support::write_models_cache;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigEdit;
 use codex_app_server_protocol::ConfigWriteResponse;
@@ -26,6 +28,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_app_server_protocol::WriteStatus;
+use codex_core::test_support::all_model_presets;
 use serde_json::json;
 use std::path::Path;
 use tempfile::TempDir;
@@ -122,6 +125,44 @@ config_file = "{relative_agent_config_file}"
     std::fs::write(codex_home.join("config.toml"), config_toml)
 }
 
+fn write_provider_refresh_config_with_service_tier_runtime(
+    codex_home: &Path,
+    server_uri: &str,
+    model: &str,
+    base_url: &str,
+    token: &str,
+    force_service_tier_priority: bool,
+    fast_mode: bool,
+) -> std::io::Result<()> {
+    let config_toml = format!(
+        r#"
+model = "{model}"
+approval_policy = "never"
+sandbox_mode = "read-only"
+model_provider = "mock_provider"
+chatgpt_base_url = "{server_uri}"
+force_service_tier_priority = {force_service_tier_priority}
+service_tier = "fast"
+
+[features]
+plugins = false
+default_mode_request_user_input = true
+fast_mode = {fast_mode}
+
+[model_providers.mock_provider]
+name = "Mock provider for test"
+base_url = "{base_url}"
+experimental_bearer_token = "{token}"
+wire_api = "responses"
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
+"#
+    );
+
+    std::fs::write(codex_home.join("config.toml"), config_toml)
+}
+
 async fn init_mcp(codex_home: &Path) -> Result<McpProcess> {
     let mut mcp = McpProcess::new(codex_home).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -129,9 +170,13 @@ async fn init_mcp(codex_home: &Path) -> Result<McpProcess> {
 }
 
 async fn start_thread(mcp: &mut McpProcess) -> Result<String> {
+    start_thread_with_model(mcp, "mock-model").await
+}
+
+async fn start_thread_with_model(mcp: &mut McpProcess, model: &str) -> Result<String> {
     let request_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            model: Some("mock-model".to_string()),
+            model: Some(model.to_string()),
             ..Default::default()
         })
         .await?;
@@ -254,6 +299,22 @@ fn response_request_authorization_headers(requests: &[wiremock::Request]) -> Vec
         .filter(|request| request.url.path().ends_with("/responses"))
         .map(|request| request.header("authorization"))
         .collect()
+}
+
+fn response_request_bodies(requests: &[wiremock::Request]) -> Result<Vec<serde_json::Value>> {
+    requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .map(|request| request.body_json::<serde_json::Value>().map_err(Into::into))
+        .collect()
+}
+
+fn service_tier_model_id() -> Result<String> {
+    let model = all_model_presets()
+        .iter()
+        .find(|preset| preset.show_in_picker && !preset.service_tiers.is_empty())
+        .context("bundled model catalog should include a picker model with service tiers")?;
+    Ok(model.id.clone())
 }
 
 #[tokio::test]
@@ -514,6 +575,135 @@ async fn thread_provider_runtime_refresh_all_loaded_keeps_failed_threads_empty_f
     assert!(response.applied_thread_ids.contains(&active_thread_id));
     assert!(response.queued_thread_ids.is_empty());
     assert!(response.failed_threads.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_runtime_refresh_updates_force_priority_and_fast_mode() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    write_models_cache(codex_home.path())?;
+    write_provider_refresh_config_with_service_tier_runtime(
+        codex_home.path(),
+        &server.uri(),
+        "mock-model",
+        &format!("{}/v1", server.uri()),
+        "token",
+        /*force_service_tier_priority*/ true,
+        /*fast_mode*/ true,
+    )?;
+
+    let mut mcp = init_mcp(codex_home.path()).await?;
+    let thread_id = start_thread(&mut mcp).await?;
+    run_text_turn(&mut mcp, &thread_id, "before refresh").await?;
+
+    let requests_before_refresh = server.received_requests().await.unwrap_or_default();
+    let bodies_before_refresh = response_request_bodies(&requests_before_refresh)?;
+    let first_body = bodies_before_refresh
+        .last()
+        .expect("expected request before refresh");
+    assert_eq!(first_body["service_tier"].as_str(), Some("priority"));
+
+    write_provider_refresh_config_with_service_tier_runtime(
+        codex_home.path(),
+        &server.uri(),
+        "mock-model",
+        &format!("{}/v1", server.uri()),
+        "token",
+        /*force_service_tier_priority*/ false,
+        /*fast_mode*/ false,
+    )?;
+
+    let refresh_response = refresh_thread(&mut mcp, &thread_id).await?;
+    assert_eq!(refresh_response.thread_id, thread_id);
+    assert_eq!(
+        refresh_response.status,
+        ThreadProviderRuntimeRefreshStatus::Applied
+    );
+
+    run_text_turn(&mut mcp, &thread_id, "after refresh").await?;
+
+    let requests_after_refresh = server.received_requests().await.unwrap_or_default();
+    let bodies_after_refresh = response_request_bodies(&requests_after_refresh)?;
+    assert!(
+        bodies_after_refresh.len() > bodies_before_refresh.len(),
+        "expected another Responses request after provider runtime refresh"
+    );
+    let refreshed_body = &bodies_after_refresh[bodies_before_refresh.len()];
+    assert!(
+        !refreshed_body
+            .as_object()
+            .expect("request body should be an object")
+            .contains_key("service_tier"),
+        "request after refresh should not keep stale priority service tier: {refreshed_body}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_runtime_refresh_enables_fast_mode_for_next_turn() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    let model = service_tier_model_id()?;
+    write_models_cache(codex_home.path())?;
+    write_provider_refresh_config_with_service_tier_runtime(
+        codex_home.path(),
+        &server.uri(),
+        &model,
+        &format!("{}/v1", server.uri()),
+        "token",
+        /*force_service_tier_priority*/ false,
+        /*fast_mode*/ false,
+    )?;
+
+    let mut mcp = init_mcp(codex_home.path()).await?;
+    let thread_id = start_thread_with_model(&mut mcp, &model).await?;
+    run_text_turn(&mut mcp, &thread_id, "before refresh").await?;
+
+    let requests_before_refresh = server.received_requests().await.unwrap_or_default();
+    let bodies_before_refresh = response_request_bodies(&requests_before_refresh)?;
+    let first_body = bodies_before_refresh
+        .last()
+        .expect("expected request before refresh");
+    assert!(
+        !first_body
+            .as_object()
+            .expect("request body should be an object")
+            .contains_key("service_tier"),
+        "request before refresh should not use fast service tier while fast_mode is false: {first_body}"
+    );
+
+    write_provider_refresh_config_with_service_tier_runtime(
+        codex_home.path(),
+        &server.uri(),
+        &model,
+        &format!("{}/v1", server.uri()),
+        "token",
+        /*force_service_tier_priority*/ false,
+        /*fast_mode*/ true,
+    )?;
+
+    let refresh_response = refresh_thread(&mut mcp, &thread_id).await?;
+    assert_eq!(refresh_response.thread_id, thread_id);
+    assert_eq!(
+        refresh_response.status,
+        ThreadProviderRuntimeRefreshStatus::Applied
+    );
+
+    run_text_turn(&mut mcp, &thread_id, "after refresh").await?;
+
+    let requests_after_refresh = server.received_requests().await.unwrap_or_default();
+    let bodies_after_refresh = response_request_bodies(&requests_after_refresh)?;
+    assert!(
+        bodies_after_refresh.len() > bodies_before_refresh.len(),
+        "expected another Responses request after provider runtime refresh"
+    );
+    let refreshed_body = &bodies_after_refresh[bodies_before_refresh.len()];
+    assert_eq!(
+        refreshed_body["service_tier"].as_str(),
+        Some("priority"),
+        "request after refresh should use fast service tier from refreshed fast_mode: {refreshed_body}"
+    );
     Ok(())
 }
 
