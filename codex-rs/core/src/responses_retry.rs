@@ -6,6 +6,7 @@ use crate::client::ModelClientSession;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::util::backoff;
+use crate::util::cap_retry_delay;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
@@ -62,12 +63,12 @@ pub(crate) async fn handle_retryable_response_stream_error(
             client_session.activate_retry_route_recovery();
         }
         let display_max_retries = retry_budget.unwrap_or(u64::MAX);
-        let delay = match &err {
+        let delay = cap_retry_delay(match &err {
             CodexErr::Stream(_, requested_delay) => {
                 requested_delay.unwrap_or_else(|| backoff(retry_count))
             }
             _ => backoff(retry_count),
-        };
+        });
         log_retry(
             request,
             turn_context,

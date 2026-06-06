@@ -5,7 +5,7 @@ use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
 
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -122,10 +122,10 @@ mod tests {
     }
 
     #[test]
-    fn request_backoff_is_capped_to_ten_seconds() {
+    fn request_backoff_is_capped_to_eight_seconds() {
         assert_eq!(
             backoff(Duration::from_millis(200), 32),
-            Duration::from_secs(10)
+            Duration::from_secs(8)
         );
     }
 }

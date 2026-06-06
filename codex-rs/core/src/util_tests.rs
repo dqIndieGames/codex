@@ -23,6 +23,19 @@ fn feedback_tags_macro_compiles() {
     feedback_tags!(model = "gpt-5.2", cached = true, debug_only = OnlyDebug);
 }
 
+#[test]
+fn core_backoff_is_capped_to_eight_seconds() {
+    assert_eq!(backoff(12), std::time::Duration::from_secs(8));
+}
+
+#[test]
+fn explicit_retry_delay_is_capped_to_eight_seconds() {
+    assert_eq!(
+        cap_retry_delay(std::time::Duration::from_secs(30)),
+        std::time::Duration::from_secs(8)
+    );
+}
+
 #[derive(Default)]
 struct TagCollectorVisitor {
     tags: BTreeMap<String, String>,

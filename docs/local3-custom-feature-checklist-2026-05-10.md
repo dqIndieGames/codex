@@ -5,7 +5,7 @@
 
 2. 首次输入纯文本 `你好` 时显示 local3 功能清单，并且每个新线程只显示 1 次；原来清单可能被做成某个客户端专用提示或重复插入，修改后 brand-new thread 或 Clear 后的新线程中，首个普通用户输入恰好为 `你好` 才会在首个 assistant 主消息第一段显示全量 local3 清单，resume、continue、fork、历史线程重开、子会话和其他输入都不重复触发，这样用户首次检查定制功能时能稳定看到完整清单且不会被反复打扰。
 
-3. 远端请求失败后的自动重试覆盖所有错误，保持更耐用、更少打断的体验；原来只有部分远端错误会按白名单重试，修改后所有远端请求错误都进入普通自动重试，单次等待上限保持 `10s`，中间失败不写入历史，只保留可见重连提示和可诊断信息，这样用户在临时鉴权、网络、服务抖动或其他远端异常时更少看到终态失败。
+3. 远端请求失败后的自动重试覆盖所有错误，保持更耐用、更少打断的体验；原来只有部分远端错误会按白名单重试，修改后所有远端请求错误都进入普通自动重试，所有 retry 等待间隔最高 `8s`，包括 HTTP 请求 retry、stream/WebSocket retry、compact retry 和服务端 `Retry-After` 建议等待；中间失败不写入历史，只保留可见重连提示和可诊断信息，这样用户在临时鉴权、网络、服务抖动或其他远端异常时更少看到终态失败，也不会被越来越长的本地重试等待卡住。
 
 4. 重试期间的可见提示、日志噪声和统计口径保持平衡；原来中间态可能刷屏或让诊断信息丢失，修改后用户仍能看到首次重连、重试次数、重试详情等提示，日志不再被中间失败刷屏，同时 retry metrics 继续保留，这样用户界面更安静，排查问题时仍有统计依据。
 
@@ -21,7 +21,7 @@
 
 10. Provider refresh 不是只在 retry 时才生效，而是配置变化后面向所有 live runtime 的通用刷新能力；原来 refresh 容易被理解成“请求失败后的补救动作”，修改后只要 provider 有效配置发生变化，就应尽快刷新已加载线程、app-server runtime、console/exec runtime 和正在等待下一次请求的会话，即使当前没有 retry、没有报错、没有正在流式输出，也应让下一次请求使用新 provider 状态；这样用户主动切换 provider 参数后，不必靠失败重试或新开对话才能看到新配置。
 
-11. 连续 stream/WebSocket 断流后的恢复重点不是“3 次后断开”，而是“3 次后旋转 `prompt_cache_key`，并清掉 WebSocket 的 `previous_response_id`，让下一次重试摆脱原来的中转粘连”；原来无限 retry 只会继续带着同一个 sticky key 和可能不可靠的 previous response 继续撞同一条中转路径，修改后第 3 次可重试的 SSE/WebSocket 未完成断流后进入 route recovery，`prompt_cache_key` 从默认 thread id 派生为带 recovery generation 的新值，WebSocket retry 在 recovery 模式不携带旧 `previous_response_id`，必要时重置/切换 fallback transport，但不修改真实 thread id、session id 或用户提示词；这样用户遇到“Reconnecting... N (unbounded) / stream closed before response.completed”时，下一轮 retry 有机会换掉有问题的中转粘连，而不是只能新开对话或派生线程。
+11. 连续 stream/WebSocket 断流后的恢复重点不是“3 次后断开”，而是“3 次失败后才启动 hard route recovery”：前 2 次只做普通重试，不重置 WebSocket session、不旋转 `prompt_cache_key`、不主动丢 `previous_response_id`；第 3 次可重试的 SSE/WebSocket 未完成断流后才进入 route recovery，`prompt_cache_key` 从默认 thread id 派生为带 recovery generation 的新值，同时重置 WebSocket session，使下一次普通全量重放不携带旧 `previous_response_id`；必要时继续走 fallback transport，但不修改真实 thread id、session id 或用户提示词。这样用户遇到“Reconnecting... N (unbounded) / stream closed before response.completed”时，下一轮 retry 有机会换掉有问题的中转粘连，而不是只能新开对话或派生线程。
 
 12. 无 live instance 的 provider 字段复制仍视为成功，并给出明确反馈；原来没有可刷新实例时可能让用户误以为字段写入失败，修改后只要 provider 字段写入成功，即使没有任何正在运行的实例，也反馈“未刷新任何实例”，这样用户能区分“配置已保存”和“当前没有可通知的运行入口”。
 
