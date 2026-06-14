@@ -1,0 +1,80 @@
+name: publish-actions-artifact-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: GitHub Actions run id that produced the artifact.
+        required: true
+        type: string
+      artifact_name:
+        description: Artifact name to publish from the source run.
+        required: true
+        default: x86_64-pc-windows-msvc
+        type: string
+      tag:
+        description: Release tag to create or update.
+        required: true
+        type: string
+      release_name:
+        description: Release display name.
+        required: true
+        type: string
+      target_commitish:
+        description: Commit SHA the release tag should point at.
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    name: Publish artifact from run to GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Download artifact from source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$ARTIFACT_NAME" \
+            --dir dist
+          find dist -maxdepth 2 -type f -print | sort
+
+      - name: Write release notes
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          TARGET_COMMITISH: ${{ inputs.target_commitish }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Published from GitHub Actions artifact."
+            echo
+            echo "- Source run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}"
+            echo "- Source artifact: ${ARTIFACT_NAME}"
+            echo "- Target commit: ${TARGET_COMMITISH}"
+            echo
+            echo "Assets are the files from the selected Actions artifact."
+          } > release-notes.md
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          target_commitish: ${{ inputs.target_commitish }}
+          name: ${{ inputs.release_name }}
+          body_path: release-notes.md
+          files: dist/*
+          fail_on_unmatched_files: true
+          prerelease: true
+          make_latest: false
