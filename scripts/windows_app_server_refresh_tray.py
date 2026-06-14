@@ -52,6 +52,10 @@ ARRAY_TABLE_HEADER_RE = re.compile(r"^\s*\[\[(?P<name>[^\[\]]+)\]\]\s*(?:#.*)?$"
 ROOT_PROVIDER_KEY_RE = re.compile(
     r"^(?P<indent>\s*)(?P<key>base_url|experimental_bearer_token)\s*="
 )
+ROOT_SCALAR_KEY_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<key>force_service_tier_priority|service_tier)\s*="
+)
+FEATURES_KEY_RE = re.compile(r"^(?P<indent>\s*)(?P<key>fast_mode)\s*=")
 
 
 def configure_win32_prototypes(kernel32_dll: Any, user32_dll: Any) -> None:
@@ -516,6 +520,14 @@ def toml_quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def toml_quote_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return toml_quote(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
 def detect_newline(text: str) -> str:
     return "\r\n" if "\r\n" in text else "\n"
 
@@ -532,6 +544,24 @@ def array_table_header_name(line: str) -> str | None:
     if match is None:
         return None
     return match.group("name").strip()
+
+
+def find_table_bounds(lines: list[str], table_name: str) -> tuple[int, int]:
+    table_indices = [
+        index
+        for index, line in enumerate(lines)
+        if table_header_name(line) == table_name
+    ]
+    if len(table_indices) != 1:
+        raise RuntimeError("config.toml 结构不支持自动写回")
+
+    start_index = table_indices[0]
+    end_index = len(lines)
+    for index in range(start_index + 1, len(lines)):
+        if table_header_name(lines[index]) is not None or array_table_header_name(lines[index]) is not None:
+            end_index = index
+            break
+    return start_index, end_index
 
 
 def find_provider_table_bounds(lines: list[str], provider_id: str) -> tuple[int, int]:
@@ -615,6 +645,96 @@ def rewrite_provider_runtime_section(
             f"{indent}experimental_bearer_token = {toml_quote(bearer_token)}{newline}"
         )
 
+    updated_text = "".join(prefix_lines + updated_body_lines + lines[end_index:])
+    try:
+        tomllib.loads(updated_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise RuntimeError("config.toml 结构不支持自动写回") from exc
+    return updated_text
+
+
+def rewrite_root_scalar_fields(
+    raw_text: str,
+    fields: dict[str, Any],
+) -> str:
+    if not fields:
+        return raw_text
+    lines = raw_text.splitlines(keepends=True)
+    newline = detect_newline(raw_text)
+    seen_keys: set[str] = set()
+    output: list[str] = []
+    insert_index = 0
+
+    for line in lines:
+        if table_header_name(line) is not None or array_table_header_name(line) is not None:
+            break
+        insert_index += 1
+
+    for index, line in enumerate(lines):
+        match = ROOT_SCALAR_KEY_RE.match(line)
+        if match is not None and match.group("key") in fields and index < insert_index:
+            key = match.group("key")
+            seen_keys.add(key)
+            output.append(f"{match.group('indent')}{key} = {toml_quote_value(fields[key])}{newline}")
+        else:
+            output.append(line)
+
+    additions = [
+        f"{key} = {toml_quote_value(value)}{newline}"
+        for key, value in fields.items()
+        if key not in seen_keys
+    ]
+    if additions:
+        output[insert_index:insert_index] = additions
+    updated_text = "".join(output)
+    try:
+        tomllib.loads(updated_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise RuntimeError("config.toml 结构不支持自动写回") from exc
+    return updated_text
+
+
+def rewrite_features_fields(raw_text: str, fields: dict[str, Any]) -> str:
+    if not fields:
+        return raw_text
+    lines = raw_text.splitlines(keepends=True)
+    newline = detect_newline(raw_text)
+    try:
+        start_index, end_index = find_table_bounds(lines, "features")
+    except RuntimeError:
+        insertion = ["[features]" + newline] + [
+            f"{key} = {toml_quote_value(value)}{newline}" for key, value in fields.items()
+        ]
+        if lines and lines[-1].strip():
+            insertion.insert(0, newline)
+        updated_text = "".join(lines + insertion)
+        try:
+            tomllib.loads(updated_text)
+        except tomllib.TOMLDecodeError as exc:
+            raise RuntimeError("config.toml 结构不支持自动写回") from exc
+        return updated_text
+
+    prefix_lines = lines[: start_index + 1]
+    if prefix_lines and not prefix_lines[-1].endswith(("\n", "\r")):
+        prefix_lines[-1] = prefix_lines[-1] + newline
+    body_lines = lines[start_index + 1 : end_index]
+    seen_keys: set[str] = set()
+    updated_body_lines: list[str] = []
+
+    for line in body_lines:
+        match = FEATURES_KEY_RE.match(line)
+        if match is not None and match.group("key") in fields:
+            key = match.group("key")
+            seen_keys.add(key)
+            updated_body_lines.append(
+                f"{match.group('indent')}{key} = {toml_quote_value(fields[key])}{newline}"
+            )
+        else:
+            updated_body_lines.append(line)
+
+    for key, value in fields.items():
+        if key not in seen_keys:
+            updated_body_lines.append(f"{key} = {toml_quote_value(value)}{newline}")
     updated_text = "".join(prefix_lines + updated_body_lines + lines[end_index:])
     try:
         tomllib.loads(updated_text)
@@ -758,29 +878,46 @@ def apply_selected_provider_to_config(
 
     target_base_url = normalize_string(target_provider.get("base_url"))
     target_bearer_token = normalize_string(target_provider.get("experimental_bearer_token"))
-    config_changed = not (
+    source_force_service_tier_priority = bool(
+        payload.get("force_service_tier_priority", True)
+    )
+    source_service_tier = normalize_string(payload.get("service_tier"))
+    features = payload.get("features")
+    source_fast_mode = bool(features.get("fast_mode")) if isinstance(features, dict) else False
+    root_scalar_fields = {
+        "force_service_tier_priority": source_force_service_tier_priority,
+        **({"service_tier": source_service_tier} if source_service_tier is not None else {}),
+    }
+    provider_runtime_changed = not (
         target_base_url == source_base_url and target_bearer_token == source_bearer_token
     )
 
-    if config_changed:
-        try:
+    try:
+        updated_text = raw_text
+        if provider_runtime_changed:
             updated_text = rewrite_provider_runtime_section(
-                raw_text,
+                updated_text,
                 current_model_provider_id,
                 source_base_url,
                 source_bearer_token,
             )
+        updated_text = rewrite_root_scalar_fields(updated_text, root_scalar_fields)
+        updated_text = rewrite_features_fields(updated_text, {"fast_mode": source_fast_mode})
+    except RuntimeError as exc:
+        return {
+            "ok": False,
+            "message": str(exc),
+            "source_provider_id": source_provider_id,
+            "current_model_provider_id": current_model_provider_id,
+            "config_path": str(config_path),
+            "config_changed": False,
+            "refresh_summary": None,
+        }
+
+    config_changed = updated_text != raw_text
+    if config_changed:
+        try:
             atomic_write_utf8(config_path, updated_text)
-        except RuntimeError as exc:
-            return {
-                "ok": False,
-                "message": str(exc),
-                "source_provider_id": source_provider_id,
-                "current_model_provider_id": current_model_provider_id,
-                "config_path": str(config_path),
-                "config_changed": False,
-                "refresh_summary": None,
-            }
         except OSError as exc:
             return {
                 "ok": False,

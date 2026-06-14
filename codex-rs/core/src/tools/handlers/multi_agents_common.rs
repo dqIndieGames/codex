@@ -210,8 +210,30 @@ pub(crate) fn build_agent_spawn_config(
     Ok(config)
 }
 
+pub(crate) async fn build_latest_agent_spawn_config(
+    session: &Session,
+    base_instructions: &BaseInstructions,
+    turn: &TurnContext,
+) -> Result<Config, FunctionCallError> {
+    let mut config = session.latest_agent_base_config().await;
+    apply_agent_turn_context(&mut config, turn, /*refresh_provider_from_turn*/ false)?;
+    config.base_instructions = Some(base_instructions.text.clone());
+    Ok(config)
+}
+
 pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
     let mut config = build_agent_shared_config(turn)?;
+    // For resume, keep base instructions sourced from rollout/session metadata.
+    config.base_instructions = None;
+    Ok(config)
+}
+
+pub(crate) async fn build_latest_agent_resume_config(
+    session: &Session,
+    turn: &TurnContext,
+) -> Result<Config, FunctionCallError> {
+    let mut config = session.latest_agent_base_config().await;
+    apply_agent_turn_context(&mut config, turn, /*refresh_provider_from_turn*/ false)?;
     // For resume, keep base instructions sourced from rollout/session metadata.
     config.base_instructions = None;
     Ok(config)
@@ -220,17 +242,28 @@ pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, Fu
 fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
     let base_config = turn.config.clone();
     let mut config = (*base_config).clone();
+    apply_agent_turn_context(&mut config, turn, /*refresh_provider_from_turn*/ true)?;
+
+    Ok(config)
+}
+
+fn apply_agent_turn_context(
+    config: &mut Config,
+    turn: &TurnContext,
+    refresh_provider_from_turn: bool,
+) -> Result<(), FunctionCallError> {
     config.model = Some(turn.model_info.slug.clone());
-    config.model_provider = turn.provider.info().clone();
+    if refresh_provider_from_turn {
+        config.model_provider = turn.provider.info().clone();
+    }
     config.model_reasoning_effort = turn
         .reasoning_effort
-        .or(turn.model_info.default_reasoning_level);
+        .clone()
+        .or_else(|| turn.model_info.default_reasoning_level.clone());
     config.model_reasoning_summary = Some(turn.reasoning_summary);
     config.developer_instructions = turn.developer_instructions.clone();
     config.compact_prompt = turn.compact_prompt.clone();
-    apply_spawn_agent_runtime_overrides(&mut config, turn)?;
-
-    Ok(config)
+    apply_spawn_agent_runtime_overrides(config, turn)
 }
 
 pub(crate) fn reject_full_fork_spawn_overrides(
@@ -261,6 +294,7 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("approval_policy is invalid: {err}"))
         })?;
+    config.approvals_reviewer = turn.config.approvals_reviewer;
     config.permissions.shell_environment_policy = turn.shell_environment_policy.clone();
     config.codex_linux_sandbox_exe = turn.codex_linux_sandbox_exe.clone();
     #[allow(deprecated)]
@@ -304,7 +338,7 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
             validate_spawn_agent_reasoning_effort(
                 &selected_model_name,
                 &selected_model_info.supported_reasoning_levels,
-                reasoning_effort,
+                &reasoning_effort,
             )?;
             config.model_reasoning_effort = Some(reasoning_effort);
         } else {
@@ -318,7 +352,7 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
         validate_spawn_agent_reasoning_effort(
             &turn.model_info.slug,
             &turn.model_info.supported_reasoning_levels,
-            reasoning_effort,
+            &reasoning_effort,
         )?;
         config.model_reasoning_effort = Some(reasoning_effort);
     }
@@ -404,11 +438,11 @@ fn find_spawn_agent_model_name(
 fn validate_spawn_agent_reasoning_effort(
     model: &str,
     supported_reasoning_levels: &[ReasoningEffortPreset],
-    requested_reasoning_effort: ReasoningEffort,
+    requested_reasoning_effort: &ReasoningEffort,
 ) -> Result<(), FunctionCallError> {
     if supported_reasoning_levels
         .iter()
-        .any(|preset| preset.effort == requested_reasoning_effort)
+        .any(|preset| &preset.effort == requested_reasoning_effort)
     {
         return Ok(());
     }

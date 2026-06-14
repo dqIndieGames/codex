@@ -135,10 +135,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_posts_typed_request_and_parses_encrypted_output() {
+    async fn search_posts_typed_request_and_parses_output() {
         let transport = CapturingTransport::new(
-            serde_json::to_vec(&json!({"encrypted_output": "ciphertext"}))
-                .expect("serialize response"),
+            serde_json::to_vec(&json!({
+                "encrypted_output": "ciphertext",
+                "output": "search result",
+            }))
+            .expect("serialize response"),
         );
         let client = SearchClient::new(transport.clone(), provider(), Arc::new(DummyAuth));
 
@@ -204,7 +207,8 @@ mod tests {
         assert_eq!(
             response,
             SearchResponse {
-                encrypted_output: "ciphertext".to_string(),
+                encrypted_output: Some("ciphertext".to_string()),
+                output: "search result".to_string(),
             }
         );
 

@@ -77,7 +77,14 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                         Some("server_is_overloaded" | "slow_down")
                     )
                 {
-                    return CodexErr::ServerOverloaded;
+                    return match mode {
+                        HttpErrorMode::StreamLayer => {
+                            CodexErr::Stream(CodexErr::ServerOverloaded.to_string(), None)
+                        }
+                        HttpErrorMode::Default | HttpErrorMode::RequestLayer => {
+                            CodexErr::ServerOverloaded
+                        }
+                    };
                 }
 
                 if status == http::StatusCode::BAD_REQUEST {

@@ -18,6 +18,7 @@ pub use codex_client::ReqwestTransport;
 pub use codex_client::TransportError;
 
 pub use crate::api_bridge::map_api_error;
+pub use crate::api_bridge::map_responses_stream_api_error;
 pub use crate::auth::AuthError;
 pub use crate::auth::AuthHeaderTelemetry;
 pub use crate::auth::AuthProvider;
@@ -30,9 +31,9 @@ pub use crate::common::OpenAiVerbosity;
 pub use crate::common::RawMemory;
 pub use crate::common::RawMemoryMetadata;
 pub use crate::common::Reasoning;
+pub use crate::common::ReasoningContext;
 pub use crate::common::ResponseCreateWsRequest;
 pub use crate::common::ResponseEvent;
-pub use crate::common::ResponseProcessedWsRequest;
 pub use crate::common::ResponseStream;
 pub use crate::common::ResponsesApiRequest;
 pub use crate::common::ResponsesWsRequest;

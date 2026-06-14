@@ -27,6 +27,30 @@ fn map_api_error_maps_server_overloaded_from_503_body() {
 }
 
 #[test]
+fn map_responses_stream_api_error_maps_overloaded_503_body_to_retryable_stream() {
+    for code in ["server_is_overloaded", "slow_down"] {
+        let body = serde_json::json!({
+            "error": {
+                "code": code
+            }
+        })
+        .to_string();
+        let err = map_responses_stream_api_error(ApiError::Transport(TransportError::Http {
+            status: http::StatusCode::SERVICE_UNAVAILABLE,
+            url: Some("ws://example.com/v1/responses".to_string()),
+            headers: None,
+            body: Some(body),
+        }));
+
+        let CodexErr::Stream(message, requested_delay) = err else {
+            panic!("expected retryable stream error for {code}, got {err:?}");
+        };
+        assert_eq!(message, CodexErr::ServerOverloaded.to_string());
+        assert_eq!(requested_delay, None);
+    }
+}
+
+#[test]
 fn map_api_error_maps_cyber_policy_from_400_body() {
     let body = serde_json::json!({
         "error": {

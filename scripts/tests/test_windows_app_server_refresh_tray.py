@@ -322,6 +322,11 @@ class WindowsAppServerRefreshTrayTests(unittest.TestCase):
             (codex_home / TRAY.CONFIG_TOML_FILE_NAME).write_text(
                 """
 model_provider = "yunyi"
+force_service_tier_priority = false
+service_tier = "fast"
+
+[features]
+fast_mode = true
 
 [model_providers.saki]
 base_url = "https://api.saki.example/v1"
@@ -377,6 +382,92 @@ experimental_bearer_token = "old-token"
             updated = (codex_home / TRAY.CONFIG_TOML_FILE_NAME).read_text(encoding="utf-8")
             self.assertIn('base_url = "https://api.saki.example/v1"', updated)
             self.assertIn('experimental_bearer_token = "new-token"', updated)
+            self.assertIn("force_service_tier_priority = false", updated)
+            self.assertIn('service_tier = "fast"', updated)
+            self.assertIn("fast_mode = true", updated)
+
+    def test_apply_provider_fallback_writes_speed_fields_when_provider_runtime_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            codex_home = Path(tempdir)
+            registry_dir = codex_home / TRAY.APP_SERVERS_DIR_NAME
+            registry_dir.mkdir()
+            write_registration(
+                registry_dir,
+                "live.json",
+                control_endpoint=r"\\.\pipe\codex-app-server-legacy",
+            )
+            (codex_home / TRAY.CONFIG_TOML_FILE_NAME).write_text(
+                """
+model_provider = "yunyi"
+force_service_tier_priority = false
+service_tier = "fast"
+
+[features]
+fast_mode = true
+
+[model_providers.saki]
+base_url = "https://api.saki.example/v1"
+experimental_bearer_token = "new-token"
+
+[model_providers.yunyi]
+base_url = "https://api.saki.example/v1"
+experimental_bearer_token = "new-token"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            requests: list[dict[str, object]] = []
+
+            def send_request(endpoint: str, payload: dict[str, object]) -> dict[str, object]:
+                requests.append({"endpoint": endpoint, "payload": payload})
+                if payload.get("op") == "apply_provider_runtime_from_effective_provider":
+                    return {
+                        "ok": False,
+                        "error": "unsupported control operation: apply_provider_runtime_from_effective_provider",
+                    }
+                if payload.get("op") == "refresh_all_loaded_threads":
+                    return {
+                        "ok": True,
+                        "total_threads": 1,
+                        "applied_thread_ids": ["thread-a"],
+                        "queued_thread_ids": [],
+                        "failed_threads": [],
+                    }
+                raise AssertionError(f"unexpected payload: {payload}")
+
+            config_path = codex_home / TRAY.CONFIG_TOML_FILE_NAME
+            without_speed_fields = (
+                config_path.read_text(encoding="utf-8")
+                .replace("force_service_tier_priority = false\n", "")
+                .replace('service_tier = "fast"\n', "")
+                .replace("\n[features]\nfast_mode = true\n", "\n")
+            )
+            config_path.write_text(without_speed_fields, encoding="utf-8")
+
+            summary = TRAY.apply_provider_runtime_smart_first(
+                "saki",
+                codex_home=codex_home,
+                registry_dir=registry_dir,
+                pid_checker=lambda _pid: True,
+                ping_checker=lambda _endpoint: True,
+                send_request=send_request,
+            )
+
+            self.assertTrue(summary["ok"])
+            self.assertEqual(summary["apply_strategy"], "legacy_config_write")
+            self.assertTrue(summary["config_changed"])
+            self.assertEqual(
+                [request["payload"]["op"] for request in requests],
+                [
+                    "apply_provider_runtime_from_effective_provider",
+                    "refresh_all_loaded_threads",
+                ],
+            )
+            updated = config_path.read_text(encoding="utf-8")
+            self.assertIn('base_url = "https://api.saki.example/v1"', updated)
+            self.assertIn('experimental_bearer_token = "new-token"', updated)
+            self.assertIn("force_service_tier_priority = true", updated)
+            self.assertIn("fast_mode = false", updated)
 
     def test_apply_provider_does_not_treat_legacy_refresh_as_success_when_smart_apply_failed(
         self,

@@ -302,7 +302,10 @@ fn build_ws_client_metadata_includes_window_lineage_and_turn_metadata() {
 
     client.advance_window_generation();
 
-    let client_metadata = client.build_ws_client_metadata(Some(r#"{"turn_id":"turn-123"}"#));
+    let client_metadata = client.build_ws_client_metadata(
+        Some(r#"{"turn_id":"turn-123"}"#),
+        /*use_responses_lite*/ false,
+    );
     let thread_id = client.state.thread_id;
     assert_eq!(
         client_metadata,
@@ -520,6 +523,8 @@ fn api_telemetry_notifies_streaming_request_retry() {
         RequestRouteTelemetry::for_endpoint("/responses"),
         AuthEnvTelemetry::default(),
         Some(notifier),
+        None,
+        None,
     );
     let mut headers = HeaderMap::new();
     headers.insert("x-request-id", HeaderValue::from_static("req-503"));

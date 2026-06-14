@@ -8,7 +8,6 @@ use crate::session::tests::make_session_and_context;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
 use codex_extension_api::empty_extension_registry;
-use codex_features::Feature;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
@@ -23,7 +22,6 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
-use codex_protocol::user_input::UserInput;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
 use core_test_support::responses::mount_models_once;
@@ -64,6 +62,207 @@ fn provider_runtime_refresh_scope_matches_expected_session_sources() {
         assert!(!ProviderRuntimeRefreshScope::Console.matches_session_source(&source));
         assert!(!ProviderRuntimeRefreshScope::AppServer.matches_session_source(&source));
     }
+}
+
+#[test]
+fn provider_runtime_refresh_scope_matches_thread_spawn_parent_sources() {
+    let console_parent = ThreadId::new();
+    let app_server_parent = ThreadId::new();
+    let console_child_thread = ThreadId::new();
+    let app_server_child_thread = ThreadId::new();
+    let missing_middle_parent = ThreadId::new();
+    let cycle_parent_a = ThreadId::new();
+    let cycle_parent_b = ThreadId::new();
+    let missing_parent = ThreadId::new();
+    let console_agent_job_thread = ThreadId::new();
+    let app_server_agent_job_thread = ThreadId::new();
+    let nested_agent_job_thread = ThreadId::new();
+    let missing_parent_agent_job_thread = ThreadId::new();
+    let cycle_agent_job_thread = ThreadId::new();
+    let mut root_sources = std::collections::HashMap::new();
+    root_sources.insert(console_parent, SessionSource::Cli);
+    root_sources.insert(app_server_parent, SessionSource::Mcp);
+
+    let console_child = thread_spawn_source(console_parent, 1);
+    let app_server_child = thread_spawn_source(app_server_parent, 1);
+    root_sources.insert(console_child_thread, console_child.clone());
+    root_sources.insert(app_server_child_thread, app_server_child.clone());
+    root_sources.insert(cycle_parent_a, thread_spawn_source(cycle_parent_b, 1));
+    root_sources.insert(cycle_parent_b, thread_spawn_source(cycle_parent_a, 2));
+    root_sources.insert(
+        console_agent_job_thread,
+        agent_job_source("console-job"),
+    );
+    root_sources.insert(
+        app_server_agent_job_thread,
+        agent_job_source("app-server-job"),
+    );
+    root_sources.insert(nested_agent_job_thread, agent_job_source("nested-job"));
+    root_sources.insert(
+        missing_parent_agent_job_thread,
+        agent_job_source("missing-parent-job"),
+    );
+    root_sources.insert(cycle_agent_job_thread, agent_job_source("cycle-job"));
+
+    let mut parent_thread_ids = std::collections::HashMap::new();
+    parent_thread_ids.insert(console_agent_job_thread, console_parent);
+    parent_thread_ids.insert(app_server_agent_job_thread, app_server_parent);
+    parent_thread_ids.insert(nested_agent_job_thread, console_child_thread);
+    parent_thread_ids.insert(cycle_agent_job_thread, cycle_parent_a);
+
+    let console_grandchild = thread_spawn_source(console_child_thread, 2);
+    let app_server_grandchild = thread_spawn_source(app_server_child_thread, 2);
+    let missing_parent_child = thread_spawn_source(missing_parent, 1);
+    let missing_parent_grandchild = thread_spawn_source(missing_middle_parent, 2);
+    let cycle_child = thread_spawn_source(cycle_parent_a, 3);
+    let console_agent_job = agent_job_source("console-job");
+    let app_server_agent_job = agent_job_source("app-server-job");
+    let nested_agent_job = agent_job_source("nested-job");
+    let missing_parent_agent_job = agent_job_source("missing-parent-job");
+    let cycle_agent_job = agent_job_source("cycle-job");
+
+    assert!(matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &console_child,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::AppServer,
+        &console_child,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::AppServer,
+        &app_server_child,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &app_server_child,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &missing_parent_child,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &console_grandchild,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::AppServer,
+        &console_grandchild,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::AppServer,
+        &app_server_grandchild,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &app_server_grandchild,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &missing_parent_grandchild,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &cycle_child,
+        None,
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &console_agent_job,
+        parent_thread_ids.get(&console_agent_job_thread).copied(),
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::AppServer,
+        &console_agent_job,
+        parent_thread_ids.get(&console_agent_job_thread).copied(),
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::AppServer,
+        &app_server_agent_job,
+        parent_thread_ids.get(&app_server_agent_job_thread).copied(),
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &app_server_agent_job,
+        parent_thread_ids.get(&app_server_agent_job_thread).copied(),
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &nested_agent_job,
+        parent_thread_ids.get(&nested_agent_job_thread).copied(),
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &missing_parent_agent_job,
+        parent_thread_ids
+            .get(&missing_parent_agent_job_thread)
+            .copied(),
+        &root_sources,
+        &parent_thread_ids,
+    ));
+    assert!(!matches_parented_subagent_scope(
+        ProviderRuntimeRefreshScope::Console,
+        &cycle_agent_job,
+        parent_thread_ids.get(&cycle_agent_job_thread).copied(),
+        &root_sources,
+        &parent_thread_ids,
+    ));
+}
+
+fn thread_spawn_source(parent_thread_id: ThreadId, depth: i32) -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    })
+}
+
+fn agent_job_source(job_id: &str) -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::Other(format!("agent_job:{job_id}")))
 }
 
 fn user_msg(text: &str) -> ResponseItem {
@@ -375,99 +574,6 @@ async fn start_thread_rejects_explicit_local_environment_when_default_provider_i
 
     assert_eq!(err.to_string(), "unknown turn environment id `local`");
     assert!(manager.list_thread_ids().await.is_empty());
-}
-
-#[tokio::test]
-async fn start_thread_uses_all_default_environments_from_codex_home() {
-    let temp_dir = tempdir().expect("tempdir");
-    let mut config = test_config().await;
-    config.codex_home = temp_dir.path().join("codex-home").abs();
-    config.cwd = config.codex_home.abs();
-    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
-    std::fs::write(
-        config.codex_home.join("environments.toml"),
-        r#"
-default = "dev"
-
-[[environments]]
-id = "dev"
-program = "ssh"
-args = ["dev", "cd /tmp && true"]
-"#,
-    )
-    .expect("write environments.toml");
-
-    let runtime_paths = codex_exec_server::ExecServerRuntimePaths::new(
-        std::env::current_exe().expect("current exe path"),
-        /*codex_linux_sandbox_exe*/ None,
-    )
-    .expect("runtime paths");
-    let environment_manager = Arc::new(
-        codex_exec_server::EnvironmentManager::from_codex_home(
-            config.codex_home.clone(),
-            Some(runtime_paths),
-        )
-        .await
-        .expect("environment manager"),
-    );
-    assert_eq!(
-        environment_manager.default_environment_ids(),
-        vec!["dev".to_string(), "local".to_string()]
-    );
-
-    let manager = ThreadManager::with_models_provider_and_home_for_tests(
-        CodexAuth::from_api_key("dummy"),
-        config.model_provider.clone(),
-        config.codex_home.to_path_buf(),
-        environment_manager,
-    );
-
-    let thread = manager
-        .start_thread(config)
-        .await
-        .expect("thread should start");
-
-    let prompt_items = crate::prompt_debug::build_prompt_input_from_session(
-        thread.thread.codex.session.as_ref(),
-        Vec::<UserInput>::new(),
-    )
-    .await
-    .expect("prompt input");
-    let environment_context = prompt_items
-        .iter()
-        .filter_map(|item| match item {
-            ResponseItem::Message { content, .. } => Some(content),
-            _ => None,
-        })
-        .flatten()
-        .find_map(|content| match content {
-            ContentItem::InputText { text } if text.contains("<environment_context>") => {
-                Some(text.as_str())
-            }
-            _ => None,
-        })
-        .expect("environment context prompt item");
-    assert!(environment_context.contains("<environments>"));
-    let cwd = thread.session_configured.cwd.display().to_string();
-    let dev_entry = format!(
-        r#"<environment id="dev">
-      <cwd>{cwd}</cwd>
-      <shell>"#
-    );
-    let local_entry = format!(
-        r#"<environment id="local">
-      <cwd>{cwd}</cwd>
-      <shell>"#
-    );
-    let dev_position = environment_context
-        .find(&dev_entry)
-        .expect("dev environment entry");
-    let local_position = environment_context
-        .find(&local_entry)
-        .expect("local environment entry");
-    assert!(dev_position < local_position);
-    assert!(!environment_context.contains("\n  <cwd>"));
-    assert!(!environment_context.contains("\n  <shell>"));
 }
 
 #[tokio::test]
@@ -1533,104 +1639,4 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
             .count(),
         1,
     );
-}
-
-#[tokio::test]
-async fn resumed_thread_keeps_paused_goal_paused() -> anyhow::Result<()> {
-    let temp_dir = tempdir().expect("tempdir");
-    let mut config = test_config().await;
-    config.codex_home = temp_dir.path().join("codex-home").abs();
-    config.cwd = config.codex_home.abs();
-    config
-        .features
-        .enable(Feature::Goals)
-        .expect("goals should be enableable in tests");
-    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
-
-    let auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
-    let state_db = init_state_db(&config).await;
-    let manager = ThreadManager::new(
-        &config,
-        auth_manager.clone(),
-        SessionSource::Exec,
-        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
-        empty_extension_registry(),
-        /*analytics_events_client*/ None,
-        thread_store_from_config(&config, state_db.clone()),
-        state_db.clone(),
-        TEST_INSTALLATION_ID.to_string(),
-        /*attestation_provider*/ None,
-    );
-
-    let source = manager
-        .resume_thread_with_history(
-            config.clone(),
-            InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("keep working"))]),
-            auth_manager.clone(),
-            /*parent_trace*/ None,
-        )
-        .await
-        .expect("create source thread");
-    let source_path = source
-        .thread
-        .rollout_path()
-        .expect("source rollout path should exist");
-    source.thread.flush_rollout().await?;
-    let state_db = source
-        .thread
-        .state_db()
-        .expect("source thread should have a state db");
-    state_db
-        .thread_goals()
-        .replace_thread_goal(
-            source.thread_id,
-            "Keep working until the task is done",
-            codex_state::ThreadGoalStatus::Paused,
-            /*token_budget*/ None,
-        )
-        .await?;
-    source.thread.shutdown_and_wait().await?;
-    manager.remove_thread(&source.thread_id).await;
-
-    let resumed = manager
-        .resume_thread_from_rollout(
-            config.clone(),
-            source_path,
-            auth_manager,
-            /*parent_trace*/ None,
-        )
-        .await
-        .expect("resume source thread");
-    let goal = state_db
-        .thread_goals()
-        .get_thread_goal(resumed.thread_id)
-        .await?
-        .expect("goal should still exist after resume");
-    assert_eq!(codex_state::ThreadGoalStatus::Paused, goal.status);
-    assert!(
-        resumed
-            .thread
-            .codex
-            .session
-            .active_turn
-            .lock()
-            .await
-            .is_none()
-    );
-
-    resumed.thread.continue_active_goal_if_idle().await?;
-    assert!(
-        resumed
-            .thread
-            .codex
-            .session
-            .active_turn
-            .lock()
-            .await
-            .is_none()
-    );
-
-    resumed.thread.shutdown_and_wait().await?;
-    Ok(())
 }

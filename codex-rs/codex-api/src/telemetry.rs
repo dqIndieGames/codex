@@ -75,6 +75,15 @@ fn responses_request_will_continue_main_chain(endpoint: &str, should_retry: bool
     RequestRetryRoute::from_endpoint(endpoint).is_responses() && should_retry
 }
 
+fn request_retry_interrupted_error(
+    telemetry: Option<&Arc<dyn RequestTelemetry>>,
+) -> TransportError {
+    let reason = telemetry
+        .and_then(|telemetry| telemetry.request_retry_interruption_reason())
+        .unwrap_or_else(|| REQUEST_RETRY_INTERRUPTED.to_string());
+    TransportError::RetryInterrupted(reason)
+}
+
 pub(crate) async fn run_with_request_telemetry<T, F, Fut>(
     policy: RetryPolicy,
     endpoint: &str,
@@ -109,7 +118,7 @@ where
             Ok(_) => false,
             Err(err) => should_retry_request_error(&policy, retry_route, err, attempt),
         };
-        let can_continue_request_retry = !should_retry
+        let can_notify_request_retry = !should_retry
             || telemetry
                 .as_ref()
                 .is_none_or(|telemetry| telemetry.can_continue_request_retry());
@@ -126,19 +135,21 @@ where
             t.on_request(attempt, status, err, start.elapsed(), emit_log_trace);
             if let Some(err) = err
                 && should_retry
-                && can_continue_request_retry
+                && can_notify_request_retry
             {
                 t.on_request_retry(attempt + 1, policy.max_attempts, status, err);
             }
         }
+        let can_continue_request_retry = !should_retry
+            || telemetry
+                .as_ref()
+                .is_none_or(|telemetry| telemetry.can_continue_request_retry());
 
         match result {
             Ok(resp) => return Ok(resp),
             Err(_err) if should_retry => {
                 if !can_continue_request_retry {
-                    return Err(TransportError::RetryInterrupted(
-                        REQUEST_RETRY_INTERRUPTED.to_string(),
-                    ));
+                    return Err(request_retry_interrupted_error(telemetry.as_ref()));
                 }
                 sleep_request_retry_delay(
                     backoff(policy.base_delay, attempt + 1),
@@ -164,9 +175,7 @@ async fn sleep_request_retry_delay(
     let start = Instant::now();
     loop {
         if telemetry.is_some_and(|telemetry| !telemetry.can_continue_request_retry()) {
-            return Err(TransportError::RetryInterrupted(
-                REQUEST_RETRY_INTERRUPTED.to_string(),
-            ));
+            return Err(request_retry_interrupted_error(telemetry));
         }
 
         let elapsed = start.elapsed();

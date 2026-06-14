@@ -538,22 +538,43 @@ async fn apply_provider_runtime_from_effective_provider(
         );
     }
 
+    let mut edits = vec![
+        ConfigEdit {
+            key_path: format!("model_providers.{current_model_provider_id}.base_url"),
+            value: json!(source_base_url),
+            merge_strategy: MergeStrategy::Replace,
+        },
+        ConfigEdit {
+            key_path: format!(
+                "model_providers.{current_model_provider_id}.experimental_bearer_token"
+            ),
+            value: json!(source_experimental_bearer_token),
+            merge_strategy: MergeStrategy::Replace,
+        },
+        ConfigEdit {
+            key_path: "force_service_tier_priority".to_string(),
+            value: json!(effective_config.force_service_tier_priority),
+            merge_strategy: MergeStrategy::Replace,
+        },
+    ];
+    if let Some(service_tier) = effective_config.service_tier.as_ref() {
+        edits.push(ConfigEdit {
+            key_path: "service_tier".to_string(),
+            value: json!(service_tier),
+            merge_strategy: MergeStrategy::Replace,
+        });
+    }
+    edits.push(ConfigEdit {
+        key_path: "features.fast_mode".to_string(),
+        value: json!(effective_config
+            .features
+            .enabled(codex_features::Feature::FastMode)),
+        merge_strategy: MergeStrategy::Replace,
+    });
+
     let write_result = config_api
         .batch_write(ConfigBatchWriteParams {
-            edits: vec![
-                ConfigEdit {
-                    key_path: format!("model_providers.{current_model_provider_id}.base_url"),
-                    value: json!(source_base_url),
-                    merge_strategy: MergeStrategy::Replace,
-                },
-                ConfigEdit {
-                    key_path: format!(
-                        "model_providers.{current_model_provider_id}.experimental_bearer_token"
-                    ),
-                    value: json!(source_experimental_bearer_token),
-                    merge_strategy: MergeStrategy::Replace,
-                },
-            ],
+            edits,
             file_path: None,
             expected_version: Some(user_layer.version.clone()),
             reload_user_config: true,

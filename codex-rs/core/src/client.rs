@@ -45,6 +45,7 @@ use codex_api::RawMemory as ApiRawMemory;
 use codex_api::RealtimeCallClient as ApiRealtimeCallClient;
 use codex_api::RealtimeSessionConfig as ApiRealtimeSessionConfig;
 use codex_api::Reasoning;
+use codex_api::ReasoningContext;
 use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
 use codex_api::ResponseCreateWsRequest;
@@ -102,7 +103,6 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
 use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
@@ -114,8 +114,10 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::feedback_tags;
+use crate::responses_retry::responses_input_requires_previous_response_id;
 use crate::util::emit_feedback_auth_recovery_tags;
 use codex_api::map_api_error;
+use codex_api::map_responses_stream_api_error;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
 use codex_login::auth_env_telemetry::AuthEnvTelemetry;
@@ -146,9 +148,15 @@ pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
     "x-responsesapi-include-timing-metrics";
 const X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str =
     "x-codex-ws-stream-request-start-ms";
+const WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY: &str =
+    "ws_request_header_x_openai_internal_codex_responses_lite";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
+const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
+    "x-openai-internal-codex-responses-lite";
 const RESPONSES_ENDPOINT: &str = "/responses";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
+const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
+const REQUEST_RETRY_ROUTE_RECOVERY_INTERRUPTED: &str = "retry route recovery requested";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.
 const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
@@ -229,6 +237,39 @@ pub(crate) struct RequestRetryEvent {
 
 pub(crate) type RequestRetryNotifier = Arc<dyn Fn(RequestRetryEvent) + Send + Sync>;
 type RequestRetryGuard = Arc<dyn Fn() -> bool + Send + Sync>;
+
+#[derive(Debug, Clone)]
+struct RequestRouteRecovery {
+    allowed: bool,
+    restart_requested: Arc<AtomicBool>,
+    restart_retry_number: Arc<AtomicU64>,
+}
+
+impl RequestRouteRecovery {
+    fn new(allowed: bool) -> Self {
+        Self {
+            allowed,
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            restart_retry_number: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn request_restart(&self, retry_number: u64) {
+        if self.allowed {
+            self.restart_retry_number
+                .store(retry_number, Ordering::Release);
+            self.restart_requested.store(true, Ordering::Release);
+        }
+    }
+
+    fn restart_requested(&self) -> bool {
+        self.restart_requested.load(Ordering::Acquire)
+    }
+
+    fn restart_retry_number(&self) -> u64 {
+        self.restart_retry_number.load(Ordering::Acquire)
+    }
+}
 
 /// A session-scoped client for model-provider API calls.
 ///
@@ -786,6 +827,7 @@ impl ModelClient {
                 reasoning: effort.map(|effort| Reasoning {
                     effort: Some(effort),
                     summary: None,
+                    context: None,
                 }),
             };
 
@@ -840,6 +882,7 @@ impl ModelClient {
     fn build_ws_client_metadata(
         &self,
         turn_metadata_header: Option<&str>,
+        use_responses_lite: bool,
     ) -> HashMap<String, String> {
         let mut client_metadata = HashMap::new();
         client_metadata.insert(
@@ -865,6 +908,12 @@ impl ModelClient {
             client_metadata.insert(
                 X_CODEX_TURN_METADATA_HEADER.to_string(),
                 turn_metadata.to_string(),
+            );
+        }
+        if use_responses_lite {
+            client_metadata.insert(
+                WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY.to_string(),
+                "true".to_string(),
             );
         }
         client_metadata
@@ -899,6 +948,7 @@ impl ModelClient {
             auth_env_telemetry,
             None,
             request_retry_guard,
+            None,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry;
         request_telemetry
@@ -911,12 +961,17 @@ impl ModelClient {
     ) -> Option<Reasoning> {
         if model_info.supports_reasoning_summaries {
             Some(Reasoning {
-                effort: effort.or(model_info.default_reasoning_level),
+                effort: effort.or_else(|| model_info.default_reasoning_level.clone()),
                 summary: if summary == ReasoningSummaryConfig::None {
                     None
                 } else {
                     Some(summary)
                 },
+                // When Responses Lite is disabled, omit context so Responses uses the default,
+                // which is currently `current_turn`.
+                context: model_info
+                    .use_responses_lite
+                    .then_some(ReasoningContext::AllTurns),
             })
         } else {
             None
@@ -974,7 +1029,7 @@ impl ModelClient {
             input,
             tools,
             tool_choice: "auto".to_string(),
-            parallel_tool_calls: prompt.parallel_tool_calls,
+            parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
             reasoning,
             store: provider.is_azure_responses_endpoint(),
             stream: true,
@@ -982,10 +1037,16 @@ impl ModelClient {
             service_tier,
             prompt_cache_key,
             text,
-            client_metadata: Some(HashMap::from([(
-                X_CODEX_INSTALLATION_ID_HEADER.to_string(),
-                self.state.installation_id.clone(),
-            )])),
+            client_metadata: Some(HashMap::from([
+                (
+                    X_CODEX_INSTALLATION_ID_HEADER.to_string(),
+                    self.state.installation_id.clone(),
+                ),
+                (
+                    X_CODEX_WINDOW_ID_HEADER.to_string(),
+                    self.current_window_id(),
+                ),
+            ])),
         };
         Ok(request)
     }
@@ -1252,6 +1313,7 @@ impl ModelClientSession {
         &self,
         turn_metadata_header: Option<&str>,
         compression: Compression,
+        use_responses_lite: bool,
     ) -> ApiResponsesOptions {
         let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
         let session_id = self.client.state.session_id.to_string();
@@ -1270,6 +1332,7 @@ impl ModelClientSession {
                 if let Some(header_value) = self.client.generate_attestation_header_for().await {
                     headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
                 }
+                add_responses_lite_header(&mut headers, use_responses_lite);
                 headers
             },
             compression,
@@ -1525,14 +1588,41 @@ impl ModelClientSession {
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
         let mut pending_retry = PendingUnauthorizedRetry::default();
+        let mut request_route_retry_count_consumed = 0;
         loop {
             let client_setup = self.client.current_client_setup().await?;
             self.sync_provider_runtime_generation(client_setup.provider_runtime_generation);
+            let mut api_provider = client_setup.api_provider;
+            api_provider.retry.max_attempts = api_provider
+                .retry
+                .max_attempts
+                .saturating_sub(request_route_retry_count_consumed);
             let transport = ReqwestTransport::new(build_reqwest_client());
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
                 pending_retry,
+            );
+            let compression = self.responses_request_compression(client_setup.auth.as_ref());
+            let mut options = self
+                .build_responses_options(
+                    turn_metadata_header,
+                    compression,
+                    model_info.use_responses_lite,
+                )
+                .await;
+
+            let request = self.client.build_responses_request(
+                &api_provider,
+                prompt,
+                model_info,
+                effort.clone(),
+                summary,
+                service_tier.clone(),
+                self.route_recovery_generation,
+            )?;
+            let request_route_recovery = RequestRouteRecovery::new(
+                !responses_input_requires_previous_response_id(&request.input),
             );
             let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
                 session_telemetry,
@@ -1541,27 +1631,14 @@ impl ModelClientSession {
                 self.client.state.auth_env_telemetry.clone(),
                 self.request_retry_notifier.clone(),
                 Some(self.request_retry_guard(client_setup.provider_runtime_generation)),
+                Some(request_route_recovery.clone()),
             );
-            let compression = self.responses_request_compression(client_setup.auth.as_ref());
-            let mut options = self
-                .build_responses_options(turn_metadata_header, compression)
-                .await;
-
-            let request = self.client.build_responses_request(
-                &client_setup.api_provider,
-                prompt,
-                model_info,
-                effort,
-                summary,
-                service_tier.clone(),
-                self.route_recovery_generation,
-            )?;
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
             inference_trace_attempt.record_started(&request);
             let client = ApiResponsesClient::new(
                 transport,
-                client_setup.api_provider,
+                api_provider,
                 client_setup.api_auth,
             )
             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
@@ -1606,6 +1683,21 @@ impl ModelClientSession {
                         /*upstream_request_id*/ None,
                         &[],
                     );
+                    pending_retry = PendingUnauthorizedRetry::default();
+                    request_route_retry_count_consumed = 0;
+                    continue;
+                }
+                Err(ApiError::Transport(TransportError::RetryInterrupted(reason)))
+                    if request_route_recovery.restart_requested() => {
+                    inference_trace_attempt.record_cancelled(
+                        reason,
+                        /*upstream_request_id*/ None,
+                        &[],
+                    );
+                    request_route_retry_count_consumed =
+                        request_route_retry_count_consumed
+                            .saturating_add(request_route_recovery.restart_retry_number());
+                    self.activate_retry_route_recovery();
                     pending_retry = PendingUnauthorizedRetry::default();
                     continue;
                 }
@@ -1669,20 +1761,27 @@ impl ModelClientSession {
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
 
             let options = self
-                .build_responses_options(turn_metadata_header, compression)
+                .build_responses_options(
+                    turn_metadata_header,
+                    compression,
+                    model_info.use_responses_lite,
+                )
                 .await;
             let request = self.client.build_responses_request(
                 &client_setup.api_provider,
                 prompt,
                 model_info,
-                effort,
+                effort.clone(),
                 summary,
                 service_tier.clone(),
                 self.route_recovery_generation,
             )?;
             let mut ws_payload = ResponseCreateWsRequest {
                 client_metadata: response_create_client_metadata(
-                    Some(self.client.build_ws_client_metadata(turn_metadata_header)),
+                    Some(self.client.build_ws_client_metadata(
+                        turn_metadata_header,
+                        model_info.use_responses_lite,
+                    )),
                     request_trace.as_ref(),
                 ),
                 ..ResponseCreateWsRequest::from(&request)
@@ -1735,7 +1834,7 @@ impl ModelClientSession {
                             );
                             continue;
                         }
-                        err => return Err(map_api_error(err)),
+                        err => return Err(map_responses_stream_api_error(err)),
                     }
                 }
             }
@@ -1804,6 +1903,7 @@ impl ModelClientSession {
         auth_env_telemetry: AuthEnvTelemetry,
         request_retry_notifier: Option<RequestRetryNotifier>,
         request_retry_guard: Option<RequestRetryGuard>,
+        request_route_recovery: Option<RequestRouteRecovery>,
     ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
         let telemetry = Arc::new(ApiTelemetry::new(
             session_telemetry.clone(),
@@ -1812,6 +1912,7 @@ impl ModelClientSession {
             auth_env_telemetry,
             request_retry_notifier,
             request_retry_guard,
+            request_route_recovery,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry.clone();
         let sse_telemetry: Arc<dyn SseTelemetry> = telemetry;
@@ -1830,6 +1931,7 @@ impl ModelClientSession {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            None,
             None,
             None,
         ));
@@ -1920,7 +2022,7 @@ impl ModelClientSession {
                             prompt,
                             model_info,
                             session_telemetry,
-                            effort,
+                            effort.clone(),
                             summary,
                             service_tier.clone(),
                             turn_metadata_header,
@@ -1984,9 +2086,7 @@ fn parse_turn_metadata_header(turn_metadata_header: Option<&str>) -> Option<Head
 /// Meant to be called just before sending the request over the socket, to capture realistic
 /// transport timing.
 fn stamp_ws_stream_request_start_ms(request: &mut ResponsesWsRequest) {
-    let ResponsesWsRequest::ResponseCreate(payload) = request else {
-        return;
-    };
+    let ResponsesWsRequest::ResponseCreate(payload) = request;
     payload
         .client_metadata
         .get_or_insert_with(HashMap::new)
@@ -2025,6 +2125,15 @@ fn build_responses_headers(
         headers.insert(X_CODEX_TURN_METADATA_HEADER, header_value.clone());
     }
     headers
+}
+
+fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: bool) {
+    if use_responses_lite {
+        headers.insert(
+            X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER,
+            HeaderValue::from_static("true"),
+        );
+    }
 }
 
 fn subagent_header_value(session_source: &SessionSource) -> Option<String> {
@@ -2289,9 +2398,10 @@ impl AuthRequestTelemetryContext {
         Self {
             auth_mode: auth_mode.map(|mode| match mode {
                 AuthMode::ApiKey => "ApiKey",
-                AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens | AuthMode::AgentIdentity => {
-                    "Chatgpt"
-                }
+                AuthMode::Chatgpt
+                | AuthMode::ChatgptAuthTokens
+                | AuthMode::AgentIdentity
+                | AuthMode::PersonalAccessToken => "Chatgpt",
             }),
             auth_header_attached: auth_telemetry.attached,
             auth_header_name: auth_telemetry.name,
@@ -2435,6 +2545,15 @@ fn api_error_http_status(error: &ApiError) -> Option<u16> {
     }
 }
 
+fn request_retry_status_allows_route_recovery(status: Option<HttpStatusCode>) -> bool {
+    matches!(
+        status,
+        Some(HttpStatusCode::BAD_GATEWAY)
+            | Some(HttpStatusCode::SERVICE_UNAVAILABLE)
+            | Some(HttpStatusCode::GATEWAY_TIMEOUT)
+    )
+}
+
 struct ApiTelemetry {
     session_telemetry: SessionTelemetry,
     auth_context: AuthRequestTelemetryContext,
@@ -2442,6 +2561,7 @@ struct ApiTelemetry {
     auth_env_telemetry: AuthEnvTelemetry,
     request_retry_notifier: Option<RequestRetryNotifier>,
     request_retry_guard: Option<RequestRetryGuard>,
+    request_route_recovery: Option<RequestRouteRecovery>,
 }
 
 impl ApiTelemetry {
@@ -2452,6 +2572,7 @@ impl ApiTelemetry {
         auth_env_telemetry: AuthEnvTelemetry,
         request_retry_notifier: Option<RequestRetryNotifier>,
         request_retry_guard: Option<RequestRetryGuard>,
+        request_route_recovery: Option<RequestRouteRecovery>,
     ) -> Self {
         Self {
             session_telemetry,
@@ -2460,6 +2581,7 @@ impl ApiTelemetry {
             auth_env_telemetry,
             request_retry_notifier,
             request_retry_guard,
+            request_route_recovery,
         }
     }
 }
@@ -2530,6 +2652,14 @@ impl RequestTelemetry for ApiTelemetry {
         status: Option<HttpStatusCode>,
         error: &TransportError,
     ) {
+        if self.request_route_telemetry.endpoint == RESPONSES_ENDPOINT
+            && retry_number >= ROUTE_RECOVERY_RETRY_THRESHOLD
+            && request_retry_status_allows_route_recovery(status)
+            && let Some(route_recovery) = self.request_route_recovery.as_ref()
+        {
+            route_recovery.request_restart(retry_number);
+        }
+
         if let Some(notifier) = self.request_retry_notifier.as_ref() {
             notifier(RequestRetryEvent {
                 retry_number,
@@ -2541,9 +2671,21 @@ impl RequestTelemetry for ApiTelemetry {
     }
 
     fn can_continue_request_retry(&self) -> bool {
-        self.request_retry_guard
+        !self
+            .request_route_recovery
             .as_ref()
-            .is_none_or(|guard| guard())
+            .is_some_and(RequestRouteRecovery::restart_requested)
+            && self
+                .request_retry_guard
+                .as_ref()
+                .is_none_or(|guard| guard())
+    }
+
+    fn request_retry_interruption_reason(&self) -> Option<String> {
+        self.request_route_recovery
+            .as_ref()
+            .filter(|route_recovery| route_recovery.restart_requested())
+            .map(|_| REQUEST_RETRY_ROUTE_RECOVERY_INTERRUPTED.to_string())
     }
 }
 

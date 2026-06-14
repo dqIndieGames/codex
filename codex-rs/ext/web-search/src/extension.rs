@@ -16,7 +16,6 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolContributor;
-use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::config_types::WebSearchContextSize;
@@ -31,7 +30,7 @@ struct WebSearchExtension {
 
 #[derive(Clone)]
 pub(crate) struct WebSearchExtensionConfig {
-    enabled: bool,
+    available: bool,
     pub(crate) provider: ModelProviderInfo,
     pub(crate) settings: SearchSettings,
 }
@@ -83,8 +82,8 @@ impl From<&Config> for WebSearchExtensionConfig {
     fn from(config: &Config) -> Self {
         let web_search_mode = config.web_search_mode.value();
         Self {
-            enabled: config.features.enabled(Feature::StandaloneWebSearch)
-                && config.model_provider.is_openai()
+            // Core selects this executor per turn using the feature flag or model metadata.
+            available: config.model_provider.is_openai()
                 && web_search_mode != WebSearchMode::Disabled,
             provider: config.model_provider.clone(),
             settings: search_settings(config, web_search_mode),
@@ -166,7 +165,7 @@ impl ToolContributor for WebSearchExtension {
         };
         let snapshot = runtime.snapshot();
         let config = snapshot.config;
-        if !config.enabled {
+        if !config.available {
             return Vec::new();
         }
 
@@ -214,7 +213,7 @@ mod tests {
         thread_store.insert(WebSearchExtensionRuntime::new(
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
             WebSearchExtensionConfig {
-                enabled: true,
+                available: true,
                 provider: ModelProviderInfo::create_openai_provider(/*base_url*/ None),
                 settings: Default::default(),
             },

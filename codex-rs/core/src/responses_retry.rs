@@ -8,12 +8,24 @@ use crate::session::turn_context::TurnContext;
 use crate::util::backoff;
 use crate::util::cap_retry_delay;
 use codex_protocol::error::CodexErr;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
 use tracing::warn;
 
 const STREAM_RETRY_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
+
+pub(crate) fn responses_input_requires_previous_response_id(input: &[ResponseItem]) -> bool {
+    input.iter().any(|item| {
+        matches!(
+            item,
+            ResponseItem::FunctionCallOutput { .. }
+                | ResponseItem::CustomToolCallOutput { .. }
+                | ResponseItem::LocalShellCall { .. }
+        )
+    })
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -32,6 +44,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
     sess: &Session,
     turn_context: &TurnContext,
     request: ResponsesStreamRequest,
+    allow_route_recovery: bool,
 ) -> Result<(), CodexErr> {
     if client_session.provider_runtime_changed() {
         *retries = 0;
@@ -59,7 +72,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
     if retry_budget.is_none_or(|max_retries| *retries < max_retries) {
         *retries += 1;
         let retry_count = *retries;
-        if retry_count >= ROUTE_RECOVERY_RETRY_THRESHOLD {
+        if allow_route_recovery && retry_count >= ROUTE_RECOVERY_RETRY_THRESHOLD {
             client_session.activate_retry_route_recovery();
         }
         let display_max_retries = retry_budget.unwrap_or(u64::MAX);

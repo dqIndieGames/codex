@@ -17,11 +17,11 @@
 
 8. 默认开启不影响使用的批量优化，并保留即时反馈和历史安全；原来 rollout 批量 flush 与 app-server 高频通知合并默认关闭，修改后这些优化可以默认开启，但前提是输出节奏、token usage、diff/plan 更新、命令完成状态和崩溃恢复与未开启优化时保持用户可感知等价，同时必须保留显式关闭开关；这样用户默认获得更低 I/O 和更少客户端负担，但仍能看到及时刷新和可靠历史。
 
-9. Provider refresh 的刷新范围扩大到所有正在使用的 Codex 入口，并覆盖会影响路由和速度的关键 provider 字段；原来 provider runtime 刷新只要求覆盖 `base_url` 与 `experimental_bearer_token` 两个字段，刷新结果可能只影响部分 live instance，修改后 `base_url`、`experimental_bearer_token`、`force_service_tier_priority` 与 fast mode 相关有效配置都必须对所有 app server、已经打开的 Codex 窗口/会话、以及 `codex exec` 尽可能更快生效，Windows tray 从 source provider 复制字段到当前 target provider 后也要触发同一刷新口径；这样用户换 URL、token、优先服务层或 fast 开关后，不同入口不会继续拿旧地址、旧 token 或旧速度/服务层策略发请求。
+9. Provider refresh 的刷新范围扩大到所有正在使用的 Codex 入口，并覆盖会影响路由和速度的关键 provider 字段；原来 provider runtime 刷新只要求覆盖 `base_url` 与 `experimental_bearer_token` 两个字段，刷新结果可能只影响部分 live instance，修改后 `base_url`、`experimental_bearer_token`、`force_service_tier_priority` 与 fast mode 相关有效配置都必须对所有 app server、已经打开的 Codex 窗口/会话、`codex exec`、已打开和后续新开的 subagent、以及 agent_jobs 批量子任务尽可能更快生效，Windows tray 从 source provider 复制字段到当前 target provider 后也要触发同一刷新口径；这样用户换 URL、token、优先服务层或 fast 开关后，不同入口不会继续拿旧地址、旧 token 或旧速度/服务层策略发请求。
 
 10. Provider refresh 不是只在 retry 时才生效，而是配置变化后面向所有 live runtime 的通用刷新能力；原来 refresh 容易被理解成“请求失败后的补救动作”，修改后只要 provider 有效配置发生变化，就应尽快刷新已加载线程、app-server runtime、console/exec runtime 和正在等待下一次请求的会话，即使当前没有 retry、没有报错、没有正在流式输出，也应让下一次请求使用新 provider 状态；这样用户主动切换 provider 参数后，不必靠失败重试或新开对话才能看到新配置。
 
-11. 连续 stream/WebSocket 断流后的恢复重点不是“3 次后断开”，而是“3 次失败后才启动 hard route recovery”：前 2 次只做普通重试，不重置 WebSocket session、不旋转 `prompt_cache_key`、不主动丢 `previous_response_id`；第 3 次可重试的 SSE/WebSocket 未完成断流后才进入 route recovery，`prompt_cache_key` 从默认 thread id 派生为带 recovery generation 的新值，同时重置 WebSocket session，使下一次普通全量重放不携带旧 `previous_response_id`；必要时继续走 fallback transport，但不修改真实 thread id、session id 或用户提示词。这样用户遇到“Reconnecting... N (unbounded) / stream closed before response.completed”时，下一轮 retry 有机会换掉有问题的中转粘连，而不是只能新开对话或派生线程。
+11. 所有 Codex retry 入口都要接入 hard route recovery，但只有连续第 3 次可重试路由失败后才启动：前 2 次只做普通重试，不重置 WebSocket session、不旋转 `prompt_cache_key`、不主动丢 `previous_response_id`；第 3 次起，HTTP 503/502/504、SSE/WebSocket 未完成断流、WebSocket handshake 失败和 `codex exec`、subagent、agent_jobs 等入口都应使用同一恢复口径，将 `prompt_cache_key` 从默认 thread id 派生为带 recovery generation 的新值，同时重置 WebSocket session，使下一次普通全量重放不携带旧 `previous_response_id`；必要时继续走 fallback transport，但不修改真实 thread id、session id 或用户提示词，且 `function_call_output` 等必须续接旧响应链的请求不能强行丢 `previous_response_id`。这样用户遇到“503 retry N (unbounded) / Reconnecting... N (unbounded) / stream closed before response.completed”时，下一轮 retry 有机会换掉有问题的中转账号粘连，而不是只能新开对话或派生线程。
 
 12. 无 live instance 的 provider 字段复制仍视为成功，并给出明确反馈；原来没有可刷新实例时可能让用户误以为字段写入失败，修改后只要 provider 字段写入成功，即使没有任何正在运行的实例，也反馈“未刷新任何实例”，这样用户能区分“配置已保存”和“当前没有可通知的运行入口”。
 
@@ -67,7 +67,7 @@
 - 更新到官方 `rust-v0.136.0` 时不能只合版本号；local3 清单、显示版本、历史跨 provider、日志降噪、node_repl 继承和 runtime 清理都要按用户可见结果逐项复核。
 - Provider refresh 必须能打断所有正在进行的 retry：HTTP 503/429/402、无界 503、网络失败、SSE 断流/空闲、WebSocket 503/426/401 都要验证旧 endpoint/token 不再继续增长，并切到新 endpoint/token。
 - Provider refresh 的覆盖字段必须包含 `base_url`、`experimental_bearer_token`、`force_service_tier_priority` 和 fast mode 有效配置；refresh 触发也不能依赖 retry，用户主动改配置后所有 live runtime 都应尽快刷新。
-- stream/WebSocket 连续断流的补救核心是 sticky-break：第 3 次 retryable stream failure 后旋转 `prompt_cache_key`，WebSocket recovery 请求清掉 `previous_response_id`；禁止把真实 thread id/session id 改掉，也不要通过改用户 prompt 来“换内容”。
+- retry 粘连故障的补救核心是 sticky-break：所有 Codex retry 入口都要覆盖，但只在第 3 次连续可重试路由失败后旋转 `prompt_cache_key`，并让可全量重放的 recovery 请求清掉旧 `previous_response_id`；禁止把真实 thread id/session id 改掉，也不要通过改用户 prompt 来“换内容”，`function_call_output` 等必须续链场景不得强行丢续接 ID。
 - 用户报告的 `503 retry N (unbounded)` 必须单独建无界场景覆盖；不写 `request_max_retries` 才是 release exe 的正式无界 retry 口径，不能只用有界 retry 代替。
 - 分开刷新要保留旧的全刷，同时新增 `console` 与 `appServer` scope；动态验收至少要证明 `appServer` 能刷新 Windows App app-server thread，`console` 不误刷 app-server thread。
 - GitHub CLI 查询和触发必须显式带 `--repo dqIndieGames/codex`；否则可能落到 `openai/codex`，导致 run/release 证据查错仓库。

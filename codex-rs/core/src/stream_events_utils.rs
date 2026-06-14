@@ -121,7 +121,8 @@ pub(crate) fn prepend_text_to_assistant_response_item(
     false
 }
 
-pub(crate) fn image_generation_artifact_path(
+/// Returns the host-owned default artifact path for a generated image.
+pub fn image_generation_artifact_path(
     codex_home: &AbsolutePathBuf,
     session_id: &str,
     call_id: &str,

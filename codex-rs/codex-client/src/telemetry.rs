@@ -39,4 +39,8 @@ pub trait RequestTelemetry: Send + Sync {
     fn can_continue_request_retry(&self) -> bool {
         true
     }
+
+    fn request_retry_interruption_reason(&self) -> Option<String> {
+        None
+    }
 }

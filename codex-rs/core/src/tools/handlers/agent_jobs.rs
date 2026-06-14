@@ -1,13 +1,13 @@
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::status::is_final;
-use crate::config::Config;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
-use crate::tools::handlers::multi_agents::build_agent_spawn_config;
+use crate::tools::handlers::multi_agents::build_latest_agent_spawn_config;
 use crate::tools::handlers::parse_arguments;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
@@ -87,7 +87,7 @@ struct ReportAgentJobResultToolResult {
 #[derive(Debug, Clone)]
 struct JobRunnerOptions {
     max_concurrency: usize,
-    spawn_config: Config,
+    base_instructions: BaseInstructions,
 }
 
 #[derive(Debug, Clone)]
@@ -116,10 +116,7 @@ async fn build_runner_options(
             "multi-agent runtime is disabled; this session cannot spawn workers".to_string(),
         ));
     }
-    let agent_max_threads = turn
-        .config
-        .effective_agent_max_threads(multi_agent_version)
-        .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+    let agent_max_threads = turn.config.effective_agent_max_threads(multi_agent_version);
     if agent_max_threads == Some(0) {
         return Err(FunctionCallError::RespondToModel(
             "agent thread limit reached; this session cannot spawn more subagents".to_string(),
@@ -127,10 +124,9 @@ async fn build_runner_options(
     }
     let max_concurrency = normalize_concurrency(requested_concurrency, agent_max_threads);
     let base_instructions = session.get_base_instructions().await;
-    let spawn_config = build_agent_spawn_config(&base_instructions, turn.as_ref())?;
     Ok(JobRunnerOptions {
         max_concurrency,
-        spawn_config,
+        base_instructions,
     })
 }
 
@@ -205,7 +201,12 @@ async fn run_agent_job_loop(
                     .services
                     .agent_control
                     .spawn_agent_with_metadata(
-                        options.spawn_config.clone(),
+                        build_latest_agent_spawn_config(
+                            &session,
+                            &options.base_instructions,
+                            turn.as_ref(),
+                        )
+                        .await?,
                         items.into(),
                         Some(SessionSource::SubAgent(SubAgentSource::Other(format!(
                             "agent_job:{job_id}"

@@ -175,6 +175,11 @@ impl ProviderRuntimeRefreshScope {
     fn matches_session_source(self, session_source: &SessionSource) -> bool {
         match self {
             Self::All => true,
+            Self::Console | Self::AppServer
+                if matches!(
+                    session_source,
+                    SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+                ) => false,
             Self::Console => matches!(
                 session_source,
                 SessionSource::Cli | SessionSource::Exec | SessionSource::Custom(_)
@@ -182,6 +187,69 @@ impl ProviderRuntimeRefreshScope {
             Self::AppServer => matches!(session_source, SessionSource::VSCode | SessionSource::Mcp),
         }
     }
+
+    fn matches_root_session_source(self, session_source: &SessionSource) -> bool {
+        match self {
+            Self::All => true,
+            Self::Console => matches!(
+                session_source,
+                SessionSource::Cli | SessionSource::Exec | SessionSource::Custom(_)
+            ),
+            Self::AppServer => matches!(session_source, SessionSource::VSCode | SessionSource::Mcp),
+        }
+    }
+}
+
+fn matches_parent_thread_scope(
+    scope: ProviderRuntimeRefreshScope,
+    current_parent_thread_id: ThreadId,
+    root_sources: &HashMap<ThreadId, SessionSource>,
+    parent_thread_ids: &HashMap<ThreadId, ThreadId>,
+) -> bool {
+    let mut current_parent_thread_id = current_parent_thread_id;
+    let mut visited_thread_ids = HashSet::new();
+    loop {
+        if !visited_thread_ids.insert(current_parent_thread_id) {
+            return false;
+        }
+        let Some(source) = root_sources.get(&current_parent_thread_id) else {
+            return false;
+        };
+        match source {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            }) => current_parent_thread_id = *parent_thread_id,
+            SessionSource::SubAgent(SubAgentSource::Other(source)) if source.starts_with("agent_job:") => {
+                let Some(parent_thread_id) = parent_thread_ids.get(&current_parent_thread_id)
+                else {
+                    return false;
+                };
+                current_parent_thread_id = *parent_thread_id;
+            }
+            source => return scope.matches_root_session_source(source),
+        }
+    }
+}
+
+fn matches_parented_subagent_scope(
+    scope: ProviderRuntimeRefreshScope,
+    session_source: &SessionSource,
+    session_parent_thread_id: Option<ThreadId>,
+    root_sources: &HashMap<ThreadId, SessionSource>,
+    parent_thread_ids: &HashMap<ThreadId, ThreadId>,
+) -> bool {
+    let current_parent_thread_id = match session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        }) => Some(*parent_thread_id),
+        SessionSource::SubAgent(SubAgentSource::Other(source)) if source.starts_with("agent_job:") => {
+            session_parent_thread_id
+        }
+        _ => None,
+    };
+    current_parent_thread_id.is_some_and(|parent_thread_id| {
+        matches_parent_thread_scope(scope, parent_thread_id, root_sources, parent_thread_ids)
+    })
 }
 
 enum ShutdownOutcome {
@@ -516,15 +584,36 @@ impl ThreadManager {
         &self,
         scope: ProviderRuntimeRefreshScope,
     ) -> ProviderRuntimeRefreshAllLoadedReport {
-        let threads = self
-            .state
-            .threads
-            .read()
-            .await
-            .iter()
-            .filter(|(_, thread)| scope.matches_session_source(&thread.session_source))
-            .map(|(thread_id, thread)| (*thread_id, Arc::clone(thread)))
-            .collect::<Vec<_>>();
+        let threads = {
+            let tracked_threads = self.state.threads.read().await;
+            let root_sources = tracked_threads
+                .iter()
+                .map(|(thread_id, thread)| (*thread_id, thread.session_source.clone()))
+                .collect::<HashMap<_, _>>();
+            let parent_thread_ids = tracked_threads
+                .iter()
+                .filter_map(|(thread_id, thread)| {
+                    thread
+                        .session_configured()
+                        .parent_thread_id
+                        .map(|parent_thread_id| (*thread_id, parent_thread_id))
+                })
+                .collect::<HashMap<_, _>>();
+            tracked_threads
+                .iter()
+                .filter(|(thread_id, thread)| {
+                    scope.matches_session_source(&thread.session_source)
+                        || matches_parented_subagent_scope(
+                            scope,
+                            &thread.session_source,
+                            parent_thread_ids.get(thread_id).copied(),
+                            &root_sources,
+                            &parent_thread_ids,
+                        )
+                })
+                .map(|(thread_id, thread)| (*thread_id, Arc::clone(thread)))
+                .collect::<Vec<_>>()
+        };
 
         let mut report = ProviderRuntimeRefreshAllLoadedReport {
             total_threads: threads.len(),
@@ -1434,9 +1523,6 @@ impl ThreadManagerState {
             .await?;
         if is_resumed_thread {
             new_thread.thread.emit_thread_resume_lifecycle().await;
-            if let Err(err) = new_thread.thread.apply_goal_resume_runtime_effects().await {
-                warn!("failed to apply goal resume runtime effects: {err}");
-            }
         }
         Ok(new_thread)
     }

@@ -16,6 +16,7 @@ use crate::app_event::RealtimeAudioDeviceKind;
 #[cfg(target_os = "windows")]
 use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_event_sender::AppEventSender;
+use crate::app_server_session::AppServerBootstrap;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::AppServerStartedThread;
 use crate::app_server_session::TurnPermissionsOverride;
@@ -128,6 +129,7 @@ use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnError as AppServerTurnError;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WriteStatus;
+use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::LoaderOverrides;
 use codex_config::types::ApprovalsReviewer;
@@ -488,6 +490,7 @@ pub(crate) struct App {
     cli_kv_overrides: Vec<(String, TomlValue)>,
     harness_overrides: ConfigOverrides,
     loader_overrides: LoaderOverrides,
+    cloud_config_bundle: CloudConfigBundleLoader,
     runtime_approval_policy_override: Option<AskForApproval>,
     runtime_permission_profile_override: Option<RuntimePermissionProfileOverride>,
 
@@ -511,6 +514,8 @@ pub(crate) struct App {
     status_line_invalid_items_warned: Arc<AtomicBool>,
     // Shared across ChatWidget instances so invalid terminal-title config warnings only emit once.
     terminal_title_invalid_items_warned: Arc<AtomicBool>,
+    // Tracks active skill-load warnings so refreshes do not duplicate history cells.
+    skill_load_warnings: SkillLoadWarningState,
 
     // Esc-backtracking state grouped
     pub(crate) backtrack: crate::app_backtrack::BacktrackState,
@@ -716,6 +721,7 @@ impl App {
         cli_kv_overrides: Vec<(String, TomlValue)>,
         harness_overrides: ConfigOverrides,
         loader_overrides: LoaderOverrides,
+        cloud_config_bundle: CloudConfigBundleLoader,
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         session_selection: SessionSelection,
@@ -726,6 +732,8 @@ impl App {
         app_server_target: AppServerTarget,
         state_db: Option<StateDbHandle>,
         environment_manager: Arc<EnvironmentManager>,
+        startup_elapsed_before_app: Duration,
+        startup_bootstrap: Option<AppServerBootstrap>,
         startup_hooks_browser: Option<HooksListEntry>,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
@@ -748,6 +756,7 @@ impl App {
                 &mut config,
                 &cli_kv_overrides,
                 &harness_overrides,
+                &cloud_config_bundle,
                 entered_trust_nux,
             )
             .await?;
@@ -773,9 +782,11 @@ impl App {
                 });
             }
         };
-        let bootstrap_started_at = Instant::now();
-        let bootstrap = app_server.bootstrap(&config).await?;
-        let bootstrap_ms = bootstrap_started_at.elapsed().as_millis();
+        let bootstrap = match startup_bootstrap {
+            Some(bootstrap) => bootstrap,
+            None => app_server.bootstrap(&config).await?,
+        };
+        let bootstrap_ms = bootstrap.duration.as_millis();
         let mut model = bootstrap.default_model;
         let available_models = bootstrap.available_models;
         let remote_connection = crate::status::remote_connection::remote_connection_status_value(
@@ -995,6 +1006,7 @@ See the Codex keymap documentation for supported actions and examples."
             cli_kv_overrides,
             harness_overrides,
             loader_overrides,
+            cloud_config_bundle,
             runtime_approval_policy_override: None,
             runtime_permission_profile_override: None,
             file_search,
@@ -1009,6 +1021,7 @@ See the Codex keymap documentation for supported actions and examples."
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
             terminal_title_invalid_items_warned: terminal_title_invalid_items_warned.clone(),
+            skill_load_warnings: SkillLoadWarningState::default(),
             backtrack: BacktrackState::default(),
             backtrack_render_pending: false,
             feedback: feedback.clone(),
@@ -1084,7 +1097,7 @@ See the Codex keymap documentation for supported actions and examples."
 
         tui.frame_requester().schedule_frame();
         tracing::info!(
-            duration_ms = %startup_started_at.elapsed().as_millis(),
+            duration_ms = %(startup_elapsed_before_app + startup_started_at.elapsed()).as_millis(),
             bootstrap_ms = %bootstrap_ms,
             runtime_model_provider_ms = %runtime_model_provider_ms,
             thread_and_widget_ms = %thread_and_widget_ms,

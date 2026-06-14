@@ -40,6 +40,7 @@ use crate::realtime_conversation::handle_text as handle_realtime_conversation_te
 use crate::render_skills_section;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
+use crate::responses_retry::responses_input_requires_previous_response_id;
 use crate::rollout::session_index;
 use crate::skills_load_input_from_config;
 use crate::stream_events_utils::HandleOutputCtx;
@@ -6672,6 +6673,7 @@ async fn run_sampling_request(
             &sess,
             &turn_context,
             ResponsesStreamRequest::Sampling,
+            !responses_input_requires_previous_response_id(&prompt.input),
         )
         .await?;
     }

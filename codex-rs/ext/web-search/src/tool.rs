@@ -31,7 +31,7 @@ use url::Url;
 
 use crate::extension::WebSearchExtensionRuntime;
 use crate::history::recent_input;
-use crate::output::EncryptedSearchOutput;
+use crate::output::SearchOutput;
 use crate::schema::commands_schema;
 
 pub(crate) const WEB_NAMESPACE: &str = "web";
@@ -92,7 +92,7 @@ impl ToolExecutor<ToolCall> for WebSearchTool {
     }
 
     fn exposure(&self) -> ToolExposure {
-        ToolExposure::DirectModelOnly
+        ToolExposure::Direct
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
@@ -150,9 +150,7 @@ impl ToolExecutor<ToolCall> for WebSearchTool {
             .emit_completed(web_search_item(&call.call_id, command_action))
             .await;
 
-        Ok(Box::new(EncryptedSearchOutput::new(
-            response.encrypted_output,
-        )))
+        Ok(Box::new(SearchOutput::new(response.output)))
     }
 }
 
