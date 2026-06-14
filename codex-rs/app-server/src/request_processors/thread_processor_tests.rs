@@ -709,8 +709,66 @@ mod thread_processor_behavior_tests {
         };
 
         assert_eq!(
-            collect_resume_override_mismatches(&request, &config_snapshot),
+            collect_resume_override_mismatches(&request, &config_snapshot, Some("openai")),
             vec!["service_tier requested=Some(\"priority\") active=Some(\"flex\")".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_resume_override_mismatches_uses_current_provider_when_request_omits_provider() {
+        let cwd = test_path_buf("/tmp").abs();
+        let request = ThreadResumeParams {
+            thread_id: "thread-1".to_string(),
+            history: None,
+            path: None,
+            model: None,
+            model_provider: None,
+            service_tier: None,
+            cwd: None,
+            runtime_workspace_roots: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox: None,
+            permissions: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            personality: None,
+            exclude_turns: false,
+            initial_turns_page: None,
+        };
+        let config_snapshot = ThreadConfigSnapshot {
+            model: "gpt-5".to_string(),
+            model_provider_id: "yunyi".to_string(),
+            service_tier: None,
+            approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,
+            approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
+            permission_profile: codex_protocol::models::PermissionProfile::Disabled,
+            active_permission_profile: None,
+            environments: TurnEnvironmentSelections::new(cwd, Vec::new()),
+            workspace_roots: Vec::new(),
+            profile_workspace_roots: Vec::new(),
+            ephemeral: false,
+            reasoning_effort: None,
+            reasoning_summary: None,
+            personality: None,
+            collaboration_mode: CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: "gpt-5".to_string(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            },
+            session_source: SessionSource::Cli,
+            forked_from_thread_id: None,
+            parent_thread_id: None,
+            thread_source: None,
+        };
+
+        assert_eq!(
+            collect_resume_override_mismatches(&request, &config_snapshot, Some("openai_http")),
+            vec!["model_provider requested=openai_http active=yunyi".to_string()]
         );
     }
 
@@ -749,7 +807,7 @@ mod thread_processor_behavior_tests {
     }
 
     #[test]
-    fn merge_persisted_resume_metadata_prefers_persisted_model_and_reasoning_effort() -> Result<()>
+    fn merge_persisted_resume_metadata_prefers_persisted_model_and_reasoning_effort_without_restoring_provider() -> Result<()>
     {
         let mut request_overrides = None;
         let mut typesafe_overrides = ConfigOverrides::default();
@@ -766,10 +824,7 @@ mod thread_processor_behavior_tests {
             typesafe_overrides.model,
             Some("gpt-5.1-codex-max".to_string())
         );
-        assert_eq!(
-            typesafe_overrides.model_provider,
-            Some("mock_provider".to_string())
-        );
+        assert_eq!(typesafe_overrides.model_provider, None);
         assert_eq!(
             request_overrides,
             Some(HashMap::from([(
@@ -906,10 +961,7 @@ mod thread_processor_behavior_tests {
         );
 
         assert_eq!(typesafe_overrides.model, None);
-        assert_eq!(
-            typesafe_overrides.model_provider,
-            Some("mock_provider".to_string())
-        );
+        assert_eq!(typesafe_overrides.model_provider, None);
         assert_eq!(request_overrides, None);
         Ok(())
     }

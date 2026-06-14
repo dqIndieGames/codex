@@ -23,6 +23,7 @@ struct ThreadListFilters {
 fn collect_resume_override_mismatches(
     request: &ThreadResumeParams,
     config_snapshot: &ThreadConfigSnapshot,
+    current_model_provider_id: Option<&str>,
 ) -> Vec<String> {
     let mut mismatch_details = Vec::new();
 
@@ -34,7 +35,11 @@ fn collect_resume_override_mismatches(
             config_snapshot.model
         ));
     }
-    if let Some(requested_provider) = request.model_provider.as_deref()
+    let requested_provider = request
+        .model_provider
+        .as_deref()
+        .or(current_model_provider_id);
+    if let Some(requested_provider) = requested_provider
         && requested_provider != config_snapshot.model_provider_id
     {
         mismatch_details.push(format!(
@@ -151,8 +156,6 @@ fn merge_persisted_resume_metadata(
     }
 
     typesafe_overrides.model = persisted_metadata.model.clone();
-    typesafe_overrides.model_provider = Some(persisted_metadata.model_provider.clone());
-
     if let Some(reasoning_effort) = persisted_metadata.reasoning_effort.as_ref() {
         request_overrides.get_or_insert_with(HashMap::new).insert(
             "model_reasoning_effort".to_string(),
@@ -2847,8 +2850,17 @@ impl ThreadRequestProcessor {
                 )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
-            let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
+            let mismatch_details = collect_resume_override_mismatches(
+                params,
+                &config_snapshot,
+                Some(self.config.model_provider_id.as_str()),
+            );
             if !mismatch_details.is_empty() {
+                let requested_provider = params
+                    .model_provider
+                    .as_deref()
+                    .unwrap_or(self.config.model_provider_id.as_str());
+                let provider_mismatch = requested_provider != config_snapshot.model_provider_id;
                 let has_subscribers = !self
                     .thread_state_manager
                     .subscribed_connection_ids(existing_thread_id)
@@ -2878,6 +2890,13 @@ impl ThreadRequestProcessor {
                             warn!("thread {existing_thread_id} shutdown timed out");
                         }
                     }
+                }
+
+                if provider_mismatch {
+                    return Err(invalid_request(format!(
+                        "thread {existing_thread_id} is already loaded and still using old model_provider `{}`; requested model_provider `{requested_provider}`. Close or unload the existing thread before resuming to switch provider.",
+                        config_snapshot.model_provider_id
+                    )));
                 }
 
                 // Preserve rejoin semantics when another client can still observe

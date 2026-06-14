@@ -9,7 +9,7 @@
 
 4. 重试期间的可见提示、日志噪声和统计口径保持平衡；原来中间态可能刷屏或让诊断信息丢失，修改后用户仍能看到首次重连、重试次数、重试详情等提示，日志不再被中间失败刷屏，同时 retry metrics 继续保留，这样用户界面更安静，排查问题时仍有统计依据。
 
-5. 历史会话默认跨 provider 可发现，并且继续旧线程时使用当前顶层 provider；原来历史入口可能按 provider 收窄，修改后历史列表、最近会话和 resume picker 默认都能看到旧会话，不要求历史 provider 来源绝对保真，这样用户切换 provider 后仍能找回并继续之前的工作。
+5. 历史会话默认跨 provider 可发现，并且继续旧线程时使用当前顶层 provider；原来历史入口可能按 provider 收窄，修改后历史列表、最近会话、resume picker 和 `codex://threads/{id}` deep link 默认都能看到旧会话，并且恢复旧线程时不能因历史 `session_meta.model_provider`、已加载线程快照或 `thread/read` 回退继续粘住旧 provider；若旧线程 provider 与当前顶层 provider 不一致，应重建/换绑到当前 provider，做不到时必须明确提示仍在使用旧 provider，这样用户切换 provider 后仍能找回并继续之前的工作，不会误以为已经走新 provider。
 
 6. 全局优先服务层默认开启，并允许显式恢复官方映射；原来不同配置层级可能让请求服务层表现不一致，修改后顶层未配置或设为开启时统一使用 priority，顶层显式关闭时恢复 Fast -> priority、Flex -> flex、None -> unset 的官方映射，profile 内同名设置不生效，这样用户默认获得更稳定的优先体验，也能按需回到官方行为。
 
@@ -72,3 +72,7 @@
 - 分开刷新要保留旧的全刷，同时新增 `console` 与 `appServer` scope；动态验收至少要证明 `appServer` 能刷新 Windows App app-server thread，`console` 不误刷 app-server thread。
 - GitHub CLI 查询和触发必须显式带 `--repo dqIndieGames/codex`；否则可能落到 `openai/codex`，导致 run/release 证据查错仓库。
 - 禁止本地编译时，编译证据只能来自 GitHub Actions；本地只下载 release zip，比对 GitHub asset digest，再用下载的 `codex.exe` 做真实 smoke 与 refresh 矩阵。
+
+## 2026-06-14 历史线程 provider 重绑经验
+
+- `codex://threads/{id}` 不能只当作“接回旧 loaded thread”；当用户已切换当前顶层 provider 时，恢复旧线程也要验证实际请求 provider 是否同步切换，否则旧线程会因历史 `session_meta.model_provider` 或 loaded `config_snapshot.model_provider_id` 继续走旧 provider。

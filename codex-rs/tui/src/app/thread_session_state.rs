@@ -114,7 +114,7 @@ impl App {
         };
         session.thread_id = thread_id;
         session.thread_name = thread.name.clone();
-        session.model_provider_id = thread.model_provider.clone();
+        session.model_provider_id = self.config.model_provider_id.clone();
         session.set_cwd_retargeting_implicit_runtime_workspace_root(thread.cwd.clone());
         session.permission_profile = permission_profile;
         session.active_permission_profile = active_permission_profile;
@@ -444,6 +444,11 @@ mod tests {
             .permission_profile()
             .clone();
         assert_eq!(session.permission_profile, expected_permission_profile);
+        assert_eq!(
+            session.model_provider_id, app.config.model_provider_id,
+            "thread/read fallback must keep the current top-level provider instead of restoring \
+             the stored thread provider"
+        );
         assert_ne!(
             session.permission_profile,
             app.config.permissions.permission_profile().clone(),
