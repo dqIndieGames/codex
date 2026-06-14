@@ -7,6 +7,7 @@ use crate::error_code::invalid_request;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
 use codex_analytics::AnalyticsEventsClient;
+use codex_app_server_protocol::AppListUpdatedNotification;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::ComputerUseRequirements;
 use codex_app_server_protocol::ConfigBatchWriteParams;
@@ -28,7 +29,9 @@ use codex_app_server_protocol::NetworkDomainPermission;
 use codex_app_server_protocol::NetworkRequirements;
 use codex_app_server_protocol::NetworkUnixSocketPermission;
 use codex_app_server_protocol::SandboxMode;
+use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::WindowsSandboxSetupMode;
+use codex_chatgpt::connectors;
 use codex_config::ConfigRequirementsToml;
 use codex_config::HookEventsToml;
 use codex_config::HookHandlerConfig as CoreHookHandlerConfig;
@@ -46,6 +49,7 @@ use serde_json::json;
 use std::path::PathBuf;
 
 const SUPPORTED_EXPERIMENTAL_FEATURE_ENABLEMENT: &[&str] = &[
+    "apps",
     "auth_elicitation",
     "memories",
     "mentions_v2",
@@ -142,6 +146,7 @@ impl ConfigRequestProcessor {
         request_id: ConnectionRequestId,
         params: ExperimentalFeatureEnablementSetParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let should_refresh_apps_list = params.enablement.get("apps").copied() == Some(true);
         let response = self
             .handle_config_mutation_result(self.set_experimental_feature_enablement(params).await)
             .await?;
@@ -151,6 +156,10 @@ impl ConfigRequestProcessor {
                 ClientResponsePayload::ExperimentalFeatureEnablementSet(response),
             )
             .await;
+        if should_refresh_apps_list {
+            self.refresh_apps_list_after_experimental_feature_enablement_set()
+                .await;
+        }
         Ok(None)
     }
 
@@ -205,7 +214,7 @@ impl ConfigRequestProcessor {
                 return;
             }
         };
-        let auth = self.auth_manager.auth().await;
+        let auth = self.thread_manager.auth_manager().auth().await;
         if !config.features.apps_enabled_for_auth(
             auth.as_ref()
                 .is_some_and(codex_login::CodexAuth::uses_codex_backend),
