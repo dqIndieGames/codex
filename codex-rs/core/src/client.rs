@@ -647,7 +647,7 @@ impl ModelClient {
                 &client_setup.api_provider,
                 prompt,
                 model_info,
-                settings.effort,
+                settings.effort.clone(),
                 settings.summary,
                 settings.service_tier.clone(),
                 /*route_recovery_generation*/ 0,
@@ -825,7 +825,7 @@ impl ModelClient {
             let payload = ApiMemorySummarizeInput {
                 model: model_info.slug.clone(),
                 raw_memories: raw_memories.clone(),
-                reasoning: effort.map(|effort| Reasoning {
+                reasoning: effort.clone().map(|effort| Reasoning {
                     effort: Some(effort),
                     summary: None,
                     context: None,
