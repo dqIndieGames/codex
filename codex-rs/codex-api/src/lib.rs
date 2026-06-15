@@ -18,6 +18,7 @@ pub use codex_client::ReqwestTransport;
 pub use codex_client::TransportError;
 
 pub use crate::api_bridge::map_api_error;
+pub use crate::api_bridge::map_responses_request_api_error;
 pub use crate::api_bridge::map_responses_stream_api_error;
 pub use crate::auth::AuthError;
 pub use crate::auth::AuthHeaderTelemetry;

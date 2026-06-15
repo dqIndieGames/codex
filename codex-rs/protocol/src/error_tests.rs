@@ -113,6 +113,69 @@ fn server_overloaded_maps_to_protocol() {
 }
 
 #[test]
+fn remote_model_request_errors_are_retryable() {
+    let usage_limit = UsageLimitReachedError {
+        plan_type: None,
+        resets_at: None,
+        rate_limits: None,
+        promo_message: None,
+        rate_limit_reached_type: None,
+    };
+    let response = HttpResponse::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .url(Url::parse("http://example.com").unwrap())
+        .body("")
+        .unwrap();
+    let source = Response::from(response).error_for_status_ref().unwrap_err();
+
+    let errors = [
+        CodexErr::ContextWindowExceeded,
+        CodexErr::UsageLimitReached(usage_limit),
+        CodexErr::ServerOverloaded,
+        CodexErr::CyberPolicy {
+            message: "policy".to_string(),
+        },
+        CodexErr::UsageNotIncluded,
+        CodexErr::QuotaExceeded,
+        CodexErr::Stream("stream".to_string(), None),
+        CodexErr::RequestTimeout,
+        CodexErr::UnexpectedStatus(UnexpectedResponseError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: "retry me".to_string(),
+            url: None,
+            cf_ray: None,
+            request_id: None,
+            identity_authorization_error: None,
+            identity_error_code: None,
+        }),
+        CodexErr::ResponseStreamFailed(ResponseStreamFailed {
+            source,
+            request_id: Some("req-123".to_string()),
+        }),
+        CodexErr::InternalServerError,
+    ];
+
+    for err in errors {
+        assert!(err.is_retryable(), "{err:?} should be retryable");
+    }
+}
+
+#[test]
+fn local_lifecycle_errors_remain_non_retryable() {
+    let errors = [
+        CodexErr::TurnAborted,
+        CodexErr::Interrupted,
+        CodexErr::InvalidImageRequest(),
+        CodexErr::InvalidRequest("local invalid request".to_string()),
+        CodexErr::SessionConfiguredNotFirstEvent,
+    ];
+
+    for err in errors {
+        assert!(!err.is_retryable(), "{err:?} should remain non-retryable");
+    }
+}
+
+#[test]
 fn sandbox_denied_uses_aggregated_output_when_stderr_empty() {
     let output = ExecToolCallOutput {
         exit_code: 77,

@@ -5,7 +5,7 @@
 
 2. 首次输入纯文本 `你好` 时显示 local3 功能清单，并且每个新线程只显示 1 次；原来清单可能被做成某个客户端专用提示或重复插入，修改后 brand-new thread 或 Clear 后的新线程中，首个普通用户输入恰好为 `你好` 才会在首个 assistant 主消息第一段显示全量 local3 清单，resume、continue、fork、历史线程重开、子会话和其他输入都不重复触发，这样用户首次检查定制功能时能稳定看到完整清单且不会被反复打扰。
 
-3. 远端请求失败后的自动重试覆盖所有错误，保持更耐用、更少打断的体验；原来只有部分远端错误会按白名单重试，修改后所有远端请求错误都进入普通自动重试，所有 retry 等待间隔最高 `8s`，包括 HTTP 请求 retry、stream/WebSocket retry、compact retry 和服务端 `Retry-After` 建议等待；中间失败不写入历史，只保留可见重连提示和可诊断信息，这样用户在临时鉴权、网络、服务抖动或其他远端异常时更少看到终态失败，也不会被越来越长的本地重试等待卡住。
+3. 远端请求失败后的自动重试覆盖所有远端/模型请求错误，不能有错误类型豁免，保持更耐用、更少打断的体验；原来只有部分远端错误会按白名单重试，修改后所有由模型服务、HTTP、SSE、WebSocket、compact 或其他 Codex 请求链路返回的错误都进入普通自动重试，任何旧 `is_retryable=false`、状态码、错误码、协议层映射或错误分类都不能绕过 retry；`Selected model is at capacity. Please try a different model.`、context window、usage/quota、policy 等服务端返回错误也必须按同一 retry budget 处理；所有 retry 等待间隔最高 `8s`，包括 HTTP 请求 retry、stream/WebSocket retry、compact retry 和服务端 `Retry-After` 建议等待；中间失败不写入历史，只保留可见重连提示和可诊断信息，这样用户在模型容量、临时鉴权、网络、服务抖动或其他远端异常时更少看到终态失败，也不会被越来越长的本地重试等待卡住。
 
 4. 重试期间的可见提示、日志噪声和统计口径保持平衡；原来中间态可能刷屏或让诊断信息丢失，修改后用户仍能看到首次重连、重试次数、重试详情等提示，日志不再被中间失败刷屏，同时 retry metrics 继续保留，这样用户界面更安静，排查问题时仍有统计依据。
 
@@ -21,7 +21,7 @@
 
 10. Provider refresh 不是只在 retry 时才生效，而是配置变化后面向所有 live runtime 的通用刷新能力；原来 refresh 容易被理解成“请求失败后的补救动作”，修改后只要 provider 有效配置发生变化，就应尽快刷新已加载线程、app-server runtime、console/exec runtime 和正在等待下一次请求的会话，即使当前没有 retry、没有报错、没有正在流式输出，也应让下一次请求使用新 provider 状态；这样用户主动切换 provider 参数后，不必靠失败重试或新开对话才能看到新配置。
 
-11. 所有 Codex retry 入口都要接入 hard route recovery，但只有连续第 3 次可重试路由失败后才启动：前 2 次只做普通重试，不重置 WebSocket session、不旋转 `prompt_cache_key`、不主动丢 `previous_response_id`；第 3 次起，HTTP 503/502/504、SSE/WebSocket 未完成断流、WebSocket handshake 失败和 `codex exec`、subagent、agent_jobs 等入口都应使用同一恢复口径，将 `prompt_cache_key` 从默认 thread id 派生为带 recovery generation 的新值，同时重置 WebSocket session，使下一次普通全量重放不携带旧 `previous_response_id`；必要时继续走 fallback transport，但不修改真实 thread id、session id 或用户提示词，且 `function_call_output` 等必须续接旧响应链的请求不能强行丢 `previous_response_id`。这样用户遇到“503 retry N (unbounded) / Reconnecting... N (unbounded) / stream closed before response.completed”时，下一轮 retry 有机会换掉有问题的中转账号粘连，而不是只能新开对话或派生线程。
+11. 所有 Codex retry 入口都要接入 hard route recovery，且不能因为错误类型或续链场景豁免 retry；retry 粘连故障的重置必须按“每连续 3 次 retry 失败就重置一次”执行：第 1、2 次只做普通重试，不重置 WebSocket session、不旋转 `prompt_cache_key`、不主动丢 `previous_response_id`；第 3 次 retry 失败处理阶段必须执行 sticky-break，将可全量重放请求的 `prompt_cache_key` 从默认 thread id 派生为带 recovery generation 的新值，并重置 WebSocket session，使紧随其后的下一次普通全量重放已经使用新 recovery generation 且不携带旧 `previous_response_id`；如果后续继续连续失败，第 6、9、12 次等每个 3 次周期也必须再次执行同样的 sticky-break 重置。HTTP 503/502/504、SSE/WebSocket 未完成断流、WebSocket handshake 失败、`Selected model is at capacity. Please try a different model.` 以及其他远端/模型请求错误，在 TUI、`codex exec`、subagent、agent_jobs 等入口都应使用同一恢复口径；必要时继续走 fallback transport，但不修改真实 thread id、session id 或用户提示词；`function_call_output` 等必须续接旧响应链的请求也不能成为 retry 或 sticky-break 计数豁免，实现必须保留 `previous_response_id` 续链语义或采用不破坏续链的 recovery 方式，而不是跳过 retry。这样用户遇到“503 retry N (unbounded) / Reconnecting... N (unbounded) / stream closed before response.completed / Selected model is at capacity”时，每满 3 次 retry 都会有一次换掉有问题中转账号粘连的机会，而不是只能新开对话或派生线程。
 
 12. 无 live instance 的 provider 字段复制仍视为成功，并给出明确反馈；原来没有可刷新实例时可能让用户误以为字段写入失败，修改后只要 provider 字段写入成功，即使没有任何正在运行的实例，也反馈“未刷新任何实例”，这样用户能区分“配置已保存”和“当前没有可通知的运行入口”。
 
@@ -67,7 +67,7 @@
 - 更新到官方 `rust-v0.136.0` 时不能只合版本号；local3 清单、显示版本、历史跨 provider、日志降噪、node_repl 继承和 runtime 清理都要按用户可见结果逐项复核。
 - Provider refresh 必须能打断所有正在进行的 retry：HTTP 503/429/402、无界 503、网络失败、SSE 断流/空闲、WebSocket 503/426/401 都要验证旧 endpoint/token 不再继续增长，并切到新 endpoint/token。
 - Provider refresh 的覆盖字段必须包含 `base_url`、`experimental_bearer_token`、`force_service_tier_priority` 和 fast mode 有效配置；refresh 触发也不能依赖 retry，用户主动改配置后所有 live runtime 都应尽快刷新。
-- retry 粘连故障的补救核心是 sticky-break：所有 Codex retry 入口都要覆盖，但只在第 3 次连续可重试路由失败后旋转 `prompt_cache_key`，并让可全量重放的 recovery 请求清掉旧 `previous_response_id`；禁止把真实 thread id/session id 改掉，也不要通过改用户 prompt 来“换内容”，`function_call_output` 等必须续链场景不得强行丢续接 ID。
+- retry 粘连故障的补救核心是 sticky-break：所有 Codex retry 入口都要覆盖，所有远端/模型请求错误都要 retry，不能按错误类型、状态码、协议映射或续链场景保留豁免；连续 retry 计数每满 3 次都必须重置一次 sticky-break，第 3、6、9、12 次等每个 3 次周期都要旋转 `prompt_cache_key`、重置 WebSocket session，并让紧随其后的可全量重放 recovery 请求清掉旧 `previous_response_id`；禁止把真实 thread id/session id 改掉，也不要通过改用户 prompt 来“换内容”；`function_call_output` 等必须续链场景不得强行丢续接 ID，但也不能因此跳过 retry 或 sticky-break 计数，必须用不破坏续链语义的方式继续重试。
 - 用户报告的 `503 retry N (unbounded)` 必须单独建无界场景覆盖；不写 `request_max_retries` 才是 release exe 的正式无界 retry 口径，不能只用有界 retry 代替。
 - 分开刷新要保留旧的全刷，同时新增 `console` 与 `appServer` scope；动态验收至少要证明 `appServer` 能刷新 Windows App app-server thread，`console` 不误刷 app-server thread。
 - GitHub CLI 查询和触发必须显式带 `--repo dqIndieGames/codex`；否则可能落到 `openai/codex`，导致 run/release 证据查错仓库。

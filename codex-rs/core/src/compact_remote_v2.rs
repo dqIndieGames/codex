@@ -17,7 +17,6 @@ use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
-use crate::responses_retry::responses_input_requires_previous_response_id;
 use crate::session::session::Session;
 use crate::session::turn::built_tools;
 use crate::session::turn_context::TurnContext;
@@ -363,7 +362,7 @@ async fn run_remote_compaction_request_v2(
                     sess,
                     turn_context,
                     ResponsesStreamRequest::RemoteCompactionV2,
-                    !responses_input_requires_previous_response_id(&prompt.input),
+                    true,
                 )
                 .await?;
             }

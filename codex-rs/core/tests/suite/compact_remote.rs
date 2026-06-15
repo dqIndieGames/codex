@@ -780,6 +780,113 @@ async fn remote_manual_compact_chatgpt_auth_reuses_service_tier_and_prompt_cache
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_compact_request_retry_route_recovers_after_three_failures() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                config.model_provider.request_max_retries = Some(5);
+            }),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+
+    let responses_mock = responses::mount_sse_sequence(
+        harness.server(),
+        vec![
+            responses::sse(vec![
+                responses::ev_assistant_message("m1", "FIRST_REMOTE_REPLY"),
+                responses::ev_completed("resp-1"),
+            ]),
+            responses::sse(vec![
+                responses::ev_assistant_message("m2", "AFTER_COMPACT_REPLY"),
+                responses::ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let compacted_history = vec![ResponseItem::Compaction {
+        encrypted_content: "ENCRYPTED_COMPACTION_SUMMARY".to_string(),
+    }];
+    let compact_mock = responses::mount_compact_response_sequence(
+        harness.server(),
+        vec![
+            ResponseTemplate::new(503),
+            ResponseTemplate::new(503),
+            ResponseTemplate::new(503),
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({ "output": compacted_history })),
+        ],
+    )
+    .await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello remote compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    codex.submit(Op::Compact).await?;
+    wait_for_turn_complete(&codex).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "after compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    let response_requests = responses_mock.requests();
+    let initial_cache_key = response_requests
+        .first()
+        .expect("initial response request missing")
+        .body_json()["prompt_cache_key"]
+        .as_str()
+        .expect("initial prompt_cache_key")
+        .to_string();
+
+    let compact_requests = compact_mock.requests();
+    assert_eq!(compact_requests.len(), 4);
+    let compact_cache_keys = compact_requests
+        .iter()
+        .map(|request| {
+            request.body_json()["prompt_cache_key"]
+                .as_str()
+                .expect("compact prompt_cache_key")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(compact_cache_keys[0], initial_cache_key);
+    assert_eq!(compact_cache_keys[1], compact_cache_keys[0]);
+    assert_eq!(compact_cache_keys[2], compact_cache_keys[0]);
+    assert!(
+        compact_cache_keys[3].ends_with(":retry-recovery:1"),
+        "fourth compact request should rotate prompt_cache_key after three route failures: {compact_cache_keys:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

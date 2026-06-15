@@ -115,9 +115,9 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::feedback_tags;
-use crate::responses_retry::responses_input_requires_previous_response_id;
 use crate::util::emit_feedback_auth_recovery_tags;
 use codex_api::map_api_error;
+use codex_api::map_responses_request_api_error;
 use codex_api::map_responses_stream_api_error;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
@@ -628,10 +628,18 @@ impl ModelClient {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
+        let mut route_recovery_generation = 0;
+        let mut request_route_retry_count_consumed = 0;
         loop {
             let client_setup = self.current_client_setup().await?;
             let runtime_generation = client_setup.provider_runtime_generation;
+            let mut api_provider = client_setup.api_provider;
+            api_provider.retry.max_attempts = api_provider
+                .retry
+                .max_attempts
+                .saturating_sub(request_route_retry_count_consumed);
             let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_route_recovery = RequestRouteRecovery::new(true);
             let request_telemetry = Self::build_request_telemetry(
                 session_telemetry,
                 AuthRequestTelemetryContext::new(
@@ -642,15 +650,16 @@ impl ModelClient {
                 RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
                 self.state.auth_env_telemetry.clone(),
                 Some(self.request_retry_guard(runtime_generation)),
+                Some(request_route_recovery.clone()),
             );
             let request = self.build_responses_request(
-                &client_setup.api_provider,
+                &api_provider,
                 prompt,
                 model_info,
                 settings.effort.clone(),
                 settings.summary,
                 settings.service_tier.clone(),
-                /*route_recovery_generation*/ 0,
+                route_recovery_generation,
             )?;
             let ResponsesApiRequest {
                 model,
@@ -693,13 +702,11 @@ impl ModelClient {
             if let Some(header_value) = self.generate_attestation_header_for().await {
                 extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
             }
-            let compact_request_timeout = client_setup
-                .api_provider
+            let compact_request_timeout = api_provider
                 .stream_idle_timeout
                 .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER);
-            let client =
-                ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                    .with_telemetry(Some(request_telemetry));
+            let client = ApiCompactClient::new(transport, api_provider, client_setup.api_auth)
+                .with_telemetry(Some(request_telemetry));
             let trace_attempt = compaction_trace.start_attempt(&payload);
             match client
                 .compact_input(&payload, extra_headers, compact_request_timeout)
@@ -714,10 +721,23 @@ impl ModelClient {
                 {
                     trace_attempt.record_failed(&reason);
                     debug!("restarting compaction after provider runtime refresh: {reason}");
+                    request_route_retry_count_consumed = 0;
+                    route_recovery_generation = 0;
+                    continue;
+                }
+                Err(ApiError::Transport(TransportError::RetryInterrupted(reason)))
+                    if request_route_recovery.restart_requested() =>
+                {
+                    trace_attempt.record_failed(&reason);
+                    request_route_retry_count_consumed =
+                        request_route_retry_count_consumed
+                            .saturating_add(request_route_recovery.restart_retry_number());
+                    route_recovery_generation = route_recovery_generation.saturating_add(1);
+                    self.store_cached_websocket_session(WebsocketSession::default());
                     continue;
                 }
                 Err(err) => {
-                    let mapped = map_api_error(err);
+                    let mapped = map_responses_request_api_error(err);
                     trace_attempt.record_failed(&mapped);
                     return Err(mapped);
                 }
@@ -756,6 +776,7 @@ impl ModelClient {
                 RequestRouteTelemetry::for_endpoint(REALTIME_CALLS_ENDPOINT),
                 self.state.auth_env_telemetry.clone(),
                 Some(self.request_retry_guard(runtime_generation)),
+                None,
             );
             match ApiRealtimeCallClient::new(
                 transport,
@@ -817,6 +838,7 @@ impl ModelClient {
                 RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
                 self.state.auth_env_telemetry.clone(),
                 Some(self.request_retry_guard(runtime_generation)),
+                None,
             );
             let client =
                 ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
@@ -941,6 +963,7 @@ impl ModelClient {
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
         request_retry_guard: Option<RequestRetryGuard>,
+        request_route_recovery: Option<RequestRouteRecovery>,
     ) -> Arc<dyn RequestTelemetry> {
         let telemetry = Arc::new(ApiTelemetry::new(
             session_telemetry.clone(),
@@ -949,7 +972,7 @@ impl ModelClient {
             auth_env_telemetry,
             None,
             request_retry_guard,
-            None,
+            request_route_recovery,
         ));
         let request_telemetry: Arc<dyn RequestTelemetry> = telemetry;
         request_telemetry
@@ -1607,9 +1630,7 @@ impl ModelClientSession {
                 service_tier.clone(),
                 self.route_recovery_generation,
             )?;
-            let request_route_recovery = RequestRouteRecovery::new(
-                !responses_input_requires_previous_response_id(&request.input),
-            );
+            let request_route_recovery = RequestRouteRecovery::new(true);
             let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
                 session_telemetry,
                 request_auth_context,
@@ -1690,7 +1711,7 @@ impl ModelClientSession {
                 Err(err) => {
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
-                    let err = map_api_error(err);
+                    let err = map_responses_request_api_error(err);
                     inference_trace_attempt.record_failed(
                         &err,
                         response_debug_context.request_id.as_deref(),
@@ -1862,7 +1883,7 @@ impl ModelClientSession {
                 .map_err(|err| {
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
-                    let err = map_api_error(err);
+                    let err = map_responses_stream_api_error(err);
                     inference_trace_attempt.record_failed(
                         &err,
                         response_debug_context.request_id.as_deref(),
@@ -2305,7 +2326,7 @@ where
                     if let Some(upstream_request_id) = upstream_request_id {
                         feedback_tags!(last_model_request_id = upstream_request_id);
                     }
-                    let mapped = map_api_error(err);
+                    let mapped = map_responses_stream_api_error(err);
                     inference_trace_attempt.record_failed(
                         &mapped,
                         upstream_request_id,
@@ -2531,15 +2552,6 @@ fn api_error_http_status(error: &ApiError) -> Option<u16> {
     }
 }
 
-fn request_retry_status_allows_route_recovery(status: Option<HttpStatusCode>) -> bool {
-    matches!(
-        status,
-        Some(HttpStatusCode::BAD_GATEWAY)
-            | Some(HttpStatusCode::SERVICE_UNAVAILABLE)
-            | Some(HttpStatusCode::GATEWAY_TIMEOUT)
-    )
-}
-
 struct ApiTelemetry {
     session_telemetry: SessionTelemetry,
     auth_context: AuthRequestTelemetryContext,
@@ -2638,9 +2650,11 @@ impl RequestTelemetry for ApiTelemetry {
         status: Option<HttpStatusCode>,
         error: &TransportError,
     ) {
-        if self.request_route_telemetry.endpoint == RESPONSES_ENDPOINT
-            && retry_number >= ROUTE_RECOVERY_RETRY_THRESHOLD
-            && request_retry_status_allows_route_recovery(status)
+        if matches!(
+            self.request_route_telemetry.endpoint,
+            RESPONSES_ENDPOINT | RESPONSES_COMPACT_ENDPOINT
+        )
+            && retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0
             && let Some(route_recovery) = self.request_route_recovery.as_ref()
         {
             route_recovery.request_restart(retry_number);

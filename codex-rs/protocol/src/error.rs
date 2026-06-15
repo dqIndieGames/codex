@@ -176,8 +176,6 @@ impl CodexErr {
             | CodexErr::Interrupted
             | CodexErr::EnvVar(_)
             | CodexErr::Fatal(_)
-            | CodexErr::UsageNotIncluded
-            | CodexErr::QuotaExceeded
             | CodexErr::InvalidImageRequest()
             | CodexErr::InvalidRequest(_)
             | CodexErr::RefreshTokenFailed(_)
@@ -185,15 +183,17 @@ impl CodexErr {
             | CodexErr::Sandbox(_)
             | CodexErr::LandlockSandboxExecutableNotProvided
             | CodexErr::RetryLimit(_)
-            | CodexErr::ContextWindowExceeded
             | CodexErr::ThreadNotFound(_)
             | CodexErr::AgentLimitReached { .. }
             | CodexErr::Spawn
-            | CodexErr::SessionConfiguredNotFirstEvent
+            | CodexErr::SessionConfiguredNotFirstEvent => false,
+            CodexErr::ContextWindowExceeded
             | CodexErr::UsageLimitReached(_)
             | CodexErr::ServerOverloaded
-            | CodexErr::CyberPolicy { .. } => false,
-            CodexErr::Stream(..)
+            | CodexErr::CyberPolicy { .. }
+            | CodexErr::UsageNotIncluded
+            | CodexErr::QuotaExceeded
+            | CodexErr::Stream(..)
             | CodexErr::Timeout
             | CodexErr::RequestTimeout
             | CodexErr::UnexpectedStatus(_)

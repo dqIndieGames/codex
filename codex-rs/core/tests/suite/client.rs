@@ -146,14 +146,33 @@ fn prompt_cache_keys(requests: &[ResponsesRequest]) -> Vec<String> {
         .collect()
 }
 
+async fn submit_plain_text_turn(codex: &codex_core::Codex, text: &str) {
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: text.into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn request_retry_route_recovery_rotates_prompt_cache_key_after_three_http_route_failures() {
+async fn request_retry_route_recovery_rotates_prompt_cache_key_every_three_http_route_failures() {
     skip_if_no_network!();
 
     let server = MockServer::start().await;
     let response_mock = mount_response_sequence(
         &server,
         vec![
+            ResponseTemplate::new(503),
+            ResponseTemplate::new(502),
+            ResponseTemplate::new(504),
             ResponseTemplate::new(503),
             ResponseTemplate::new(502),
             ResponseTemplate::new(504),
@@ -165,7 +184,7 @@ async fn request_retry_route_recovery_rotates_prompt_cache_key_after_three_http_
     )
     .await;
 
-    let provider = retry_route_recovery_provider(&server, /*request_max_retries*/ 5);
+    let provider = retry_route_recovery_provider(&server, /*request_max_retries*/ 8);
     let mut builder = test_codex()
         .with_auth(CodexAuth::from_api_key("test"))
         .with_config(move |config| {
@@ -177,24 +196,12 @@ async fn request_retry_route_recovery_rotates_prompt_cache_key_after_three_http_
         .expect("create conversation")
         .codex;
 
-    codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
-        .await
-        .unwrap();
+    submit_plain_text_turn(&codex, "hello").await;
 
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let requests = response_mock.requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 7);
     let cache_keys = prompt_cache_keys(&requests);
     assert_eq!(cache_keys[0], cache_keys[1]);
     assert_eq!(cache_keys[1], cache_keys[2]);
@@ -206,10 +213,72 @@ async fn request_retry_route_recovery_rotates_prompt_cache_key_after_three_http_
         cache_keys[3].ends_with(":retry-recovery:1"),
         "fourth request should rotate prompt_cache_key after three HTTP route failures: {cache_keys:?}"
     );
+    assert_eq!(cache_keys[3], cache_keys[4]);
+    assert_eq!(cache_keys[4], cache_keys[5]);
+    assert!(
+        cache_keys[6].starts_with(&cache_keys[0]),
+        "second recovery cache key should keep the thread id prefix: {cache_keys:?}"
+    );
+    assert!(
+        cache_keys[6].ends_with(":retry-recovery:2"),
+        "seventh request should rotate prompt_cache_key again after six HTTP route failures: {cache_keys:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn function_call_output_request_retry_does_not_force_route_recovery() {
+async fn server_overloaded_stream_error_retries_and_route_recovers_after_three_failures() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let failed_body = sse_failed(
+        "resp-overloaded",
+        "server_is_overloaded",
+        "Selected model is at capacity. Please try a different model.",
+    );
+    let response_mock = mount_response_sequence(
+        &server,
+        vec![
+            sse_response_template(failed_body.clone()),
+            sse_response_template(failed_body.clone()),
+            sse_response_template(failed_body),
+            sse_response_template(sse(vec![
+                ev_response_created("resp-recovered"),
+                ev_completed("resp-recovered"),
+            ])),
+        ],
+    )
+    .await;
+
+    let mut provider = retry_route_recovery_provider(&server, /*request_max_retries*/ 1);
+    provider.stream_max_retries = Some(4);
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::from_api_key("test"))
+        .with_config(move |config| {
+            config.model_provider = provider;
+        });
+    let codex = builder
+        .build(&server)
+        .await
+        .expect("create conversation")
+        .codex;
+
+    submit_plain_text_turn(&codex, "hello").await;
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 4);
+    let cache_keys = prompt_cache_keys(&requests);
+    assert_eq!(cache_keys[0], cache_keys[1]);
+    assert_eq!(cache_keys[1], cache_keys[2]);
+    assert!(
+        cache_keys[3].ends_with(":retry-recovery:1"),
+        "capacity stream error should rotate prompt_cache_key after three retries: {cache_keys:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn function_call_output_request_retry_keeps_tool_output_and_route_recovers() {
     skip_if_no_network!();
 
     let server = MockServer::start().await;
@@ -247,19 +316,7 @@ async fn function_call_output_request_retry_does_not_force_route_recovery() {
         .expect("create conversation")
         .codex;
 
-    codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "run an unsupported test tool".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
-        .await
-        .unwrap();
+    submit_plain_text_turn(&codex, "run an unsupported test tool").await;
 
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
@@ -273,17 +330,29 @@ async fn function_call_output_request_retry_does_not_force_route_recovery() {
         .collect::<Vec<_>>();
     assert_eq!(tool_output_requests.len(), 4);
     let tool_output_cache_keys = prompt_cache_keys(&tool_output_requests);
+    assert_eq!(tool_output_cache_keys[0], all_cache_keys[0]);
+    assert_eq!(tool_output_cache_keys[1], tool_output_cache_keys[0]);
+    assert_eq!(tool_output_cache_keys[2], tool_output_cache_keys[0]);
     assert!(
-        tool_output_cache_keys
-            .iter()
-            .all(|cache_key| cache_key == &all_cache_keys[0]),
-        "function_call_output retries must keep the original prompt_cache_key: {tool_output_cache_keys:?}"
+        tool_output_cache_keys[3].ends_with(":retry-recovery:1"),
+        "function_call_output retries must preserve the tool output while still route recovering after three failures: {tool_output_cache_keys:?}"
     );
     assert!(
-        tool_output_cache_keys
+        tool_output_requests
             .iter()
-            .all(|cache_key| !cache_key.contains(":retry-recovery:")),
-        "function_call_output retries must not force route recovery: {tool_output_cache_keys:?}"
+            .all(|request| !request.inputs_of_type("function_call_output").is_empty()),
+        "all retried requests must keep function_call_output input"
+    );
+    assert!(
+        tool_output_requests.iter().all(|request| {
+            request
+                .inputs_of_type("function_call_output")
+                .iter()
+                .any(|item| {
+                    item.get("call_id").and_then(serde_json::Value::as_str) == Some(call_id)
+                })
+        }),
+        "all retried requests must keep the original function_call_output call_id"
     );
 }
 
@@ -2954,6 +3023,7 @@ async fn context_window_error_sets_total_tokens_to_model_window() -> anyhow::Res
         .with_config(|config| {
             config.model = Some("gpt-5.4".to_string());
             config.model_context_window = Some(272_000);
+            config.model_provider.stream_max_retries = Some(0);
         })
         .build(&server)
         .await?;

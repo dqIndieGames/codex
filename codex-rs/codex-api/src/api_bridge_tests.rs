@@ -27,7 +27,7 @@ fn map_api_error_maps_server_overloaded_from_503_body() {
 }
 
 #[test]
-fn map_responses_stream_api_error_maps_overloaded_503_body_to_retryable_stream() {
+fn map_responses_stream_api_error_preserves_typed_overloaded_503_body() {
     for code in ["server_is_overloaded", "slow_down"] {
         let body = serde_json::json!({
             "error": {
@@ -42,12 +42,84 @@ fn map_responses_stream_api_error_maps_overloaded_503_body_to_retryable_stream()
             body: Some(body),
         }));
 
-        let CodexErr::Stream(message, requested_delay) = err else {
-            panic!("expected retryable stream error for {code}, got {err:?}");
-        };
-        assert_eq!(message, CodexErr::ServerOverloaded.to_string());
-        assert_eq!(requested_delay, None);
+        assert!(
+            matches!(err, CodexErr::ServerOverloaded),
+            "expected typed overload error for {code}, got {err:?}"
+        );
+        assert!(err.is_retryable(), "typed overload must remain retryable");
     }
+}
+
+#[test]
+fn map_api_error_preserves_default_invalid_request() {
+    let err = map_api_error(ApiError::InvalidRequest {
+        message: "local invalid request".to_string(),
+    });
+
+    let CodexErr::InvalidRequest(message) = err else {
+        panic!("expected default bridge layer to preserve invalid request, got {err:?}");
+    };
+    assert_eq!(message, "local invalid request");
+}
+
+#[test]
+fn map_responses_request_api_error_maps_invalid_request_to_retryable_stream() {
+    let err = map_responses_request_api_error(ApiError::InvalidRequest {
+        message: "remote invalid prompt".to_string(),
+    });
+
+    let CodexErr::Stream(message, requested_delay) = err else {
+        panic!("expected responses request invalid request to be retryable stream, got {err:?}");
+    };
+    assert_eq!(message, "remote invalid prompt");
+    assert_eq!(requested_delay, None);
+}
+
+#[test]
+fn map_responses_stream_api_error_maps_invalid_request_to_retryable_stream() {
+    let err = map_responses_stream_api_error(ApiError::InvalidRequest {
+        message: "remote invalid prompt".to_string(),
+    });
+
+    let CodexErr::Stream(message, requested_delay) = err else {
+        panic!("expected responses stream invalid request to be retryable stream, got {err:?}");
+    };
+    assert_eq!(message, "remote invalid prompt");
+    assert_eq!(requested_delay, None);
+}
+
+#[test]
+fn map_responses_request_api_error_maps_invalid_image_body_to_retryable_stream() {
+    let body = "The image data you provided does not represent a valid image".to_string();
+    let err = map_responses_request_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::BAD_REQUEST,
+        url: Some("http://example.com/v1/responses".to_string()),
+        headers: None,
+        body: Some(body.clone()),
+    }));
+
+    let CodexErr::Stream(message, requested_delay) = err else {
+        panic!("expected responses invalid image body to be retryable stream, got {err:?}");
+    };
+    assert_eq!(message, body);
+    assert_eq!(requested_delay, None);
+}
+
+#[test]
+fn map_responses_request_api_error_maps_unknown_429_to_retryable_stream() {
+    let body = "temporary rate limit".to_string();
+    let err = map_responses_request_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::TOO_MANY_REQUESTS,
+        url: Some("http://example.com/v1/responses".to_string()),
+        headers: None,
+        body: Some(body.clone()),
+    }));
+
+    let CodexErr::Stream(message, requested_delay) = err else {
+        panic!("expected responses request 429 to be retryable stream, got {err:?}");
+    };
+    assert_eq!(message, body);
+    assert_eq!(requested_delay, None);
 }
 
 #[test]
@@ -146,6 +218,29 @@ fn map_api_error_keeps_unknown_400_errors_generic() {
         panic!("expected CodexErr::InvalidRequest, got {err:?}");
     };
     assert_eq!(message, body);
+}
+
+#[test]
+fn map_responses_request_api_error_maps_unknown_400_to_retryable_stream() {
+    let body = serde_json::json!({
+        "error": {
+            "message": "Some other bad request.",
+            "code": "some_other_policy"
+        }
+    })
+    .to_string();
+    let err = map_responses_request_api_error(ApiError::Transport(TransportError::Http {
+        status: http::StatusCode::BAD_REQUEST,
+        url: Some("http://example.com/v1/responses".to_string()),
+        headers: None,
+        body: Some(body.clone()),
+    }));
+
+    let CodexErr::Stream(message, requested_delay) = err else {
+        panic!("expected responses request 400 to be retryable stream, got {err:?}");
+    };
+    assert_eq!(message, body);
+    assert_eq!(requested_delay, None);
 }
 
 #[test]

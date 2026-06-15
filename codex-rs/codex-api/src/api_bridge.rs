@@ -41,12 +41,7 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
         ApiError::Retryable { message, delay } => CodexErr::Stream(message, delay),
         ApiError::Stream(msg) => CodexErr::Stream(msg, None),
-        ApiError::ServerOverloaded => match mode {
-            HttpErrorMode::StreamLayer => {
-                CodexErr::Stream(CodexErr::ServerOverloaded.to_string(), None)
-            }
-            HttpErrorMode::Default | HttpErrorMode::RequestLayer => CodexErr::ServerOverloaded,
-        },
+        ApiError::ServerOverloaded => CodexErr::ServerOverloaded,
         ApiError::Api { status, message } => CodexErr::UnexpectedStatus(UnexpectedResponseError {
             status,
             body: message,
@@ -56,7 +51,12 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
             identity_authorization_error: None,
             identity_error_code: None,
         }),
-        ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
+        ApiError::InvalidRequest { message } => match mode {
+            HttpErrorMode::Default => CodexErr::InvalidRequest(message),
+            HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
+                CodexErr::Stream(message, None)
+            }
+        },
         ApiError::CyberPolicy { message } => CodexErr::CyberPolicy { message },
         ApiError::Transport(transport) => match transport {
             TransportError::Http {
@@ -77,14 +77,7 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                         Some("server_is_overloaded" | "slow_down")
                     )
                 {
-                    return match mode {
-                        HttpErrorMode::StreamLayer => {
-                            CodexErr::Stream(CodexErr::ServerOverloaded.to_string(), None)
-                        }
-                        HttpErrorMode::Default | HttpErrorMode::RequestLayer => {
-                            CodexErr::ServerOverloaded
-                        }
-                    };
+                    return CodexErr::ServerOverloaded;
                 }
 
                 if status == http::StatusCode::BAD_REQUEST {
@@ -103,9 +96,19 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                     } else if body_text
                         .contains("The image data you provided does not represent a valid image")
                     {
-                        CodexErr::InvalidImageRequest()
+                        match mode {
+                            HttpErrorMode::Default => CodexErr::InvalidImageRequest(),
+                            HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
+                                CodexErr::Stream(body_text, None)
+                            }
+                        }
                     } else {
-                        CodexErr::InvalidRequest(body_text)
+                        match mode {
+                            HttpErrorMode::Default => CodexErr::InvalidRequest(body_text),
+                            HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
+                                CodexErr::Stream(body_text, None)
+                            }
+                        }
                     }
                 } else if status == http::StatusCode::INTERNAL_SERVER_ERROR {
                     CodexErr::InternalServerError
@@ -148,17 +151,19 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                         });
                     }
 
-                    if status == http::StatusCode::TOO_MANY_REQUESTS
-                        && mode != HttpErrorMode::StreamLayer
-                    {
-                        CodexErr::RetryLimit(RetryLimitReachedError {
-                            status,
-                            request_id: extract_request_tracking_id(headers.as_ref()),
-                        })
-                    } else {
-                        CodexErr::UnexpectedStatus(build_unexpected_response_error(
-                            status, body_text, url, headers,
-                        ))
+                    match mode {
+                        HttpErrorMode::Default if status == http::StatusCode::TOO_MANY_REQUESTS => {
+                            CodexErr::RetryLimit(RetryLimitReachedError {
+                                status,
+                                request_id: extract_request_tracking_id(headers.as_ref()),
+                            })
+                        }
+                        HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
+                            CodexErr::Stream(body_text, None)
+                        }
+                        HttpErrorMode::Default => CodexErr::UnexpectedStatus(
+                            build_unexpected_response_error(status, body_text, url, headers),
+                        ),
                     }
                 } else {
                     CodexErr::UnexpectedStatus(build_unexpected_response_error(

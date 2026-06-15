@@ -37,7 +37,6 @@ use crate::mentions::collect_tool_mentions_from_messages;
 use crate::plugins::build_plugin_injections;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
-use crate::responses_retry::responses_input_requires_previous_response_id;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
@@ -1039,18 +1038,16 @@ async fn run_sampling_request(
             Ok(output) => {
                 return Ok(output);
             }
-            Err(CodexErr::ContextWindowExceeded) => {
-                sess.set_total_tokens_full(&turn_context).await;
-                return Err(CodexErr::ContextWindowExceeded);
-            }
-            Err(CodexErr::UsageLimitReached(e)) => {
-                let rate_limits = e.rate_limits.clone();
-                if let Some(rate_limits) = rate_limits {
+            Err(err) => {
+                if let CodexErr::ContextWindowExceeded = &err {
+                    sess.set_total_tokens_full(&turn_context).await;
+                } else if let CodexErr::UsageLimitReached(e) = &err
+                    && let Some(rate_limits) = e.rate_limits.clone()
+                {
                     sess.update_rate_limits(&turn_context, *rate_limits).await;
                 }
-                return Err(CodexErr::UsageLimitReached(e));
+                err
             }
-            Err(err) => err,
         };
 
         if !err.is_retryable() {
@@ -1066,7 +1063,7 @@ async fn run_sampling_request(
             &sess,
             &turn_context,
             ResponsesStreamRequest::Sampling,
-            !responses_input_requires_previous_response_id(&prompt.input),
+            true,
         )
         .await?;
         turn_context.turn_timing_state.record_sampling_retry();
