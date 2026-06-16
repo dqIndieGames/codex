@@ -76,3 +76,8 @@
 ## 2026-06-14 历史线程 provider 重绑经验
 
 - `codex://threads/{id}` 不能只当作“接回旧 loaded thread”；当用户已切换当前顶层 provider 时，恢复旧线程也要验证实际请求 provider 是否同步切换，否则旧线程会因历史 `session_meta.model_provider` 或 loaded `config_snapshot.model_provider_id` 继续走旧 provider。
+- 历史会话“跨 provider 可发现”和 fork 边界要分开验收：resume picker、resume last、deep link 默认应不带 provider filter；本地 fork picker / fork last 仍要按当前 provider 过滤，避免把“继续旧线程”需求误扩成“从旧 provider 派生新线程”。
+- 恢复旧线程不能只看列表能不能选中；app-server resume 端必须确认显式 request provider 覆盖历史 `SessionThreadConfig.model_provider`，TUI 同一 thread resume 遇到 active provider 不同要先 shutdown 再 cold resume/rebind，否则用户以为切到新 provider，实际下一轮仍走旧 provider。
+- `Selected model is at capacity. Please try a different model.` 必须作为 typed `ServerOverloaded` 进入 retry / hard route recovery；只改 UI 文案或只让 `is_retryable()` 返回 true 不够，必须覆盖普通 sampling、local compact、remote compact v2 三条会把错误变成终态 `ErrorEvent` 的链路。
+- capacity 可以穿透 zero/finite stream budget 争取第 3 次 sticky-break，但不能把所有 retryable 错误都顺手改成无界；compact 普通 500/timeout/断流仍要使用 compact 专属有限 terminal budget，否则历史压缩失败会让用户看到长时间卡住而不是明确失败。
+- 禁止本地编译时，验收必须走“subagent 静态反推 + GitHub Actions 远端 prerelease + 下载 release zip 运行下载的 `codex.exe --version` / `--help`”；旧 run 或本地旧 exe 不能替代新提交产物 smoke。
