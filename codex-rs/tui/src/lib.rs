@@ -748,6 +748,7 @@ async fn lookup_latest_session_target_with_app_server(
     config: &Config,
     cwd_filter: Option<&Path>,
     include_non_interactive: bool,
+    provider_filter: LatestSessionProviderFilter,
 ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
     let uses_remote_workspace = app_server.uses_remote_workspace();
     for lookup_mode in [
@@ -761,6 +762,7 @@ async fn lookup_latest_session_target_with_app_server(
                 cwd_filter,
                 include_non_interactive,
                 lookup_mode,
+                provider_filter.clone(),
             ))
             .await?;
         let target = response
@@ -782,19 +784,47 @@ enum LatestSessionLookupMode {
     ScanAndRepair,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LatestSessionProviderFilter {
+    Any,
+    MatchDefault(String),
+}
+
+impl LatestSessionProviderFilter {
+    fn for_resume(_config: &Config, _uses_remote_workspace: bool) -> Self {
+        Self::Any
+    }
+
+    fn for_fork(config: &Config, uses_remote_workspace: bool) -> Self {
+        if uses_remote_workspace {
+            Self::Any
+        } else {
+            Self::MatchDefault(config.model_provider_id.clone())
+        }
+    }
+
+    fn into_model_providers(self) -> Option<Vec<String>> {
+        match self {
+            Self::Any => None,
+            Self::MatchDefault(default_provider) => Some(vec![default_provider]),
+        }
+    }
+}
+
 fn latest_session_lookup_params(
     _uses_remote_workspace: bool,
     _config: &Config,
     cwd_filter: Option<&Path>,
     include_non_interactive: bool,
     lookup_mode: LatestSessionLookupMode,
+    provider_filter: LatestSessionProviderFilter,
 ) -> ThreadListParams {
     ThreadListParams {
         cursor: None,
         limit: Some(1),
         sort_key: Some(AppServerThreadSortKey::UpdatedAt),
         sort_direction: None,
-        model_providers: None,
+        model_providers: provider_filter.into_model_providers(),
         source_kinds: Some(resume_source_kinds(include_non_interactive)),
         archived: Some(false),
         cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().to_string())),
@@ -1556,7 +1586,11 @@ async fn run_ratatui_app(
                 unreachable!("app server should be initialized for --fork --last");
             };
             match lookup_latest_session_target_with_app_server(
-                app_server, &config, filter_cwd, /*include_non_interactive*/ false,
+                app_server,
+                &config,
+                filter_cwd,
+                /*include_non_interactive*/ false,
+                LatestSessionProviderFilter::for_fork(&config, uses_remote_workspace),
             )
             .await?
             {
@@ -1617,6 +1651,7 @@ async fn run_ratatui_app(
             &config,
             filter_cwd,
             cli.resume_include_non_interactive,
+            LatestSessionProviderFilter::for_resume(&config, uses_remote_workspace),
         )
         .await?
         {
@@ -2460,6 +2495,7 @@ mod tests {
             Some(cwd.as_path()),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
+            LatestSessionProviderFilter::for_resume(&config, /*uses_remote_workspace*/ false),
         );
 
         assert_eq!(params.model_providers, None);
@@ -2475,6 +2511,7 @@ mod tests {
             Some(cwd.as_path()),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::ScanAndRepair,
+            LatestSessionProviderFilter::for_resume(&config, /*uses_remote_workspace*/ false),
         );
         assert!(!scan_params.use_state_db_only);
         Ok(())
@@ -2498,6 +2535,7 @@ mod tests {
             Some(cwd.as_path()),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
+            LatestSessionProviderFilter::for_resume(&config, target.uses_remote_workspace()),
         );
 
         assert_eq!(params.model_providers, None);
@@ -2520,6 +2558,7 @@ mod tests {
             /*cwd_filter*/ None,
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
+            LatestSessionProviderFilter::for_resume(&config, /*uses_remote_workspace*/ true),
         );
 
         assert_eq!(params.model_providers, None);
@@ -2539,6 +2578,7 @@ mod tests {
             /*cwd_filter*/ None,
             /*include_non_interactive*/ true,
             LatestSessionLookupMode::StateDbOnly,
+            LatestSessionProviderFilter::for_resume(&config, /*uses_remote_workspace*/ true),
         );
 
         assert_eq!(
@@ -2566,6 +2606,7 @@ mod tests {
             Some(cwd),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
+            LatestSessionProviderFilter::for_resume(&config, /*uses_remote_workspace*/ true),
         );
 
         assert_eq!(params.model_providers, None);
@@ -2604,6 +2645,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fork_latest_session_lookup_params_filter_to_current_provider_for_embedded_sessions()
+    -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+
+        let params = latest_session_lookup_params(
+            /*uses_remote_workspace*/ false,
+            &config,
+            /*cwd_filter*/ None,
+            /*include_non_interactive*/ false,
+            LatestSessionLookupMode::StateDbOnly,
+            LatestSessionProviderFilter::for_fork(&config, /*uses_remote_workspace*/ false),
+        );
+
+        assert_eq!(
+            params.model_providers,
+            Some(vec![config.model_provider_id.clone()])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fork_latest_session_lookup_params_omit_client_provider_for_remote_sessions()
+    -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+
+        let params = latest_session_lookup_params(
+            /*uses_remote_workspace*/ true,
+            &config,
+            /*cwd_filter*/ None,
+            /*include_non_interactive*/ false,
+            LatestSessionLookupMode::StateDbOnly,
+            LatestSessionProviderFilter::for_fork(&config, /*uses_remote_workspace*/ true),
+        );
+
+        assert_eq!(params.model_providers, None);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn fork_last_filters_latest_session_by_cwd_unless_show_all() -> color_eyre::Result<()> {
         let temp_dir = TempDir::new()?;
         let project_cwd = temp_dir.path().join("project");
@@ -2636,6 +2718,14 @@ mod tests {
             model_provider,
             &other_cwd,
         )?;
+        let old_provider_thread_id = write_session_rollout(
+            temp_dir.path(),
+            "2025-01-02T14-00-00",
+            "2025-01-02T14:00:00Z",
+            "newest old provider session",
+            "old_provider",
+            &project_cwd,
+        )?;
 
         let mut app_server = AppServerSession::new(
             codex_app_server_client::AppServerClient::InProcess(
@@ -2652,6 +2742,7 @@ mod tests {
             &config,
             filter_cwd,
             /*include_non_interactive*/ false,
+            LatestSessionProviderFilter::for_fork(&config, /*uses_remote_workspace*/ false),
         )
         .await?
         .expect("expected project-scoped fork --last target");
@@ -2664,6 +2755,7 @@ mod tests {
             &config,
             show_all_filter_cwd,
             /*include_non_interactive*/ false,
+            LatestSessionProviderFilter::for_fork(&config, /*uses_remote_workspace*/ false),
         )
         .await?
         .expect("expected global fork --last target");
@@ -2671,6 +2763,8 @@ mod tests {
 
         assert_eq!(scoped_target.thread_id, project_thread_id);
         assert_eq!(show_all_target.thread_id, other_thread_id);
+        assert_ne!(scoped_target.thread_id, old_provider_thread_id);
+        assert_ne!(show_all_target.thread_id, old_provider_thread_id);
         Ok(())
     }
 
@@ -2710,6 +2804,7 @@ mod tests {
             &config,
             Some(project_cwd.as_path()),
             /*include_non_interactive*/ false,
+            LatestSessionProviderFilter::for_resume(&config, /*uses_remote_workspace*/ false),
         )
         .await?
         .expect("expected scan-and-repair fallback to find the rollout");

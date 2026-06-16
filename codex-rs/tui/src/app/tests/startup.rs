@@ -254,7 +254,8 @@ fn stale_startup_thread_started_removes_local_routing_state() -> Result<()> {
 async fn ignore_same_thread_resume_reports_noop_for_current_thread() {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
-    let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
+    let mut session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
+    session.model_provider_id = app.config.model_provider_id.clone();
     app.chat_widget.handle_thread_session(session.clone());
     app.thread_event_channels.insert(
         thread_id,
@@ -263,12 +264,14 @@ async fn ignore_same_thread_resume_reports_noop_for_current_thread() {
     app.activate_thread_channel(thread_id).await;
     while app_event_rx.try_recv().is_ok() {}
 
-    let ignored = app.ignore_same_thread_resume(&crate::resume_picker::SessionTarget {
-        path: Some(test_path_buf("/tmp/project")),
-        thread_id,
-    });
+    let action = app
+        .same_thread_resume_action(&crate::resume_picker::SessionTarget {
+            path: Some(test_path_buf("/tmp/project")),
+            thread_id,
+        })
+        .await;
 
-    assert!(ignored);
+    assert_eq!(action, SameThreadResumeAction::Ignore);
     let cell = match app_event_rx.try_recv() {
         Ok(AppEvent::InsertHistoryCell(cell)) => cell,
         other => panic!("expected info message after same-thread resume, saw {other:?}"),
@@ -281,17 +284,45 @@ async fn ignore_same_thread_resume_reports_noop_for_current_thread() {
 }
 
 #[tokio::test]
+async fn ignore_same_thread_resume_allows_provider_rebind_for_current_thread() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let thread_id = ThreadId::new();
+    let mut session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
+    session.model_provider_id = "old-provider".to_string();
+    app.chat_widget.handle_thread_session(session.clone());
+    app.thread_event_channels.insert(
+        thread_id,
+        ThreadEventChannel::new_with_session(THREAD_EVENT_CHANNEL_CAPACITY, session, Vec::new()),
+    );
+    app.activate_thread_channel(thread_id).await;
+    while app_event_rx.try_recv().is_ok() {}
+    app.config.model_provider_id = "current-provider".to_string();
+
+    let action = app
+        .same_thread_resume_action(&crate::resume_picker::SessionTarget {
+            path: Some(test_path_buf("/tmp/project")),
+            thread_id,
+        })
+        .await;
+
+    assert_eq!(action, SameThreadResumeAction::RestartForProviderRebind);
+    assert!(app_event_rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn ignore_same_thread_resume_allows_reattaching_displayed_inactive_thread() {
     let mut app = make_test_app().await;
     let thread_id = ThreadId::new();
     let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
     app.chat_widget.handle_thread_session(session);
 
-    let ignored = app.ignore_same_thread_resume(&crate::resume_picker::SessionTarget {
-        path: Some(test_path_buf("/tmp/project")),
-        thread_id,
-    });
+    let action = app
+        .same_thread_resume_action(&crate::resume_picker::SessionTarget {
+            path: Some(test_path_buf("/tmp/project")),
+            thread_id,
+        })
+        .await;
 
-    assert!(!ignored);
+    assert_eq!(action, SameThreadResumeAction::Resume);
     assert!(app.transcript_cells.is_empty());
 }

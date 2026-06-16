@@ -356,7 +356,7 @@ async fn run_resume_picker_with_launch_context(
         app_server.remote_cwd_override(),
     );
     let local_filter_cwd = local_picker_cwd_filter(&cwd_filter, uses_remote_workspace);
-    let provider_filter = picker_provider_filter(config, uses_remote_workspace);
+    let provider_filter = resume_picker_provider_filter(config, uses_remote_workspace);
     let runtime_keymap = picker_runtime_keymap(config)?;
     let options = SessionPickerRunOptions {
         show_all,
@@ -401,7 +401,7 @@ pub async fn run_fork_picker_with_app_server(
         app_server.remote_cwd_override(),
     );
     let local_filter_cwd = local_picker_cwd_filter(&cwd_filter, uses_remote_workspace);
-    let provider_filter = picker_provider_filter(config, uses_remote_workspace);
+    let provider_filter = fork_picker_provider_filter(config, uses_remote_workspace);
     let runtime_keymap = picker_runtime_keymap(config)?;
     let options = SessionPickerRunOptions {
         show_all,
@@ -521,8 +521,16 @@ fn local_picker_cwd_filter(
     }
 }
 
-fn picker_provider_filter(_config: &Config, _uses_remote_workspace: bool) -> ProviderFilter {
+fn resume_picker_provider_filter(_config: &Config, _uses_remote_workspace: bool) -> ProviderFilter {
     ProviderFilter::Any
+}
+
+fn fork_picker_provider_filter(config: &Config, uses_remote_workspace: bool) -> ProviderFilter {
+    if uses_remote_workspace {
+        ProviderFilter::Any
+    } else {
+        ProviderFilter::MatchDefault(config.model_provider_id.clone())
+    }
 }
 
 fn picker_runtime_keymap(config: &Config) -> Result<RuntimeKeymap> {
@@ -3211,6 +3219,14 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::tempdir;
 
+    async fn test_config(codex_home: &Path) -> Config {
+        crate::legacy_core::config::ConfigBuilder::default()
+            .codex_home(codex_home.to_path_buf())
+            .build()
+            .await
+            .expect("config should build")
+    }
+
     fn page(
         rows: Vec<Row>,
         next_cursor: Option<&str>,
@@ -3315,6 +3331,65 @@ mod tests {
             params.cwd,
             Some(ThreadListCwdFilter::One(String::from("/tmp/project")))
         );
+    }
+
+    #[tokio::test]
+    async fn resume_picker_provider_filter_keeps_cross_provider_discovery() {
+        let temp_dir = tempdir().expect("tempdir");
+        let config = test_config(temp_dir.path()).await;
+
+        let local_params = thread_list_params(
+            None,
+            None,
+            resume_picker_provider_filter(&config, /*uses_remote_workspace*/ false),
+            ThreadSortKey::UpdatedAt,
+            /*include_non_interactive*/ false,
+        );
+        let remote_params = thread_list_params(
+            None,
+            None,
+            resume_picker_provider_filter(&config, /*uses_remote_workspace*/ true),
+            ThreadSortKey::UpdatedAt,
+            /*include_non_interactive*/ false,
+        );
+
+        assert_eq!(local_params.model_providers, None);
+        assert_eq!(remote_params.model_providers, None);
+    }
+
+    #[tokio::test]
+    async fn fork_picker_provider_filter_matches_current_provider_for_local_sessions() {
+        let temp_dir = tempdir().expect("tempdir");
+        let config = test_config(temp_dir.path()).await;
+
+        let params = thread_list_params(
+            None,
+            None,
+            fork_picker_provider_filter(&config, /*uses_remote_workspace*/ false),
+            ThreadSortKey::UpdatedAt,
+            /*include_non_interactive*/ false,
+        );
+
+        assert_eq!(
+            params.model_providers,
+            Some(vec![config.model_provider_id.clone()])
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_picker_provider_filter_omits_client_provider_for_remote_sessions() {
+        let temp_dir = tempdir().expect("tempdir");
+        let config = test_config(temp_dir.path()).await;
+
+        let params = thread_list_params(
+            None,
+            None,
+            fork_picker_provider_filter(&config, /*uses_remote_workspace*/ true),
+            ThreadSortKey::UpdatedAt,
+            /*include_non_interactive*/ false,
+        );
+
+        assert_eq!(params.model_providers, None);
     }
 
     #[test]

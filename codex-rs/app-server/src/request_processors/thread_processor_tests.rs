@@ -656,6 +656,82 @@ mod thread_processor_behavior_tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn derive_config_from_resume_override_prefers_explicit_model_provider_over_session_thread_config()
+    -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let session_provider = ModelProviderInfo {
+            name: "session".to_string(),
+            base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
+            env_key: None,
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: true,
+        };
+        let request_provider = ModelProviderInfo {
+            name: "request".to_string(),
+            base_url: Some("http://127.0.0.1:9999/api/codex".to_string()),
+            env_key: None,
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: true,
+        };
+        let config_manager = ConfigManager::new(
+            temp_dir.path().to_path_buf(),
+            Vec::new(),
+            LoaderOverrides::default(),
+            /*strict_config*/ false,
+            CloudConfigBundleLoader::default(),
+            Arg0DispatchPaths::default(),
+            Arc::new(StaticThreadConfigLoader::new(vec![
+                ThreadConfigSource::Session(SessionThreadConfig {
+                    model_provider: Some("session".to_string()),
+                    model_providers: HashMap::from([
+                        ("session".to_string(), session_provider),
+                        ("request".to_string(), request_provider.clone()),
+                    ]),
+                    features: BTreeMap::from([("plugins".to_string(), false)]),
+                }),
+            ])),
+        );
+        let config = config_manager
+            .load_with_overrides(
+                None,
+                ConfigOverrides {
+                    model_provider: Some("request".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(config.model_provider_id, "request");
+        assert_eq!(config.model_provider, request_provider);
+        assert!(!config.features.enabled(Feature::Plugins));
+        Ok(())
+    }
+
     #[test]
     fn collect_resume_override_mismatches_includes_service_tier() {
         let cwd = test_path_buf("/tmp").abs();
@@ -807,8 +883,8 @@ mod thread_processor_behavior_tests {
     }
 
     #[test]
-    fn merge_persisted_resume_metadata_prefers_persisted_model_and_reasoning_effort_without_restoring_provider() -> Result<()>
-    {
+    fn merge_persisted_resume_metadata_prefers_persisted_model_and_reasoning_effort_without_restoring_provider()
+    -> Result<()> {
         let mut request_overrides = None;
         let mut typesafe_overrides = ConfigOverrides::default();
         let persisted_metadata =

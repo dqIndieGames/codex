@@ -7,6 +7,13 @@
 use super::*;
 use crate::session_resume::read_session_model;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SameThreadResumeAction {
+    Ignore,
+    Resume,
+    RestartForProviderRebind,
+}
+
 impl App {
     pub(super) async fn shutdown_current_thread(&mut self, app_server: &mut AppServerSession) {
         if let Some(thread_id) = self.chat_widget.thread_id() {
@@ -160,19 +167,33 @@ impl App {
         self.active_thread_id.or(self.chat_widget.thread_id())
     }
 
-    pub(super) fn ignore_same_thread_resume(
+    pub(super) async fn same_thread_resume_action(
         &mut self,
         target_session: &crate::resume_picker::SessionTarget,
-    ) -> bool {
+    ) -> SameThreadResumeAction {
         if self.active_thread_id != Some(target_session.thread_id) {
-            return false;
+            return SameThreadResumeAction::Resume;
         };
+
+        let active_provider =
+            if let Some(channel) = self.thread_event_channels.get(&target_session.thread_id) {
+                let store = channel.store.lock().await;
+                store
+                    .session
+                    .as_ref()
+                    .map(|session| session.model_provider_id.clone())
+            } else {
+                None
+            };
+        if active_provider.as_deref() != Some(self.config.model_provider_id.as_str()) {
+            return SameThreadResumeAction::RestartForProviderRebind;
+        }
 
         self.chat_widget.add_info_message(
             format!("Already viewing {}.", target_session.display_label()),
             /*hint*/ None,
         );
-        true
+        SameThreadResumeAction::Ignore
     }
 
     /// Mirrors the visible thread into the contextual footer row.

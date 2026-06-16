@@ -257,6 +257,115 @@ async fn thread_resume_with_empty_path_uses_running_thread_id() -> Result<()> {
 }
 
 #[tokio::test]
+async fn thread_resume_uses_current_provider_after_cross_provider_resume() -> Result<()> {
+    let old_server = create_mock_responses_server_repeating_assistant("Old").await;
+    let current_server = create_mock_responses_server_repeating_assistant("Current").await;
+    let codex_home = TempDir::new()?;
+    create_dual_provider_config_toml(
+        codex_home.path(),
+        &old_server.uri(),
+        &current_server.uri(),
+        "old_provider",
+    )?;
+
+    let mut first_mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, first_mcp.initialize()).await??;
+
+    let start_id = first_mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        first_mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+
+    let materialize_turn_id = first_mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            client_user_message_id: None,
+            input: vec![UserInput::Text {
+                text: "materialize old provider rollout".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        first_mcp.read_stream_until_response_message(RequestId::Integer(materialize_turn_id)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        first_mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    wait_for_responses_request_count(&old_server, 1).await?;
+    wait_for_responses_request_count(&current_server, 0).await?;
+    drop(first_mcp);
+
+    create_dual_provider_config_toml(
+        codex_home.path(),
+        &old_server.uri(),
+        &current_server.uri(),
+        "current_provider",
+    )?;
+    let mut second_mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, second_mcp.initialize()).await??;
+
+    let resume_id = second_mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            model_provider: Some("current_provider".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        second_mcp.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let ThreadResumeResponse {
+        thread: resumed,
+        model_provider,
+        ..
+    } = to_response::<ThreadResumeResponse>(resume_resp)?;
+    assert_eq!(resumed.id, thread.id);
+    assert_eq!(model_provider, "current_provider");
+
+    let current_turn_id = second_mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            client_user_message_id: None,
+            input: vec![UserInput::Text {
+                text: "continue on current provider".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        second_mcp.read_stream_until_response_message(RequestId::Integer(current_turn_id)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        second_mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    wait_for_responses_request_count(&old_server, 1).await?;
+    wait_for_responses_request_count(&current_server, 1).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_resume_running_thread_uses_cached_instruction_sources() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
@@ -3639,6 +3748,44 @@ personality = true
 [model_providers.mock_provider]
 name = "Mock provider for test"
 base_url = "{server_uri}/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+"#
+        ),
+    )
+}
+
+fn create_dual_provider_config_toml(
+    codex_home: &std::path::Path,
+    old_server_uri: &str,
+    current_server_uri: &str,
+    active_provider: &str,
+) -> std::io::Result<()> {
+    let config_toml = codex_home.join("config.toml");
+    std::fs::write(
+        config_toml,
+        format!(
+            r#"
+model = "gpt-5.3-codex"
+approval_policy = "never"
+sandbox_mode = "read-only"
+
+model_provider = "{active_provider}"
+
+[features]
+personality = true
+
+[model_providers.old_provider]
+name = "Old provider for test"
+base_url = "{old_server_uri}/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+
+[model_providers.current_provider]
+name = "Current provider for test"
+base_url = "{current_server_uri}/v1"
 wire_api = "responses"
 request_max_retries = 0
 stream_max_retries = 0

@@ -25,6 +25,8 @@ use crate::multi_agents::AgentPickerThreadEntry;
 use crate::version::CODEX_CLI_DISPLAY_VERSION;
 use assert_matches::assert_matches;
 
+use super::thread_routing::SameThreadResumeAction;
+
 use crate::app_command::AppCommand as Op;
 use crate::diff_model::FileChange;
 use crate::legacy_core::config::ConfigBuilder;

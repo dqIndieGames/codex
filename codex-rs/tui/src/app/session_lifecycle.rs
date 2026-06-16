@@ -4,6 +4,7 @@
 //! resuming/forking saved sessions, replacing ChatWidget instances, and maintaining the agent picker
 //! cache used for multi-agent navigation.
 
+use super::thread_routing::SameThreadResumeAction;
 use super::*;
 
 impl App {
@@ -665,9 +666,15 @@ impl App {
         app_server: &mut AppServerSession,
         target_session: SessionTarget,
     ) -> Result<AppRunControl> {
-        if self.ignore_same_thread_resume(&target_session) {
-            tui.frame_requester().schedule_frame();
-            return Ok(AppRunControl::Continue);
+        match self.same_thread_resume_action(&target_session).await {
+            SameThreadResumeAction::Ignore => {
+                tui.frame_requester().schedule_frame();
+                return Ok(AppRunControl::Continue);
+            }
+            SameThreadResumeAction::RestartForProviderRebind => {
+                self.shutdown_current_thread(app_server).await;
+            }
+            SameThreadResumeAction::Resume => {}
         }
 
         let current_cwd = self.config.cwd.to_path_buf();
