@@ -25,6 +25,7 @@ use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::ContextCompactionItem;
@@ -47,9 +48,12 @@ use tracing::info;
 // Mirror the current /responses/compact retained-message default while the
 // server-side path remains the reference implementation.
 const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
-// Compact attempts can run much longer than normal turns, so keep the per-transport
-// retry budget smaller than the general Responses stream retry budget.
+// Compact attempts can run much longer than normal turns, so keep the ordinary
+// per-transport retry budget smaller than the general Responses stream loop.
+// Capacity errors are promoted to persistent route recovery inside the shared
+// retry helper.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
+const REMOTE_COMPACTION_V2_FALLBACK_RETRY_THRESHOLD: u64 = 3;
 
 pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
@@ -325,11 +329,12 @@ async fn run_remote_compaction_request_v2(
     prompt: &Prompt,
     turn_metadata_header: Option<&str>,
 ) -> CodexResult<RemoteCompactionV2Output> {
-    let max_retries = turn_context
+    let fallback_retry_threshold = turn_context
         .provider
         .info()
-        .stream_max_retries()
-        .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
+        .stream_fallback_retry_threshold()
+        .min(REMOTE_COMPACTION_V2_FALLBACK_RETRY_THRESHOLD);
+    let retry_budget = remote_compaction_v2_stream_retry_budget(turn_context.provider.info());
     let mut retries = 0;
     loop {
         let result = match client_session
@@ -355,8 +360,8 @@ async fn run_remote_compaction_request_v2(
             Err(err) => {
                 handle_retryable_response_stream_error(
                     &mut retries,
-                    max_retries,
-                    Some(max_retries),
+                    fallback_retry_threshold,
+                    retry_budget,
                     err,
                     client_session,
                     sess,
@@ -418,6 +423,14 @@ async fn collect_compaction_output(
         compaction_output,
         token_usage: completed_token_usage,
     })
+}
+
+fn remote_compaction_v2_stream_retry_budget(provider: &ModelProviderInfo) -> Option<u64> {
+    Some(
+        provider
+            .stream_max_retries()
+            .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES),
+    )
 }
 
 fn build_v2_compacted_history(
@@ -583,6 +596,19 @@ mod tests {
             rx_event,
             consumer_dropped: CancellationToken::new(),
         }
+    }
+
+    #[test]
+    fn remote_compaction_v2_retry_budget_stays_finite_when_provider_uses_default_retries() {
+        let provider = ModelProviderInfo {
+            stream_max_retries: None,
+            ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        };
+
+        assert_eq!(
+            remote_compaction_v2_stream_retry_budget(&provider),
+            Some(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES)
+        );
     }
 
     #[test]

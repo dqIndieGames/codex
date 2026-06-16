@@ -18,6 +18,7 @@ const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
     Sampling,
+    LocalCompaction,
     RemoteCompactionV2,
 }
 
@@ -40,7 +41,13 @@ pub(crate) async fn handle_retryable_response_stream_error(
         return Ok(());
     }
 
-    if *retries >= fallback_retry_threshold
+    let persistent_route_recovery = requires_persistent_route_recovery(&err);
+    let effective_retry_budget =
+        effective_stream_retry_budget(retry_budget, persistent_route_recovery);
+    let effective_fallback_retry_threshold =
+        effective_fallback_retry_threshold(fallback_retry_threshold, persistent_route_recovery);
+
+    if *retries >= effective_fallback_retry_threshold
         && client_session.try_switch_fallback_transport(
             &turn_context.session_telemetry,
             &turn_context.model_info,
@@ -57,13 +64,13 @@ pub(crate) async fn handle_retryable_response_stream_error(
         return Ok(());
     }
 
-    if retry_budget.is_none_or(|max_retries| *retries < max_retries) {
+    if effective_retry_budget.is_none_or(|max_retries| *retries < max_retries) {
         *retries += 1;
         let retry_count = *retries;
         if allow_route_recovery && retry_count % ROUTE_RECOVERY_RETRY_THRESHOLD == 0 {
             client_session.activate_retry_route_recovery();
         }
-        let display_max_retries = retry_budget.unwrap_or(u64::MAX);
+        let display_max_retries = effective_retry_budget.unwrap_or(u64::MAX);
         let delay = cap_retry_delay(match &err {
             CodexErr::Stream(_, requested_delay) => {
                 requested_delay.unwrap_or_else(|| backoff(retry_count))
@@ -101,6 +108,32 @@ pub(crate) async fn handle_retryable_response_stream_error(
     Err(err)
 }
 
+fn effective_stream_retry_budget(
+    retry_budget: Option<u64>,
+    requires_persistent_route_recovery: bool,
+) -> Option<u64> {
+    if requires_persistent_route_recovery {
+        None
+    } else {
+        retry_budget
+    }
+}
+
+fn effective_fallback_retry_threshold(
+    fallback_retry_threshold: u64,
+    requires_persistent_route_recovery: bool,
+) -> u64 {
+    if requires_persistent_route_recovery {
+        fallback_retry_threshold.max(ROUTE_RECOVERY_RETRY_THRESHOLD)
+    } else {
+        fallback_retry_threshold
+    }
+}
+
+fn requires_persistent_route_recovery(err: &CodexErr) -> bool {
+    matches!(err, CodexErr::ServerOverloaded)
+}
+
 fn retry_status_suffix(retries: u64, max_retries: u64) -> String {
     if max_retries == u64::MAX {
         format!("{retries} (unbounded)")
@@ -110,7 +143,10 @@ fn retry_status_suffix(retries: u64, max_retries: u64) -> String {
 }
 
 fn transport_retry_status_message(retries: u64, max_retries: u64) -> String {
-    format!("Reconnecting... {}", retry_status_suffix(retries, max_retries))
+    format!(
+        "Reconnecting... {}",
+        retry_status_suffix(retries, max_retries)
+    )
 }
 
 async fn sleep_stream_retry_delay(
@@ -152,6 +188,14 @@ fn log_retry(
             warn!(
                 retry = %retry_status_suffix(retries, max_retries),
                 "stream disconnected - retrying sampling request in {delay:?}...",
+            );
+        }
+        ResponsesStreamRequest::LocalCompaction => {
+            warn!(
+                turn_id = %turn_context.sub_id,
+                retry = %retry_status_suffix(retries, max_retries),
+                compact_error = %err,
+                "local compaction stream failed; retrying request in {delay:?}..."
             );
         }
         ResponsesStreamRequest::RemoteCompactionV2 => {

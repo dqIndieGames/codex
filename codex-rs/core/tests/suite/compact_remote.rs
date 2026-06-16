@@ -65,6 +65,18 @@ fn estimate_compact_payload_tokens(request: &responses::ResponsesRequest) -> i64
         .saturating_add(approx_token_count(&request.instructions_text()))
 }
 
+fn response_prompt_cache_keys(requests: &[responses::ResponsesRequest]) -> Vec<String> {
+    requests
+        .iter()
+        .map(|request| {
+            request.body_json()["prompt_cache_key"]
+                .as_str()
+                .expect("prompt_cache_key")
+                .to_string()
+        })
+        .collect()
+}
+
 fn assert_tools_payload_does_not_defer(body: &Value) {
     if let Some(tools) = body.get("tools") {
         assert!(
@@ -1131,6 +1143,97 @@ async fn remote_compact_v2_retries_failures_with_stream_retry_budget() -> Result
     assert!(
         !follow_up_body.contains("FAILED_COMPACT_SUMMARY"),
         "expected failed compaction attempt output to be discarded"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_compact_v2_capacity_ignores_zero_stream_budget_and_route_recovers() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                let _ = config.features.enable(Feature::RemoteCompactionV2);
+                config.model_provider.request_max_retries = Some(0);
+                config.model_provider.stream_max_retries = Some(0);
+            }),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+
+    let failed_body = responses::sse_failed(
+        "resp-overloaded",
+        "server_is_overloaded",
+        "Selected model is at capacity. Please try a different model.",
+    );
+    let responses_mock = responses::mount_response_sequence(
+        harness.server(),
+        vec![
+            responses::sse_response(responses::sse(vec![
+                responses::ev_assistant_message("m1", "FIRST_REMOTE_REPLY"),
+                responses::ev_completed("resp-1"),
+            ])),
+            responses::sse_response(failed_body.clone()),
+            responses::sse_response(failed_body.clone()),
+            responses::sse_response(failed_body),
+            responses::sse_response(responses::sse(vec![
+                serde_json::json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "compaction",
+                        "encrypted_content": "RECOVERED_COMPACT_SUMMARY",
+                    }
+                }),
+                responses::ev_completed("resp-compact-recovered"),
+            ])),
+        ],
+    )
+    .await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello remote compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    codex.submit(Op::Compact).await?;
+    wait_for_turn_complete(&codex).await;
+
+    let response_requests = responses_mock.requests();
+    assert_eq!(
+        5,
+        response_requests.len(),
+        "expected initial turn, three capacity compact attempts, and recovered compact attempt"
+    );
+
+    for compact_request in &response_requests[1..=4] {
+        assert_eq!("/v1/responses", compact_request.path());
+        assert!(
+            compact_request
+                .body_json()
+                .to_string()
+                .contains("\"type\":\"compaction_trigger\""),
+            "expected v2 compaction request to include the compaction_trigger item"
+        );
+    }
+
+    let compact_cache_keys = response_prompt_cache_keys(&response_requests[1..=4]);
+    assert_eq!(compact_cache_keys[0], compact_cache_keys[1]);
+    assert_eq!(compact_cache_keys[1], compact_cache_keys[2]);
+    assert!(
+        compact_cache_keys[3].ends_with(":retry-recovery:1"),
+        "capacity during remote compaction must route recover instead of surfacing a terminal error: {compact_cache_keys:?}"
     );
 
     Ok(())

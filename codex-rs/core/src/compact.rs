@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 use std::time::Instant;
 
 use crate::Prompt;
@@ -9,13 +8,14 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::responses_retry::ResponsesStreamRequest;
+use crate::responses_retry::handle_retryable_response_stream_error;
 #[cfg(test)]
 use crate::session::PreviousTurnSettings;
 use crate::session::session::Session;
 use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
 use crate::turn_metadata::CompactionTurnMetadata;
-use crate::util::backoff;
 use codex_analytics::CodexCompactionEvent;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
@@ -48,7 +48,6 @@ use codex_model_provider_info::ModelProviderInfo;
 pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
-const COMPACT_RETRY_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Controls whether compaction replacement history must include initial context.
 ///
@@ -211,7 +210,11 @@ async fn run_compact_task_inner_impl(
         turn_context.truncation_policy,
     );
 
-    let max_retries = turn_context.provider.info().stream_max_retries();
+    let fallback_retry_threshold = turn_context
+        .provider
+        .info()
+        .stream_fallback_retry_threshold();
+    let retry_budget = local_compaction_stream_retry_budget(turn_context.provider.info());
     let mut retries = 0;
     let mut client_session = sess.services.model_client.new_session();
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
@@ -267,22 +270,32 @@ async fn run_compact_task_inner_impl(
                 return Err(e);
             }
             Err(e) => {
-                if retries < max_retries {
-                    retries += 1;
-                    let delay = backoff(retries);
-                    sess.notify_stream_error(
-                        turn_context.as_ref(),
-                        format!("Reconnecting... {retries}/{max_retries}"),
-                        e,
-                    )
-                    .await;
-                    sleep_compaction_retry_delay(delay, &mut retries, &mut client_session).await;
-                    continue;
-                } else {
+                if !e.is_retryable() {
                     sess.track_turn_codex_error(turn_context.as_ref(), &e);
                     let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
                     sess.send_event(&turn_context, event).await;
                     return Err(e);
+                }
+
+                if let Err(e) = handle_retryable_response_stream_error(
+                    &mut retries,
+                    fallback_retry_threshold,
+                    retry_budget,
+                    e,
+                    &mut client_session,
+                    &sess,
+                    &turn_context,
+                    ResponsesStreamRequest::LocalCompaction,
+                    true,
+                )
+                .await
+                {
+                    sess.track_turn_codex_error(turn_context.as_ref(), &e);
+                    let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
+                    sess.send_event(&turn_context, event).await;
+                    return Err(e);
+                } else {
+                    continue;
                 }
             }
         }
@@ -577,32 +590,6 @@ fn build_compacted_history_with_limit(
     history
 }
 
-async fn sleep_compaction_retry_delay(
-    delay: Duration,
-    retries: &mut u64,
-    client_session: &mut ModelClientSession,
-) {
-    if delay.is_zero() {
-        return;
-    }
-
-    let start = tokio::time::Instant::now();
-    loop {
-        if client_session.provider_runtime_changed() {
-            *retries = 0;
-            client_session.sync_latest_provider_runtime_generation();
-            return;
-        }
-
-        let elapsed = start.elapsed();
-        if elapsed >= delay {
-            return;
-        }
-
-        tokio::time::sleep((delay - elapsed).min(COMPACT_RETRY_INTERRUPT_POLL_INTERVAL)).await;
-    }
-}
-
 async fn drain_to_completed(
     sess: &Session,
     turn_context: &TurnContext,
@@ -652,6 +639,10 @@ async fn drain_to_completed(
             Err(e) => return Err(e),
         }
     }
+}
+
+fn local_compaction_stream_retry_budget(provider: &ModelProviderInfo) -> Option<u64> {
+    Some(provider.stream_max_retries())
 }
 
 #[cfg(test)]

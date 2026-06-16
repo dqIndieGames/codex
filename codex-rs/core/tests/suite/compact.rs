@@ -58,6 +58,7 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
 // --- Test helpers -----------------------------------------------------------
 
 pub(super) const FIRST_REPLY: &str = "FIRST_REPLY";
@@ -265,6 +266,18 @@ fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
     provider
+}
+
+fn prompt_cache_keys(requests: &[core_test_support::responses::ResponsesRequest]) -> Vec<String> {
+    requests
+        .iter()
+        .map(|request| {
+            request.body_json()["prompt_cache_key"]
+                .as_str()
+                .expect("prompt_cache_key")
+                .to_string()
+        })
+        .collect()
 }
 
 fn model_info_with_context_window(slug: &str, context_window: i64) -> ModelInfo {
@@ -2632,6 +2645,154 @@ async fn manual_compact_non_context_failure_retries_then_emits_task_error() {
         "expected local compact task error prefix, got {task_error_message}"
     );
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compact_capacity_ignores_zero_stream_budget_and_route_recovers() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+
+    let user_turn = sse(vec![
+        ev_assistant_message("m1", FIRST_REPLY),
+        ev_completed("r1"),
+    ]);
+    let compact_capacity = sse_failed(
+        "resp-overloaded",
+        "server_is_overloaded",
+        "Selected model is at capacity. Please try a different model.",
+    );
+    let compact_success = sse(vec![
+        ev_assistant_message("m-summary", "LOCAL_COMPACT_SUMMARY"),
+        ev_completed("resp-compact-recovered"),
+    ]);
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            user_turn,
+            compact_capacity.clone(),
+            compact_capacity.clone(),
+            compact_capacity,
+            compact_success,
+        ],
+    )
+    .await;
+
+    let mut model_provider = non_openai_model_provider(&server);
+    model_provider.request_max_retries = Some(0);
+    model_provider.stream_max_retries = Some(0);
+
+    let codex = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            set_test_compact_prompt(config);
+            config.model_auto_compact_token_limit = Some(200_000);
+        })
+        .build(&server)
+        .await
+        .expect("build codex")
+        .codex;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "first turn".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit user input");
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await.expect("trigger compact");
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        5,
+        "expected user turn, three capacity compact attempts, and recovered compact attempt"
+    );
+    let compact_cache_keys = prompt_cache_keys(&requests[1..=4]);
+    assert_eq!(compact_cache_keys[0], compact_cache_keys[1]);
+    assert_eq!(compact_cache_keys[1], compact_cache_keys[2]);
+    assert!(
+        compact_cache_keys[3].ends_with(":retry-recovery:1"),
+        "local compact capacity must route recover instead of surfacing a terminal error: {compact_cache_keys:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compact_non_capacity_500_respects_zero_stream_budget() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+
+    let user_turn = sse(vec![
+        ev_assistant_message("m1", FIRST_REPLY),
+        ev_completed("r1"),
+    ]);
+    let request_log = mount_response_sequence(
+        &server,
+        vec![
+            sse_response(user_turn),
+            ResponseTemplate::new(500).set_body_string("plain compact failure"),
+        ],
+    )
+    .await;
+
+    let mut model_provider = non_openai_model_provider(&server);
+    model_provider.request_max_retries = Some(0);
+    model_provider.stream_max_retries = Some(0);
+
+    let codex = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            set_test_compact_prompt(config);
+            config.model_auto_compact_token_limit = Some(200_000);
+        })
+        .build(&server)
+        .await
+        .expect("build codex")
+        .codex;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "first turn".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit user input");
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await.expect("trigger compact");
+    let error_message = wait_for_event_match(&codex, |event| match event {
+        EventMsg::Error(err) => Some(err.message.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(
+        !error_message.contains("Selected model is at capacity"),
+        "non-capacity compact failure must not be reported as capacity: {error_message}"
+    );
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "non-capacity compact 500 must not become an unbounded retry"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

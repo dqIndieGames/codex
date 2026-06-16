@@ -241,6 +241,20 @@ fn should_use_remote_compact_task_for_azure_provider() {
 
     assert!(should_use_remote_compact_task(&provider));
 }
+
+#[test]
+fn local_compaction_retry_budget_stays_finite_when_provider_uses_default_retries() {
+    let provider = ModelProviderInfo {
+        stream_max_retries: None,
+        ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+    };
+
+    assert_eq!(
+        local_compaction_stream_retry_budget(&provider),
+        Some(provider.stream_max_retries())
+    );
+}
+
 #[tokio::test]
 async fn process_compacted_history_replaces_developer_messages() {
     let compacted_history = vec![

@@ -278,6 +278,58 @@ async fn server_overloaded_stream_error_retries_and_route_recovers_after_three_f
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_overloaded_stream_error_ignores_zero_stream_budget_and_route_recovers() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let failed_body = sse_failed(
+        "resp-overloaded",
+        "server_is_overloaded",
+        "Selected model is at capacity. Please try a different model.",
+    );
+    let response_mock = mount_response_sequence(
+        &server,
+        vec![
+            sse_response_template(failed_body.clone()),
+            sse_response_template(failed_body.clone()),
+            sse_response_template(failed_body),
+            sse_response_template(sse(vec![
+                ev_response_created("resp-recovered"),
+                ev_completed("resp-recovered"),
+            ])),
+        ],
+    )
+    .await;
+
+    let mut provider = retry_route_recovery_provider(&server, /*request_max_retries*/ 0);
+    provider.stream_max_retries = Some(0);
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::from_api_key("test"))
+        .with_config(move |config| {
+            config.model_provider = provider;
+        });
+    let codex = builder
+        .build(&server)
+        .await
+        .expect("create conversation")
+        .codex;
+
+    submit_plain_text_turn(&codex, "hello").await;
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 4);
+    let cache_keys = prompt_cache_keys(&requests);
+    assert_eq!(cache_keys[0], cache_keys[1]);
+    assert_eq!(cache_keys[1], cache_keys[2]);
+    assert!(
+        cache_keys[3].ends_with(":retry-recovery:1"),
+        "capacity must not become a terminal error when stream_max_retries is zero: {cache_keys:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn function_call_output_request_retry_keeps_tool_output_and_route_recovers() {
     skip_if_no_network!();
 
