@@ -40,6 +40,7 @@ use crate::realtime_conversation::handle_text as handle_realtime_conversation_te
 use crate::render_skills_section;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
+use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::rollout::session_index;
 use crate::skills_load_input_from_config;
 use crate::stream_events_utils::HandleOutputCtx;
@@ -1421,10 +1422,15 @@ impl Session {
         let per_turn_config = Arc::new(per_turn_config);
         let turn_metadata_state = Arc::new(TurnMetadataState::new(
             conversation_id.to_string(),
+            conversation_id.to_string(),
+            /*forked_from_thread_id*/ None,
+            /*parent_thread_id*/ None,
+            &session_source,
             sub_id.clone(),
-            cwd.to_path_buf(),
-            session_configuration.sandbox_policy.get(),
+            cwd.clone(),
+            &session_configuration.permission_profile(),
             session_configuration.windows_sandbox_level,
+            network.is_some(),
         ));
         let (current_date, timezone) = local_time_context();
         TurnContext {
@@ -1912,11 +1918,12 @@ impl Session {
                     session_configuration.provider.clone(),
                     session_configuration.session_source.clone(),
                     config.model_verbosity,
+                    config.force_service_tier_priority,
                     config.features.enabled(Feature::EnableRequestCompression),
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),
+                    /*attestation_provider*/ None,
                 );
-                model_client.set_force_service_tier_priority(config.force_service_tier_priority);
                 model_client
             },
             code_mode_service: crate::tools::code_mode::CodeModeService::new(
@@ -5659,12 +5666,21 @@ async fn spawn_review_thread(
 
     let per_turn_config = Arc::new(per_turn_config);
     let review_turn_id = sub_id.to_string();
+    let review_permission_profile = PermissionProfile::from_runtime_permissions(
+        &parent_turn_context.file_system_sandbox_policy,
+        parent_turn_context.network_sandbox_policy,
+    );
     let turn_metadata_state = Arc::new(TurnMetadataState::new(
         sess.conversation_id.to_string(),
+        sess.conversation_id.to_string(),
+        /*forked_from_thread_id*/ None,
+        /*parent_thread_id*/ None,
+        &parent_turn_context.session_source,
         review_turn_id.clone(),
-        parent_turn_context.cwd.to_path_buf(),
-        parent_turn_context.sandbox_policy.get(),
+        parent_turn_context.cwd.clone(),
+        &review_permission_profile,
         parent_turn_context.windows_sandbox_level,
+        parent_turn_context.network.is_some(),
     ));
 
     let review_turn_context = TurnContext {
@@ -6088,13 +6104,17 @@ pub(crate) async fn run_turn(
             })
             .map(|user_message| user_message.message())
             .collect::<Vec<String>>();
-        let turn_metadata_header = turn_context.turn_metadata_state.current_header_value();
+        let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
+            sess.installation_id.clone(),
+            format!("{}:0", sess.conversation_id),
+            CodexResponsesRequestKind::Turn,
+        );
         match run_sampling_request(
             Arc::clone(&sess),
             Arc::clone(&turn_context),
             Arc::clone(&turn_diff_tracker),
             &mut client_session,
-            turn_metadata_header.as_deref(),
+            &responses_metadata,
             sampling_request_input,
             &explicitly_enabled_connectors,
             skills_outcome,
@@ -6585,7 +6605,7 @@ async fn run_sampling_request(
     turn_context: Arc<TurnContext>,
     turn_diff_tracker: SharedTurnDiffTracker,
     client_session: &mut ModelClientSession,
-    turn_metadata_header: Option<&str>,
+    responses_metadata: &crate::responses_metadata::CodexResponsesMetadata,
     input: Vec<ResponseItem>,
     explicitly_enabled_connectors: &HashSet<String>,
     skills_outcome: Option<&SkillLoadOutcome>,
@@ -6634,7 +6654,7 @@ async fn run_sampling_request(
             Arc::clone(&sess),
             Arc::clone(&turn_context),
             client_session,
-            turn_metadata_header,
+            responses_metadata,
             Arc::clone(&turn_diff_tracker),
             server_model_warning_emitted_for_turn,
             &prompt,
@@ -7496,7 +7516,7 @@ async fn try_run_sampling_request(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     client_session: &mut ModelClientSession,
-    turn_metadata_header: Option<&str>,
+    responses_metadata: &crate::responses_metadata::CodexResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
     server_model_warning_emitted_for_turn: &mut bool,
     prompt: &Prompt,
@@ -7547,7 +7567,8 @@ async fn try_run_sampling_request(
             turn_context.reasoning_effort,
             turn_context.reasoning_summary,
             turn_context.config.service_tier,
-            turn_metadata_header,
+            responses_metadata,
+            &codex_rollout_trace::InferenceTraceContext::disabled(),
         )
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)

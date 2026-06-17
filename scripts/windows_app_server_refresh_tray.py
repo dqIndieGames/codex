@@ -4,6 +4,7 @@ import ctypes
 import datetime as dt
 import json
 import os
+import queue
 import re
 import tempfile
 import threading
@@ -1496,6 +1497,391 @@ def format_apply_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
     return title, "\n".join(lines), icon_flag
 
 
+def provider_status_text(provider: dict[str, Any]) -> tuple[str, bool]:
+    has_base_url = bool(provider.get("has_base_url"))
+    has_token = bool(provider.get("has_experimental_bearer_token"))
+    if has_base_url and has_token:
+        return "可复制", True
+    if not has_base_url and not has_token:
+        return "缺少 base_url 和 token", False
+    if not has_base_url:
+        return "缺少 base_url", False
+    return "缺少 token", False
+
+
+def provider_display_rows(
+    providers: list[dict[str, Any]],
+    *,
+    selected_provider_id: str | None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for provider in providers:
+        provider_id = str(provider.get("provider_id") or "")
+        if not provider_id:
+            continue
+        display_name = str(provider.get("display_name") or provider_id)
+        status, can_apply = provider_status_text(provider)
+        rows.append(
+            {
+                "provider_id": provider_id,
+                "display_name": display_name,
+                "status": status,
+                "selected": provider_id == selected_provider_id,
+                "can_apply": can_apply,
+            }
+        )
+    return rows
+
+
+def dashboard_model_from_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    live_instance_count: int,
+    last_result: str | None,
+) -> dict[str, Any]:
+    providers = snapshot.get("providers")
+    if not isinstance(providers, list):
+        providers = []
+    selected_provider_id = snapshot.get("selected_provider_id")
+    if not isinstance(selected_provider_id, str) or not selected_provider_id:
+        selected_provider_id = None
+
+    rows = provider_display_rows(
+        providers,
+        selected_provider_id=selected_provider_id,
+    )
+    selected_row = next((row for row in rows if row["selected"]), None)
+    catalog_error = snapshot.get("catalog_error")
+    if isinstance(catalog_error, str) and catalog_error:
+        config_status = f"配置错误：{catalog_error}"
+    else:
+        config_status = "配置已加载"
+
+    can_apply = bool(selected_row) and bool(selected_row.get("can_apply")) and not bool(catalog_error)
+    apply_disabled_reason = None
+    if not can_apply:
+        if isinstance(catalog_error, str) and catalog_error:
+            apply_disabled_reason = catalog_error
+        elif selected_row is None:
+            apply_disabled_reason = "请选择要复制的 provider"
+        elif not bool(selected_row.get("can_apply")):
+            apply_disabled_reason = f"所选 provider {selected_row['status']}"
+
+    target_provider_id = snapshot.get("current_model_provider_id")
+    if not isinstance(target_provider_id, str) or not target_provider_id:
+        target_provider_id = "未配置"
+
+    config_path = snapshot.get("config_path")
+    if not isinstance(config_path, str) or not config_path:
+        config_path = str(config_toml_path())
+
+    return {
+        "target_provider_label": target_provider_id,
+        "config_path_label": config_path,
+        "config_status_label": config_status,
+        "live_instances_label": str(live_instance_count),
+        "provider_rows": rows,
+        "selected_provider_id": selected_provider_id,
+        "can_apply": can_apply,
+        "apply_disabled_reason": apply_disabled_reason,
+        "last_result": last_result or "尚未执行",
+    }
+
+
+class DashboardController:
+    def __init__(
+        self,
+        state: TrayState,
+        *,
+        on_state_changed: Callable[[], None],
+    ) -> None:
+        self.state = state
+        self.on_state_changed = on_state_changed
+        self.root: Any | None = None
+        self.provider_tree: Any | None = None
+        self.target_var: Any | None = None
+        self.config_path_var: Any | None = None
+        self.config_status_var: Any | None = None
+        self.live_instances_var: Any | None = None
+        self.apply_button: Any | None = None
+        self.apply_hint_var: Any | None = None
+        self.result_text: Any | None = None
+        self.last_result = "尚未执行"
+        self._ui_queue: queue.Queue[Callable[[], None]] = queue.Queue()
+        self._thread: threading.Thread | None = None
+
+    def show(self) -> None:
+        self._ensure_thread()
+        self._post(self._show_on_ui_thread)
+
+    def close_to_tray(self) -> None:
+        if self.root is not None:
+            self.root.withdraw()
+
+    def destroy(self) -> None:
+        if self._thread is None or not self._thread.is_alive():
+            return
+        self._post(self._destroy_on_ui_thread)
+
+    def reload_catalog_from_tray(self) -> None:
+        if self._thread is None or not self._thread.is_alive():
+            return
+        self._post(self.reload_catalog)
+
+    def _ensure_thread(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run_ui, daemon=True)
+        self._thread.start()
+
+    def _run_ui(self) -> None:
+        self._create_window()
+        self._show_on_ui_thread()
+        self.root.mainloop()
+
+    def _post(self, callback: Callable[[], None]) -> None:
+        self._ui_queue.put(callback)
+
+    def _show_on_ui_thread(self) -> None:
+        if self.root is None:
+            return
+        self.root.deiconify()
+        self.refresh_view()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _destroy_on_ui_thread(self) -> None:
+        if self.root is not None:
+            self.root.destroy()
+            self.root = None
+
+    def _create_window(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title("Codex Provider Refresh")
+        root.geometry("760x520")
+        root.minsize(680, 440)
+        root.protocol("WM_DELETE_WINDOW", self.close_to_tray)
+        self.root = root
+
+        self.target_var = tk.StringVar()
+        self.config_path_var = tk.StringVar()
+        self.config_status_var = tk.StringVar()
+        self.live_instances_var = tk.StringVar()
+        self.apply_hint_var = tk.StringVar()
+
+        frame = ttk.Frame(root, padding=12)
+        frame.grid(row=0, column=0, sticky="nsew")
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=2)
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(1, weight=1)
+        frame.rowconfigure(4, weight=1)
+
+        header = ttk.LabelFrame(frame, text="当前状态")
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        header.columnconfigure(1, weight=1)
+        ttk.Label(header, text="当前正在使用的 provider").grid(row=0, column=0, sticky="w", padx=8, pady=(6, 2))
+        ttk.Label(header, textvariable=self.target_var).grid(row=0, column=1, sticky="w", padx=8, pady=(6, 2))
+        ttk.Label(header, text="已打开的 Codex 实例").grid(row=0, column=2, sticky="w", padx=8, pady=(6, 2))
+        ttk.Label(header, textvariable=self.live_instances_var).grid(row=0, column=3, sticky="w", padx=8, pady=(6, 2))
+        ttk.Label(header, text="配置文件").grid(row=1, column=0, sticky="w", padx=8, pady=(2, 6))
+        ttk.Label(header, textvariable=self.config_path_var).grid(row=1, column=1, columnspan=3, sticky="ew", padx=8, pady=(2, 6))
+
+        providers = ttk.LabelFrame(frame, text="选择要复制的 provider")
+        providers.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        providers.columnconfigure(0, weight=1)
+        providers.rowconfigure(0, weight=1)
+        self.provider_tree = ttk.Treeview(
+            providers,
+            columns=("name", "status"),
+            show="headings",
+            selectmode="browse",
+            height=9,
+        )
+        self.provider_tree.heading("name", text="Provider")
+        self.provider_tree.heading("status", text="状态")
+        self.provider_tree.column("name", width=260, anchor="w")
+        self.provider_tree.column("status", width=160, anchor="w")
+        self.provider_tree.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        self.provider_tree.bind("<<TreeviewSelect>>", self._on_provider_selected)
+
+        target = ttk.LabelFrame(frame, text="当前 target 详情")
+        target.grid(row=1, column=1, sticky="nsew")
+        target.columnconfigure(0, weight=1)
+        ttk.Label(target, text="复制会写入当前正在使用的 provider。").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 2))
+        ttk.Label(target, text="不会切换 model_provider，只同步连接和速度相关字段。").grid(row=1, column=0, sticky="w", padx=8, pady=2)
+        ttk.Label(target, textvariable=self.config_status_var).grid(row=2, column=0, sticky="w", padx=8, pady=(12, 2))
+        ttk.Button(target, text="打开配置文件", command=self.open_config_file).grid(row=3, column=0, sticky="ew", padx=8, pady=(12, 2))
+        ttk.Button(target, text="打开 .codex 文件夹", command=self.open_codex_home).grid(row=4, column=0, sticky="ew", padx=8, pady=2)
+        ttk.Button(target, text="重新加载配置", command=self.reload_catalog).grid(row=5, column=0, sticky="ew", padx=8, pady=2)
+
+        actions = ttk.LabelFrame(frame, text="操作")
+        actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 10))
+        for index in range(4):
+            actions.columnconfigure(index, weight=1)
+        self.apply_button = ttk.Button(
+            actions,
+            text="复制所选 provider 到当前配置并刷新",
+            command=self.apply_selected_provider,
+        )
+        self.apply_button.grid(row=0, column=0, columnspan=4, sticky="ew", padx=8, pady=(8, 4))
+        ttk.Label(actions, textvariable=self.apply_hint_var).grid(row=1, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
+        ttk.Button(actions, text="仅刷新全部", command=self.refresh_all).grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        ttk.Button(actions, text="仅刷新命令行 Codex", command=self.refresh_console).grid(row=2, column=1, sticky="ew", padx=8, pady=(0, 8))
+        ttk.Button(actions, text="仅刷新 Windows App", command=self.refresh_app_server).grid(row=2, column=2, sticky="ew", padx=8, pady=(0, 8))
+        ttk.Button(actions, text="隐藏到托盘", command=self.close_to_tray).grid(row=2, column=3, sticky="ew", padx=8, pady=(0, 8))
+
+        result = ttk.LabelFrame(frame, text="最近结果")
+        result.grid(row=4, column=0, columnspan=2, sticky="nsew")
+        result.columnconfigure(0, weight=1)
+        result.rowconfigure(0, weight=1)
+        self.result_text = tk.Text(result, height=6, wrap="word", state="disabled")
+        self.result_text.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+
+        self._drain_queue()
+
+    def refresh_view(self) -> None:
+        if self.root is None:
+            return
+        model = dashboard_model_from_snapshot(
+            self.state.snapshot(),
+            live_instance_count=len(registrations_for_refresh()),
+            last_result=self.last_result,
+        )
+        self.target_var.set(model["target_provider_label"])
+        self.config_path_var.set(model["config_path_label"])
+        self.config_status_var.set(model["config_status_label"])
+        self.live_instances_var.set(model["live_instances_label"])
+        self._render_provider_rows(model)
+        if model["can_apply"]:
+            self.apply_button.state(["!disabled"])
+            self.apply_hint_var.set("将复制所选 provider 的连接和速度相关字段，并刷新已打开的 Codex。")
+        else:
+            self.apply_button.state(["disabled"])
+            reason = model.get("apply_disabled_reason") or "当前不可应用"
+            self.apply_hint_var.set(str(reason))
+        self._set_result_text(model["last_result"])
+
+    def _render_provider_rows(self, model: dict[str, Any]) -> None:
+        self.provider_tree.delete(*self.provider_tree.get_children())
+        selected_id = model.get("selected_provider_id")
+        for row in model["provider_rows"]:
+            item_id = row["provider_id"]
+            self.provider_tree.insert(
+                "",
+                "end",
+                iid=item_id,
+                values=(row["display_name"], row["status"]),
+            )
+            if item_id == selected_id:
+                self.provider_tree.selection_set(item_id)
+
+    def _set_result_text(self, message: str) -> None:
+        self.result_text.configure(state="normal")
+        self.result_text.delete("1.0", "end")
+        self.result_text.insert("1.0", message)
+        self.result_text.configure(state="disabled")
+
+    def _on_provider_selected(self, _event: Any) -> None:
+        selection = self.provider_tree.selection()
+        if not selection:
+            return
+        provider_id = str(selection[0])
+        if self.state.snapshot().get("selected_provider_id") == provider_id:
+            return
+        self.state.set_selected_provider(provider_id)
+        self.on_state_changed()
+        self.refresh_view()
+
+    def _run_worker(self, work: Callable[[], tuple[str, str, int]]) -> None:
+        def worker() -> None:
+            try:
+                title, message, icon_flag = work()
+            except Exception as exc:
+                title = "Codex Provider Refresh"
+                message = f"操作失败：{exc}"
+                icon_flag = MB_ICONERROR
+
+            def update() -> None:
+                self.last_result = f"{title}\n\n{message}"
+                self.refresh_view()
+
+            self._ui_queue.put(update)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _drain_queue(self) -> None:
+        while True:
+            try:
+                callback = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            callback()
+        if self.root is not None:
+            self.root.after(100, self._drain_queue)
+
+    def reload_catalog(self) -> None:
+        self.state.set_catalog(load_user_provider_catalog())
+        self.on_state_changed()
+        self.refresh_view()
+
+    def refresh_all(self) -> None:
+        self._run_worker(lambda: self._refresh_summary(refresh_all_instances))
+
+    def refresh_console(self) -> None:
+        self._run_worker(lambda: self._refresh_summary(refresh_console_instances))
+
+    def refresh_app_server(self) -> None:
+        self._run_worker(lambda: self._refresh_summary(refresh_app_server_instances))
+
+    def _refresh_summary(
+        self,
+        refresh_fn: Callable[[], dict[str, Any]],
+    ) -> tuple[str, str, int]:
+        summary = refresh_fn()
+        self.state.set_catalog(load_user_provider_catalog())
+        self.on_state_changed()
+        return format_refresh_summary(summary)
+
+    def apply_selected_provider(self) -> None:
+        snapshot = self.state.snapshot()
+        selected_provider_id = snapshot.get("selected_provider_id")
+        if not isinstance(selected_provider_id, str) or not selected_provider_id:
+            self.last_result = "请选择要复制的 provider。"
+            self.refresh_view()
+            return
+
+        def work() -> tuple[str, str, int]:
+            summary = apply_provider_runtime_smart_first(selected_provider_id)
+            self.state.set_catalog(load_user_provider_catalog())
+            self.on_state_changed()
+            return format_apply_summary(summary)
+
+        self._run_worker(work)
+
+    def open_config_file(self) -> None:
+        open_path(config_toml_path())
+
+    def open_codex_home(self) -> None:
+        open_path(default_codex_home())
+
+
+def open_path(path: Path) -> None:
+    if os.name == "nt":
+        try:
+            os.startfile(path)  # type: ignore[attr-defined]
+        except OSError as exc:
+            show_message(
+                "Codex Provider Refresh",
+                f"无法打开路径：\n{path}\n\n{exc}",
+                MB_ICONERROR,
+            )
+
+
 def create_tray_icon():
     import pystray
     from PIL import Image
@@ -1503,6 +1889,7 @@ def create_tray_icon():
 
     state = TrayState()
     state.set_catalog(load_user_provider_catalog())
+    dashboard: DashboardController
 
     def build_image() -> Image.Image:
         image = Image.new("RGBA", (64, 64), (245, 247, 250, 255))
@@ -1520,6 +1907,9 @@ def create_tray_icon():
     def reload_catalog() -> None:
         state.set_catalog(load_user_provider_catalog())
 
+    def handle_open_dashboard(_icon: pystray.Icon, _item: Any) -> None:
+        dashboard.show()
+
     def handle_refresh(icon: pystray.Icon, _item: Any) -> None:
         def worker() -> None:
             summary = refresh_all_instances()
@@ -1530,158 +1920,47 @@ def create_tray_icon():
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def refresh_action(
-        refresh_fn: Callable[[], dict[str, Any]],
-    ) -> Callable[[pystray.Icon, Any], None]:
-        def action(icon: pystray.Icon, _item: Any) -> None:
-            def worker() -> None:
-                summary = refresh_fn()
-                reload_catalog()
-                rebuild_menu(icon)
-                title, message, icon_flag = format_refresh_summary(summary)
-                show_message(title, message, icon_flag)
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        return action
-
-    def handle_apply(icon: pystray.Icon, _item: Any) -> None:
-        snapshot = state.snapshot()
-        selected_provider_id = snapshot.get("selected_provider_id")
-        if not isinstance(selected_provider_id, str) or not selected_provider_id:
-            show_message(
-                "Codex Provider Apply",
-                "当前没有可用的 source provider 可供应用。",
-                MB_ICONWARNING,
-            )
-            return
-        selected_provider = next(
-            (
-                provider
-                for provider in snapshot.get("providers", [])
-                if provider.get("provider_id") == selected_provider_id
-            ),
-            None,
-        )
-        if not isinstance(selected_provider, dict):
-            show_message(
-                "Codex Provider Apply",
-                "当前所选 source provider 不存在，请先重新加载配置。",
-                MB_ICONERROR,
-            )
-            return
-
-        def worker() -> None:
-            summary = apply_provider_runtime_smart_first(selected_provider_id)
-            reload_catalog()
-            rebuild_menu(icon)
-            title, message, icon_flag = format_apply_summary(summary)
-            show_message(title, message, icon_flag)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def handle_select_provider(icon: pystray.Icon, provider_id: str) -> None:
-        state.set_selected_provider(provider_id)
-        rebuild_menu(icon)
-
-    def select_provider_action(provider_id: str) -> Callable[[pystray.Icon, Any], None]:
-        def action(tray_icon: pystray.Icon, _item: Any) -> None:
-            handle_select_provider(tray_icon, provider_id)
-
-        return action
-
-    def provider_checked(provider_id: str) -> Callable[[Any], bool]:
-        def checked(_item: Any) -> bool:
-            return state.snapshot()["selected_provider_id"] == provider_id
-
-        return checked
-
     def noop(_icon: pystray.Icon, _item: Any) -> None:
         return
-
-    def build_provider_menu(icon: pystray.Icon) -> pystray.Menu:
-        snapshot = state.snapshot()
-        providers = snapshot["providers"]
-        if not providers:
-            catalog_error = snapshot.get("catalog_error")
-            label = (
-                f"config 错误: {short_error_text(catalog_error, 64)}"
-                if isinstance(catalog_error, str) and catalog_error
-                else "无可用 source provider"
-            )
-            return pystray.Menu(
-                pystray.MenuItem(label, noop, enabled=False)
-            )
-
-        items = []
-        for provider in providers:
-            provider_id = provider["provider_id"]
-            suffix_parts = []
-            if provider["has_base_url"]:
-                suffix_parts.append("base_url")
-            if provider["has_experimental_bearer_token"]:
-                suffix_parts.append("token")
-            suffix = (
-                f" [{' + '.join(suffix_parts)}]"
-                if suffix_parts
-                else " [缺少两字段]"
-            )
-            label = f"{provider['display_name']} ({provider_id}){suffix}"
-            items.append(
-                pystray.MenuItem(
-                    label,
-                    select_provider_action(provider_id),
-                    checked=provider_checked(provider_id),
-                    radio=True,
-                )
-            )
-        return pystray.Menu(*items)
 
     def build_menu(icon: pystray.Icon) -> pystray.Menu:
         snapshot = state.snapshot()
         current_model_provider_id = snapshot.get("current_model_provider_id") or "未配置"
-        config_path = snapshot.get("config_path") or str(config_toml_path())
         catalog_error = snapshot.get("catalog_error")
         catalog_status_label = (
             f"config 错误: {short_error_text(catalog_error, 56)}"
             if isinstance(catalog_error, str) and catalog_error
-            else "source provider 列表: 已加载"
-        )
-        can_apply = bool(snapshot.get("selected_provider_id")) and bool(
-            snapshot.get("providers")
+            else f"当前 provider: {current_model_provider_id}"
         )
         return pystray.Menu(
-            pystray.MenuItem("刷新全部 app-server", handle_refresh),
             pystray.MenuItem(
-                "只刷新 Codex 控制台",
-                refresh_action(refresh_console_instances),
-            ),
-            pystray.MenuItem(
-                "只刷新 Windows App app-server",
-                refresh_action(refresh_app_server_instances),
-            ),
-            pystray.MenuItem(
-                f"当前 target model_provider: {current_model_provider_id}",
-                noop,
-                enabled=False,
-            ),
-            pystray.MenuItem(
-                f"配置文件: {config_path}",
-                noop,
-                enabled=False,
+                "打开主窗口",
+                handle_open_dashboard,
+                default=True,
             ),
             pystray.MenuItem(catalog_status_label, noop, enabled=False),
-            pystray.MenuItem("选择 source provider", build_provider_menu(icon)),
+            pystray.MenuItem("快速刷新全部", handle_refresh),
             pystray.MenuItem(
-                "应用所选 provider 到当前 target 并刷新",
-                handle_apply,
-                enabled=can_apply,
+                "重新加载配置",
+                lambda tray_icon, _item: (
+                    reload_catalog(),
+                    dashboard.reload_catalog_from_tray(),
+                    rebuild_menu(tray_icon),
+                ),
             ),
             pystray.MenuItem(
                 "退出",
-                lambda tray_icon, _item: tray_icon.stop(),
+                lambda tray_icon, _item: (
+                    dashboard.destroy(),
+                    tray_icon.stop(),
+                ),
             ),
         )
+
+    dashboard = DashboardController(
+        state,
+        on_state_changed=lambda: None,
+    )
 
     icon = pystray.Icon(
         "codex-app-server-refresh",

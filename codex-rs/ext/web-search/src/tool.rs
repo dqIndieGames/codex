@@ -64,7 +64,6 @@ impl RequestTelemetry for WebSearchRequestTelemetry {
     }
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolCall> for WebSearchTool {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced(WEB_NAMESPACE, RUN_TOOL_NAME)
@@ -99,7 +98,13 @@ impl ToolExecutor<ToolCall> for WebSearchTool {
         true
     }
 
-    async fn handle(&self, call: ToolCall) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    fn handle(&self, call: ToolCall) -> codex_extension_api::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(call))
+    }
+}
+
+impl WebSearchTool {
+    async fn handle_call(&self, call: ToolCall) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let commands = parse_commands(&call)?;
         let command_action = command_action(&commands);
         call.turn_item_emitter

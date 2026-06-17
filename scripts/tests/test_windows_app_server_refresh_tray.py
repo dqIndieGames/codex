@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = (
@@ -791,6 +792,129 @@ experimental_bearer_token = "old-token"
         self.assertEqual(icon_flag, TRAY.MB_ICONERROR)
         self.assertIn("未成功刷新任何实例", message)
         self.assertIn("current model_provider is not backed", message)
+
+    def test_provider_display_rows_explain_copy_readiness(self) -> None:
+        rows = TRAY.provider_display_rows(
+            [
+                {
+                    "provider_id": "saki",
+                    "display_name": "Saki",
+                    "has_base_url": True,
+                    "has_experimental_bearer_token": True,
+                },
+                {
+                    "provider_id": "local",
+                    "display_name": "Local",
+                    "has_base_url": True,
+                    "has_experimental_bearer_token": False,
+                },
+                {
+                    "provider_id": "empty",
+                    "display_name": "Empty",
+                    "has_base_url": False,
+                    "has_experimental_bearer_token": False,
+                },
+            ],
+            selected_provider_id="local",
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "provider_id": "saki",
+                    "display_name": "Saki",
+                    "status": "可复制",
+                    "selected": False,
+                    "can_apply": True,
+                },
+                {
+                    "provider_id": "local",
+                    "display_name": "Local",
+                    "status": "缺少 token",
+                    "selected": True,
+                    "can_apply": False,
+                },
+                {
+                    "provider_id": "empty",
+                    "display_name": "Empty",
+                    "status": "缺少 base_url 和 token",
+                    "selected": False,
+                    "can_apply": False,
+                },
+            ],
+        )
+
+    def test_dashboard_model_disables_apply_for_incomplete_selected_provider(self) -> None:
+        snapshot = {
+            "providers": [
+                {
+                    "provider_id": "local",
+                    "display_name": "Local",
+                    "has_base_url": True,
+                    "has_experimental_bearer_token": False,
+                }
+            ],
+            "selected_provider_id": "local",
+            "current_model_provider_id": "yunyi",
+            "config_path": r"C:\Users\me\.codex\config.toml",
+            "catalog_error": None,
+        }
+
+        model = TRAY.dashboard_model_from_snapshot(
+            snapshot,
+            live_instance_count=2,
+            last_result="尚未执行",
+        )
+
+        self.assertEqual(model["target_provider_label"], "yunyi")
+        self.assertEqual(model["live_instances_label"], "2")
+        self.assertFalse(model["can_apply"])
+        self.assertEqual(model["apply_disabled_reason"], "所选 provider 缺少 token")
+        self.assertEqual(model["provider_rows"][0]["status"], "缺少 token")
+
+    def test_reload_catalog_from_tray_queues_reload_without_refresh(self) -> None:
+        class AliveThread:
+            def is_alive(self) -> bool:
+                return True
+
+        state = TRAY.TrayState()
+        controller = TRAY.DashboardController(state, on_state_changed=lambda: None)
+        calls: list[str] = []
+        posted = []
+        controller._thread = AliveThread()
+        controller._post = posted.append
+        controller.reload_catalog = lambda: calls.append("reload")
+        controller.refresh_all = lambda: calls.append("refresh")
+
+        controller.reload_catalog_from_tray()
+
+        self.assertEqual(len(posted), 1)
+        posted[0]()
+        self.assertEqual(calls, ["reload"])
+
+    def test_open_path_reports_os_error_to_user(self) -> None:
+        messages = []
+
+        def fake_startfile(_path: Path) -> None:
+            raise OSError("cannot open")
+
+        def fake_show_message(title: str, message: str, icon_flag: int) -> None:
+            messages.append((title, message, icon_flag))
+
+        with (
+            mock.patch.object(TRAY.os, "name", "nt"),
+            mock.patch.object(TRAY.os, "startfile", fake_startfile, create=True),
+            mock.patch.object(TRAY, "show_message", fake_show_message),
+        ):
+            TRAY.open_path(Path(r"C:\missing\config.toml"))
+
+        self.assertEqual(len(messages), 1)
+        title, message, icon_flag = messages[0]
+        self.assertEqual(title, "Codex Provider Refresh")
+        self.assertIn(r"C:\missing\config.toml", message)
+        self.assertIn("cannot open", message)
+        self.assertEqual(icon_flag, TRAY.MB_ICONERROR)
 
 
 if __name__ == "__main__":

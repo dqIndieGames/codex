@@ -287,6 +287,7 @@ pub(super) async fn update_persisted_remote_control_enrollment(
     account_id: &str,
     app_server_client_name: Option<&str>,
     enrollment: Option<&RemoteControlEnrollment>,
+    remote_control_enabled: Option<bool>,
 ) -> io::Result<()> {
     let Some(state_db) = state_db else {
         return Err(io::Error::new(
@@ -317,6 +318,7 @@ pub(super) async fn update_persisted_remote_control_enrollment(
                 server_id: enrollment.server_id.clone(),
                 environment_id: enrollment.environment_id.clone(),
                 server_name: enrollment.server_name.clone(),
+                remote_control_enabled,
             })
             .await
             .map_err(io::Error::other)?;
@@ -649,6 +651,7 @@ mod tests {
             "account-a",
             Some("desktop-client"),
             Some(&first_enrollment),
+            /*remote_control_enabled*/ None,
         )
         .await
         .expect("first enrollment should persist");
@@ -658,6 +661,7 @@ mod tests {
             "account-a",
             Some("desktop-client"),
             Some(&second_enrollment),
+            /*remote_control_enabled*/ None,
         )
         .await
         .expect("second enrollment should persist");
@@ -731,6 +735,7 @@ mod tests {
             "account-a",
             /*app_server_client_name*/ None,
             Some(&first_enrollment),
+            /*remote_control_enabled*/ None,
         )
         .await
         .expect("first enrollment should persist");
@@ -740,6 +745,7 @@ mod tests {
             "account-a",
             /*app_server_client_name*/ None,
             Some(&second_enrollment),
+            /*remote_control_enabled*/ None,
         )
         .await
         .expect("second enrollment should persist");
@@ -750,6 +756,7 @@ mod tests {
             "account-a",
             /*app_server_client_name*/ None,
             /*enrollment*/ None,
+            /*remote_control_enabled*/ None,
         )
         .await
         .expect("matching enrollment should clear");

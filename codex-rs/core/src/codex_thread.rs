@@ -179,6 +179,14 @@ pub struct CodexThread {
     out_of_band_elicitation_count: Mutex<u64>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct BackgroundTerminalInfo {
+    pub item_id: String,
+    pub process_id: String,
+    pub command: String,
+    pub cwd: AbsolutePathBuf,
+}
+
 /// Conduit for the bidirectional stream of messages that compose a thread
 /// (formerly called a conversation) in Codex.
 impl CodexThread {
@@ -416,6 +424,17 @@ impl CodexThread {
         self.codex.agent_status().await
     }
 
+    pub async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {
+        self.codex.session.list_background_terminals().await
+    }
+
+    pub async fn terminate_background_terminal(&self, process_id: i32) -> bool {
+        self.codex
+            .session
+            .terminate_background_terminal(process_id)
+            .await
+    }
+
     pub(crate) fn subscribe_status(&self) -> watch::Receiver<AgentStatus> {
         self.codex.agent_status.clone()
     }
@@ -553,6 +572,11 @@ impl CodexThread {
 
     pub async fn refresh_provider_runtime(&self) -> CodexResult<ProviderRuntimeRefreshStatus> {
         self.codex.session.refresh_provider_runtime().await
+    }
+
+    /// Resolves the MCP runtime configuration using this thread's extension data.
+    pub async fn runtime_mcp_config(&self, config: &crate::config::Config) -> codex_mcp::McpConfig {
+        self.codex.session.runtime_mcp_config(config).await
     }
 
     pub fn multi_agent_version(&self) -> Option<MultiAgentVersion> {
