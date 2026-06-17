@@ -920,8 +920,10 @@ async fn wait_for_guardian_review(
                             );
                         }
                         EventMsg::StreamError(error) => {
-                            last_error_message =
-                                Some(error.additional_details.unwrap_or(error.message));
+                            last_error = Some(ErrorEvent {
+                                message: error.additional_details.unwrap_or(error.message),
+                                codex_error_info: error.codex_error_info,
+                            });
                         }
                         EventMsg::TurnAborted(_) => {
                             return (GuardianReviewSessionOutcome::Aborted, true, false);
@@ -1090,6 +1092,7 @@ mod tests {
     use codex_protocol::protocol::AgentStatus;
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::Submission;
+    use codex_protocol::protocol::StreamErrorEvent;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
     use codex_protocol::protocol::TurnCompleteEvent;
@@ -1642,9 +1645,10 @@ mod tests {
         tx_event
             .send(Event {
                 id: "current-turn".to_string(),
-                msg: EventMsg::Error(ErrorEvent {
+                msg: EventMsg::StreamError(StreamErrorEvent {
                     message: "temporary failure".to_string(),
                     codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
+                    additional_details: None,
                 }),
             })
             .await

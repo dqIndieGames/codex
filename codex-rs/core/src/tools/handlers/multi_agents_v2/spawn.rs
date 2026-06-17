@@ -59,20 +59,6 @@ async fn handle_spawn_agent(
     let initial_operation = parse_collab_input(Some(args.message), /*items*/ None)?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
-    session
-        .send_event(
-            &turn,
-            CollabAgentSpawnBeginEvent {
-                call_id: call_id.clone(),
-                started_at_ms: now_unix_timestamp_ms(),
-                sender_thread_id: session.thread_id,
-                prompt: String::new(),
-                model: args.model.clone().unwrap_or_default(),
-                reasoning_effort: args.reasoning_effort.clone().unwrap_or_default(),
-            }
-            .into(),
-        )
-        .await;
     let mut config = build_latest_agent_spawn_config(
         &session,
         &session.get_base_instructions().await,

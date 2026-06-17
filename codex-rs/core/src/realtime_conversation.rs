@@ -869,7 +869,7 @@ async fn handle_start_inner(
                 )?
             }
         };
-        let websocket_client = RealtimeWebsocketClient::new(runtime_setup.api_provider)
+        let websocket_client = RealtimeWebsocketClient::new(runtime_setup.api_provider.clone())
             .with_request_retry_guard(Some(
                 sess.services
                     .model_client
@@ -886,7 +886,7 @@ async fn handle_start_inner(
         };
         let start = RealtimeStart {
             architecture,
-            extra_headers: Some(extra_headers),
+            extra_headers,
             realtime_call_api_provider,
             session_config: session_config.clone(),
             model_client: sess.services.model_client.clone(),
