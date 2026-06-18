@@ -1,7 +1,3 @@
-<p align="center">
-  <img src=".github/codex-relay-splash.png" alt="Codex Relay Edition splash" width="88%" />
-</p>
-
 # Codex Relay Edition / Codex 中转站魔改版
 
 Codex Relay Edition is a relay-focused modified build of OpenAI Codex CLI for users who run Codex through relay providers, sub2api gateways, and proxy pools. It is a forked/modified build for relay operations, not an official OpenAI release channel.
@@ -14,7 +10,7 @@ Codex Relay Edition is a relay-focused modified build of OpenAI Codex CLI for us
 - Continuous retry display path for transient upstream failures, including `429`, `503`, `203`, `server_is_overloaded`, `slow_down`, and `select model` capacity errors.
 - Route recovery after repeated failures: after 3 consecutive failures, the client-facing route fingerprint can rotate so one sticky route does not keep blocking the session.
 - Codex Provider Refresh: switch the active `base_url` and token without closing `codex.exe`.
-- Demo-only screenshots: README images use relay demo data and masked tokens only.
+- Real Provider Refresh screenshot: the README image is captured from the actual Python Tk GUI with a temporary demo `CODEX_HOME` and masked tokens.
 
 ## Codex Provider Refresh
 
@@ -31,10 +27,10 @@ E:\vscodeProject\codex_github\codex\scripts\windows_app_server_refresh_tray.py
 ```
 
 <p align="center">
-  <img src=".github/codex-provider-refresh-supported-demo.png" alt="Codex Provider Refresh relay provider demo" width="88%" />
+  <img src=".github/codex-provider-refresh-gui.png" alt="Real Codex Provider Refresh Python GUI screenshot" width="96%" />
 </p>
 
-The demo provider shown here uses values such as `sub2api_relay`, `https://relay.example/v1`, and masked/demo tokens. Do not place real tokens, cookies, sessions, or account credentials in README screenshots.
+The screenshot above is a real window from `scripts/windows_app_server_refresh_tray.py`, captured with a temporary demo `CODEX_HOME` so the supported relay-provider state can be shown without reading the user's real config. It uses values such as `sub2api_relay`, `https://relay.example/v1`, and masked tokens. Do not place real tokens, cookies, sessions, or account credentials in README screenshots.
 
 ## Quickstart
 

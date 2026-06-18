@@ -1,9 +1,5 @@
 # Codex Relay Edition / Codex 中转站魔改版
 
-<p align="center">
-  <img src=".github/codex-relay-splash.png" alt="Codex 中转站魔改版主图" width="88%" />
-</p>
-
 本仓库是 OpenAI Codex CLI 的 relay provider / sub2api / 代理池使用场景魔改分支，当前定位是 `Codex Relay Edition` / `Codex 中转站魔改版`。它是 fork / modified build，不是 OpenAI 官方发布渠道；官方上游仍是 `openai/codex`。
 
 用户打开 GitHub 仓库首页后，第一眼应看到：这个版本面向中转站、relay provider、sub2api、代理池和 Provider Refresh 使用，而不是官方原版 Codex CLI 首页。
@@ -14,7 +10,7 @@
 - 面向临时上游错误的持续重试展示口径：包括 `429`、`503`、`203`、`server_is_overloaded`、`slow_down`、`select model` 满载等。
 - 连续 3 次失败后切换请求指纹 / 路由特征：减少同一账号、同一路由或同一客户端特征持续粘住错误的影响。
 - Codex Provider Refresh：可在不关闭 `codex.exe` 的情况下切换当前中转的 `base_url` 和 token。
-- 截图只展示 demo relay provider 和掩码 token，不展示真实 token、cookie、session 或账号凭据。
+- README 截图来自真实 Python Tk GUI 窗口，只使用临时演示配置和掩码 token，不展示真实 token、cookie、session 或账号凭据。
 
 ## Codex Provider Refresh
 
@@ -31,10 +27,10 @@ E:\vscodeProject\codex_github\codex\scripts\windows_app_server_refresh_tray.py
 ```
 
 <p align="center">
-  <img src=".github/codex-provider-refresh-supported-demo.png" alt="Codex Provider Refresh relay provider 支持态 demo" width="88%" />
+  <img src=".github/codex-provider-refresh-gui.png" alt="Codex Provider Refresh 真实 Python GUI 截图" width="96%" />
 </p>
 
-截图中的 provider 使用 `sub2api_relay`、`https://relay.example/v1`、`demo-token` 或 `********oken` 这类演示值。不要把真实 token、cookie、session、账号信息放进 README 或截图。
+上图是从 `scripts/windows_app_server_refresh_tray.py` 的真实 Python Tk GUI 窗口截取的截图。截图使用临时 `CODEX_HOME` 演示配置，不读取你的真实配置；provider 使用 `sub2api_relay`、`https://relay.example/v1` 这类演示值，token 已遮罩。不要把真实 token、cookie、session、账号信息放进 README 或截图。
 
 ## 当前同步目标
 
