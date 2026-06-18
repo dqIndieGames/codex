@@ -1,71 +1,62 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
+  <img src=".github/codex-relay-splash.png" alt="Codex Relay Edition splash" width="88%" />
 </p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
 
----
+# Codex Relay Edition / Codex 中转站魔改版
+
+Codex Relay Edition is a relay-focused modified build of OpenAI Codex CLI for users who run Codex through relay providers, sub2api gateways, and proxy pools. It is a forked/modified build for relay operations, not an official OpenAI release channel.
+
+**What users see first:** this repository is positioned for relay provider operation, persistent recovery from overloaded upstreams, and quick provider switching while `codex.exe` keeps running.
+
+## Relay-Focused Highlights
+
+- Relay provider and sub2api first: point Codex at your own `base_url`, bearer token, account pool, or proxy route.
+- Continuous retry display path for transient upstream failures, including `429`, `503`, `203`, `server_is_overloaded`, `slow_down`, and `select model` capacity errors.
+- Route recovery after repeated failures: after 3 consecutive failures, the client-facing route fingerprint can rotate so one sticky route does not keep blocking the session.
+- Codex Provider Refresh: switch the active `base_url` and token without closing `codex.exe`.
+- Demo-only screenshots: README images use relay demo data and masked tokens only.
+
+## Codex Provider Refresh
+
+Provider means the API supplier or relay entry Codex sends requests to. For users, this decides which relay service, account, token, and route Codex is using.
+
+Base URL means the API server address. For users, changing it moves Codex to another relay endpoint.
+
+Token means the credential used by the relay or API service. This README only shows demo or masked values.
+
+Provider Refresh tool path:
+
+```text
+E:\vscodeProject\codex_github\codex\scripts\windows_app_server_refresh_tray.py
+```
+
+<p align="center">
+  <img src=".github/codex-provider-refresh-supported-demo.png" alt="Codex Provider Refresh relay provider demo" width="88%" />
+</p>
+
+The demo provider shown here uses values such as `sub2api_relay`, `https://relay.example/v1`, and masked/demo tokens. Do not place real tokens, cookies, sessions, or account credentials in README screenshots.
 
 ## Quickstart
 
-### Installing and running Codex CLI
+Run the Codex binary from this modified build and configure your relay provider in the local Codex config. Keep the official upstream documentation nearby for baseline CLI usage, then use this repository's README and local2 notes for relay-specific behavior.
 
-Run the following on Mac or Linux to install Codex CLI:
+Useful local entry points:
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
+- Relay/provider display overview: this README.
+- Chinese overview: [`README.zh-CN.md`](./README.zh-CN.md)
+- Provider Refresh tray helper: `scripts/windows_app_server_refresh_tray.py`
+- local2 retained behavior notes: `docs/local2-custom-feature-checklist-2026-04-27.md`
 
-Run the following on Windows to install Codex CLI:
+## Safety Notes
 
-```
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
-```
+- This is a modified fork/build, not the official OpenAI Codex project.
+- Screenshots should show only demo providers and masked tokens.
+- README display changes do not implement new runtime logic by themselves.
+- This repository remains under the [Apache-2.0 License](LICENSE).
 
-Codex CLI can also be installed via the following package managers:
+## Upstream And Docs
 
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
-
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
-
-Then simply run `codex` to get started.
-
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
-
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
-
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
-
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
-
-</details>
-
-### Using Codex with your ChatGPT plan
-
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
-
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+- Official Codex documentation: <https://developers.openai.com/codex>
+- Official upstream project: <https://github.com/openai/codex>
+- Contributing guide: [`docs/contributing.md`](./docs/contributing.md)
+- Installing and building notes: [`docs/install.md`](./docs/install.md)
