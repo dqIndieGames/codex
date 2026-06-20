@@ -1,5 +1,10 @@
 # Codex Relay Edition / Codex 中转站魔改版
 
+<p align="center">
+  <strong>中文说明：</strong>
+  <a href="./README.zh-CN.md">查看中文 README / 中转站魔改版介绍</a>
+</p>
+
 Codex Relay Edition is a modified Codex CLI build for relay-provider workflows. Its core experience is simple: when requests fail, Codex keeps retrying automatically so you do not have to keep clicking continue; when a relay provider, sub2api gateway, proxy pool, or account pool starts acting up, Codex can refresh and switch provider details at runtime so it can try to route around the stuck path.
 
 For users who rely on sub2api or similar relay gateways, the worst part is often not a single `503`. The real pain is when requests stay stuck to an already failing account, route, or client fingerprint, so every manual continue lands on the same failure again. This fork focuses on automatic retry, runtime refresh, and sticky fingerprint rotation to reduce the "infinite 503 until I manually intervene" loop and let Codex keep working for longer unattended sessions.
