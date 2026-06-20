@@ -595,7 +595,127 @@ experimental_bearer_token = "old-token"
 
             _title, message, icon_flag = TRAY.format_apply_summary(summary)
             self.assertEqual(icon_flag, TRAY.MB_ICONINFORMATION)
-            self.assertIn("未刷新任何 live 实例", message)
+            self.assertIn("当前没有已打开的 Codex 实例", message)
+
+    def test_apply_runtime_values_writes_current_provider_url_token_only(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            codex_home = Path(tempdir)
+            registry_dir = codex_home / TRAY.APP_SERVERS_DIR_NAME
+            registry_dir.mkdir()
+            config_path = codex_home / TRAY.CONFIG_TOML_FILE_NAME
+            config_path.write_text(
+                """
+model_provider = "yunyi"
+force_service_tier_priority = false
+service_tier = "fast"
+
+[features]
+fast_mode = true
+
+[model_providers.saki]
+base_url = "https://api.saki.example/v1"
+experimental_bearer_token = "saki-token"
+
+[model_providers.yunyi]
+base_url = "https://api.old.example/v1"
+experimental_bearer_token = "old-token"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            summary = TRAY.apply_runtime_values_to_current_provider(
+                "https://api.manual.example/v1",
+                "manual-token",
+                codex_home=codex_home,
+                registry_dir=registry_dir,
+                pid_checker=lambda _pid: True,
+                ping_checker=lambda _endpoint: True,
+                send_request=lambda _endpoint, _payload: {},
+            )
+
+            self.assertTrue(summary["ok"])
+            self.assertEqual(summary["apply_strategy"], "manual_runtime_values")
+            self.assertTrue(summary["config_changed"])
+            self.assertEqual(summary["current_model_provider_id"], "yunyi")
+            self.assertEqual(summary["refresh_summary"]["total_instances"], 0)
+
+            updated = config_path.read_text(encoding="utf-8")
+            self.assertIn('base_url = "https://api.manual.example/v1"', updated)
+            self.assertIn('experimental_bearer_token = "manual-token"', updated)
+            self.assertIn("force_service_tier_priority = false", updated)
+            self.assertIn('service_tier = "fast"', updated)
+            self.assertIn("fast_mode = true", updated)
+
+    def test_apply_runtime_values_rejects_blank_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            codex_home = Path(tempdir)
+            config_path = codex_home / TRAY.CONFIG_TOML_FILE_NAME
+            config_path.write_text(
+                """
+model_provider = "yunyi"
+
+[model_providers.yunyi]
+base_url = "https://api.old.example/v1"
+experimental_bearer_token = "old-token"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            summary = TRAY.apply_runtime_values_to_current_provider(
+                "   ",
+                "manual-token",
+                codex_home=codex_home,
+                registry_dir=codex_home / TRAY.APP_SERVERS_DIR_NAME,
+                pid_checker=lambda _pid: True,
+                ping_checker=lambda _endpoint: True,
+                send_request=lambda _endpoint, _payload: {},
+            )
+
+            self.assertFalse(summary["ok"])
+            self.assertEqual(summary["message"], "新的 Base URL 不能为空")
+            self.assertFalse(summary["config_changed"])
+            self.assertIn('base_url = "https://api.old.example/v1"', config_path.read_text(encoding="utf-8"))
+
+    def test_load_user_provider_catalog_marks_openai_auth_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            codex_home = Path(tempdir)
+            config_path = codex_home / TRAY.CONFIG_TOML_FILE_NAME
+            config_path.write_text(
+                """
+model_provider = "openai_http"
+
+[model_providers.openai_http]
+name = "OpenAI HTTP only"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://chatgpt.com/backend-api/codex"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            catalog = TRAY.load_user_provider_catalog(codex_home)
+
+            self.assertIsNone(catalog["catalog_error"])
+            self.assertEqual(catalog["current_model_provider_id"], "openai_http")
+            self.assertEqual(
+                catalog["providers"],
+                [
+                    {
+                        "provider_id": "openai_http",
+                        "display_name": "OpenAI HTTP only",
+                        "base_url": "https://chatgpt.com/backend-api/codex",
+                        "experimental_bearer_token": None,
+                        "has_base_url": True,
+                        "has_experimental_bearer_token": False,
+                        "requires_openai_auth": True,
+                    }
+                ],
+            )
 
     def test_apply_provider_refreshes_unsupported_instances_after_smart_apply_success(
         self,
@@ -696,11 +816,13 @@ experimental_bearer_token = "old-token"
             }
         )
 
-        self.assertEqual(title, "Codex Provider Apply")
+        self.assertEqual(title, "Codex URL/token Apply")
         self.assertEqual(icon_flag, TRAY.MB_ICONINFORMATION)
-        self.assertIn("已通过当前 app-server 智能应用 provider", message)
-        self.assertIn("应用方式: app-server 智能刷新", message)
-        self.assertIn("智能 apply 实例: 1", message)
+        self.assertIn("已应用新的 URL/token", message)
+        self.assertIn("来源配置: saki", message)
+        self.assertIn("当前 provider: yunyi", message)
+        self.assertNotIn("应用方式", message)
+        self.assertNotIn("智能 apply", message)
 
     def test_apply_provider_treats_smart_partial_failure_as_written_but_warns(
         self,
@@ -750,7 +872,7 @@ experimental_bearer_token = "old-token"
 
             _title, message, icon_flag = TRAY.format_apply_summary(summary)
             self.assertEqual(icon_flag, TRAY.MB_ICONWARNING)
-            self.assertIn("已通过当前 app-server 智能应用 provider", message)
+            self.assertIn("已应用新的 URL/token，但部分 Codex 实例刷新失败", message)
             self.assertIn("failed_threads=1", message)
 
     def test_format_apply_summary_shows_smart_apply_failure_message(self) -> None:
@@ -790,7 +912,7 @@ experimental_bearer_token = "old-token"
         )
 
         self.assertEqual(icon_flag, TRAY.MB_ICONERROR)
-        self.assertIn("未成功刷新任何实例", message)
+        self.assertIn("无法应用新的 URL/token", message)
         self.assertIn("current model_provider is not backed", message)
 
     def test_provider_display_rows_explain_copy_readiness(self) -> None:
@@ -809,6 +931,13 @@ experimental_bearer_token = "old-token"
                     "has_experimental_bearer_token": False,
                 },
                 {
+                    "provider_id": "openai_http",
+                    "display_name": "OpenAI HTTP only",
+                    "has_base_url": True,
+                    "has_experimental_bearer_token": False,
+                    "requires_openai_auth": True,
+                },
+                {
                     "provider_id": "empty",
                     "display_name": "Empty",
                     "has_base_url": False,
@@ -824,7 +953,7 @@ experimental_bearer_token = "old-token"
                 {
                     "provider_id": "saki",
                     "display_name": "Saki",
-                    "status": "可复制",
+                    "status": "可用于填入",
                     "selected": False,
                     "can_apply": True,
                 },
@@ -833,6 +962,13 @@ experimental_bearer_token = "old-token"
                     "display_name": "Local",
                     "status": "缺少 token",
                     "selected": True,
+                    "can_apply": False,
+                },
+                {
+                    "provider_id": "openai_http",
+                    "display_name": "OpenAI HTTP only",
+                    "status": "不支持",
+                    "selected": False,
                     "can_apply": False,
                 },
                 {
@@ -845,12 +981,24 @@ experimental_bearer_token = "old-token"
             ],
         )
 
-    def test_dashboard_model_disables_apply_for_incomplete_selected_provider(self) -> None:
+    def test_dashboard_model_shows_current_values_and_keeps_manual_apply_available(
+        self,
+    ) -> None:
         snapshot = {
             "providers": [
                 {
+                    "provider_id": "yunyi",
+                    "display_name": "Yunyi",
+                    "base_url": "https://api.current.example/v1",
+                    "experimental_bearer_token": "current-token",
+                    "has_base_url": True,
+                    "has_experimental_bearer_token": True,
+                },
+                {
                     "provider_id": "local",
                     "display_name": "Local",
+                    "base_url": "https://api.local.example/v1",
+                    "experimental_bearer_token": None,
                     "has_base_url": True,
                     "has_experimental_bearer_token": False,
                 }
@@ -867,11 +1015,15 @@ experimental_bearer_token = "old-token"
             last_result="尚未执行",
         )
 
-        self.assertEqual(model["target_provider_label"], "yunyi")
+        self.assertEqual(model["current_provider_label"], "yunyi")
+        self.assertEqual(model["current_base_url_label"], "https://api.current.example/v1")
+        self.assertEqual(model["current_token_label"], "********oken")
+        self.assertEqual(model["new_base_url_value"], "https://api.current.example/v1")
+        self.assertEqual(model["new_token_value"], "current-token")
         self.assertEqual(model["live_instances_label"], "2")
-        self.assertFalse(model["can_apply"])
-        self.assertEqual(model["apply_disabled_reason"], "所选 provider 缺少 token")
-        self.assertEqual(model["provider_rows"][0]["status"], "缺少 token")
+        self.assertTrue(model["can_apply"])
+        self.assertIsNone(model["apply_disabled_reason"])
+        self.assertEqual(model["provider_rows"][1]["status"], "缺少 token")
 
     def test_reload_catalog_from_tray_queues_reload_without_refresh(self) -> None:
         class AliveThread:
