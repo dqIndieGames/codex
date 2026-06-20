@@ -11,6 +11,10 @@ For users who rely on sub2api or similar relay gateways, the worst part is often
 
 It is adapted from OpenAI Codex CLI, but it is not an official OpenAI release. If you only need the official upstream Codex CLI, use [`openai/codex`](https://github.com/openai/codex).
 
+## Community
+
+This project is shared with and acknowledges the [LINUX DO](https://linux.do/) community.
+
 ## Key Changes
 
 - Built for relay provider and sub2api usage: point Codex at your own `base_url`, bearer token, account pool, or proxy route.

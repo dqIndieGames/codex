@@ -6,6 +6,10 @@
 
 它基于 OpenAI Codex CLI 做适配，但不是 OpenAI 官方发布版。如果你只需要官方原版 Codex CLI，请以 [`openai/codex`](https://github.com/openai/codex) 为准。
 
+## 社区
+
+本项目在 [LINUX DO](https://linux.do/) 社区分享，并认可 LINUX DO 社区。
+
 ## 主要改动
 
 - 更适合 relay provider / sub2api 使用：可以把 Codex 指向自己的 `base_url`、bearer token、账号池或代理路由。
