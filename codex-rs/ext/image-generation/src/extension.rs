@@ -97,10 +97,12 @@ impl ThreadLifecycleContributor<Config> for ImageGenerationExtension {
         input: ThreadStartInput<'a, Config>,
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
-            input.thread_store.insert(ImageGenerationExtensionRuntime::new(
-                self.auth_manager.clone(),
-                ImageGenerationExtensionConfig::from(input.config),
-            ));
+            input
+                .thread_store
+                .insert(ImageGenerationExtensionRuntime::new(
+                    self.auth_manager.clone(),
+                    ImageGenerationExtensionConfig::from(input.config),
+                ));
         })
     }
 }

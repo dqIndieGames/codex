@@ -1019,7 +1019,10 @@ async fn handle_start_inner(
         match sess.conversation.start(start).await {
             Ok(start_output) => break start_output,
             Err(CodexErr::Stream(reason, _delay))
-                if sess.services.model_client.current_provider_runtime_generation()
+                if sess
+                    .services
+                    .model_client
+                    .current_provider_runtime_generation()
                     != runtime_setup.provider_runtime_generation =>
             {
                 debug!("restarting realtime start after provider runtime refresh: {reason}");

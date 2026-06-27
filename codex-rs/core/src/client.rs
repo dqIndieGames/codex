@@ -829,18 +829,14 @@ impl ModelClient {
                 None,
                 0,
             );
-            match ApiRealtimeCallClient::new(
-                transport,
-                api_provider.clone(),
-                client_setup.api_auth,
-            )
-            .with_telemetry(Some(request_telemetry))
-            .create_with_session_and_headers(
-                sdp.clone(),
-                session_config.clone(),
-                request_headers,
-            )
-            .await
+            match ApiRealtimeCallClient::new(transport, api_provider.clone(), client_setup.api_auth)
+                .with_telemetry(Some(request_telemetry))
+                .create_with_session_and_headers(
+                    sdp.clone(),
+                    session_config.clone(),
+                    request_headers,
+                )
+                .await
             {
                 Ok(response) => {
                     return Ok(RealtimeWebrtcCallStart {
@@ -921,7 +917,9 @@ impl ModelClient {
                 Err(ApiError::Transport(TransportError::RetryInterrupted(reason)))
                     if self.current_provider_runtime_generation() != runtime_generation =>
                 {
-                    debug!("restarting memory summarization after provider runtime refresh: {reason}");
+                    debug!(
+                        "restarting memory summarization after provider runtime refresh: {reason}"
+                    );
                     continue;
                 }
                 Err(err) => return Err(map_api_error(err)),
@@ -1688,12 +1686,8 @@ impl ModelClientSession {
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
             inference_trace_attempt.record_started(&request);
-            let client = ApiResponsesClient::new(
-                transport,
-                api_provider,
-                client_setup.api_auth,
-            )
-            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let client = ApiResponsesClient::new(transport, api_provider, client_setup.api_auth)
+                .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
             let stream_result = client.stream_request(request, options).await;
 
             match stream_result {
@@ -1741,15 +1735,15 @@ impl ModelClientSession {
                     continue;
                 }
                 Err(ApiError::Transport(TransportError::RetryInterrupted(reason)))
-                    if request_route_recovery.restart_requested() => {
+                    if request_route_recovery.restart_requested() =>
+                {
                     inference_trace_attempt.record_cancelled(
                         reason,
                         /*upstream_request_id*/ None,
                         &[],
                     );
-                    request_route_retry_count_consumed =
-                        request_route_retry_count_consumed
-                            .saturating_add(request_route_recovery.restart_retry_number());
+                    request_route_retry_count_consumed = request_route_retry_count_consumed
+                        .saturating_add(request_route_recovery.restart_retry_number());
                     self.activate_retry_route_recovery();
                     pending_retry = PendingUnauthorizedRetry::default();
                     continue;
@@ -2670,16 +2664,16 @@ impl RequestTelemetry for ApiTelemetry {
         if matches!(
             self.request_route_telemetry.endpoint,
             RESPONSES_ENDPOINT | RESPONSES_COMPACT_ENDPOINT
-        )
-            && retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0
+        ) && retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0
             && let Some(route_recovery) = self.request_route_recovery.as_ref()
         {
             route_recovery.request_restart(retry_number);
         }
 
         if let Some(notifier) = self.request_retry_notifier.as_ref() {
-            let display_retry_number =
-                self.request_retry_display_offset.saturating_add(retry_number);
+            let display_retry_number = self
+                .request_retry_display_offset
+                .saturating_add(retry_number);
             let display_max_attempts = if max_attempts == u64::MAX {
                 u64::MAX
             } else {

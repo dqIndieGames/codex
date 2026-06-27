@@ -11,3 +11,4 @@ LL | #![warn(uncommented_anonymous_literal_argument)]
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: 1 warning emitted
+

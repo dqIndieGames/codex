@@ -54,7 +54,10 @@ impl WebSearchExtensionRuntime {
     }
 
     fn update(&self, config: WebSearchExtensionConfig) {
-        *self.state.write().expect("web search runtime lock poisoned") = config;
+        *self
+            .state
+            .write()
+            .expect("web search runtime lock poisoned") = config;
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 

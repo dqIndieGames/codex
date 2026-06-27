@@ -1138,8 +1138,8 @@ mod tests {
     use super::*;
     use codex_protocol::protocol::AgentStatus;
     use codex_protocol::protocol::ErrorEvent;
-    use codex_protocol::protocol::Submission;
     use codex_protocol::protocol::StreamErrorEvent;
+    use codex_protocol::protocol::Submission;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
     use codex_protocol::protocol::TurnCompleteEvent;

@@ -2,8 +2,8 @@ use codex_api::ImageEditRequest;
 use codex_api::ImageGenerationRequest;
 use codex_api::ImageResponse;
 use codex_api::ImagesClient;
-use codex_api::ReqwestTransport;
 use codex_api::RequestTelemetry;
+use codex_api::ReqwestTransport;
 use codex_api::TransportError;
 use codex_login::default_client::build_reqwest_client;
 use codex_model_provider::create_model_provider;
@@ -57,10 +57,7 @@ impl CodexImagesBackend {
             .api_provider()
             .await
             .map_err(|err| err.to_string())?;
-        let auth = provider
-            .api_auth()
-            .await
-            .map_err(|err| err.to_string())?;
+        let auth = provider.api_auth().await.map_err(|err| err.to_string())?;
         let client = ImagesClient::new(
             ReqwestTransport::new(build_reqwest_client()),
             api_provider,

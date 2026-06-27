@@ -635,8 +635,7 @@ async fn make_rmcp_client(
                     }
                 }
                 (!env.is_empty()).then(|| {
-                    env
-                        .into_iter()
+                    env.into_iter()
                         .map(|(key, value)| (key.into(), value.into()))
                         .collect::<HashMap<_, _>>()
                 })

@@ -390,13 +390,12 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         } else {
             NotificationCoalescing::Disabled
         };
-        let outgoing_message_sender = Arc::new(
-            OutgoingMessageSender::new_with_notification_coalescing(
+        let outgoing_message_sender =
+            Arc::new(OutgoingMessageSender::new_with_notification_coalescing(
                 outgoing_tx,
                 notification_coalescing,
                 analytics_events_client.clone(),
-            ),
-        );
+            ));
 
         let (writer_tx, mut writer_rx) = mpsc::channel::<QueuedOutgoingMessage>(channel_capacity);
         let outbound_initialized = Arc::new(AtomicBool::new(false));

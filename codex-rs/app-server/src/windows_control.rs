@@ -566,9 +566,11 @@ async fn apply_provider_runtime_from_effective_provider(
     }
     edits.push(ConfigEdit {
         key_path: "features.fast_mode".to_string(),
-        value: json!(effective_config
-            .features
-            .enabled(codex_features::Feature::FastMode)),
+        value: json!(
+            effective_config
+                .features
+                .enabled(codex_features::Feature::FastMode)
+        ),
         merge_strategy: MergeStrategy::Replace,
     });
 

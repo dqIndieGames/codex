@@ -36,23 +36,68 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Verify source run commit
+      - name: Verify source run
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           TARGET_COMMITISH: ${{ inputs.target_commitish }}
         run: |
           set -euo pipefail
-          source_head_sha="$(gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha --jq '.headSha')"
+          source_run_json="$(gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha,status,conclusion)"
+          source_head_sha="$(jq -r '.headSha // ""' <<<"$source_run_json")"
+          source_status="$(jq -r '.status // ""' <<<"$source_run_json")"
+          source_conclusion="$(jq -r '.conclusion // ""' <<<"$source_run_json")"
           if [[ -z "$source_head_sha" || "$source_head_sha" == "null" ]]; then
             echo "Failed to read headSha for source run ${SOURCE_RUN_ID}" >&2
+            exit 1
+          fi
+          if [[ "$source_status" != "completed" || "$source_conclusion" != "success" ]]; then
+            echo "Source run ${SOURCE_RUN_ID} is ${source_status}/${source_conclusion}, expected completed/success" >&2
             exit 1
           fi
           if [[ "$source_head_sha" != "$TARGET_COMMITISH" ]]; then
             echo "Source run headSha ${source_head_sha} does not match target_commitish ${TARGET_COMMITISH}" >&2
             exit 1
           fi
-          echo "Verified source run ${SOURCE_RUN_ID} was built from ${TARGET_COMMITISH}"
+          echo "Verified source run ${SOURCE_RUN_ID} completed successfully from ${TARGET_COMMITISH}"
+
+      - name: Verify existing release target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          TARGET_COMMITISH: ${{ inputs.target_commitish }}
+        run: |
+          set -euo pipefail
+          if ! tag_ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" 2>/tmp/tag-ref.err)"; then
+            if grep -q "Not Found" /tmp/tag-ref.err; then
+              echo "No existing tag ${RELEASE_TAG}; release will create it at ${TARGET_COMMITISH}"
+              exit 0
+            fi
+            cat /tmp/tag-ref.err >&2
+            exit 1
+          fi
+
+          existing_target="$(jq -r '.object.sha // ""' <<<"$tag_ref_json")"
+          object_type="$(jq -r '.object.type // ""' <<<"$tag_ref_json")"
+          if [[ "$object_type" == "tag" ]]; then
+            tag_object_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${existing_target}")"
+            existing_target="$(jq -r '.object.sha // ""' <<<"$tag_object_json")"
+            object_type="$(jq -r '.object.type // ""' <<<"$tag_object_json")"
+          fi
+
+          if [[ -z "$existing_target" || "$existing_target" == "null" ]]; then
+            echo "Failed to resolve existing tag ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          if [[ "$object_type" != "commit" ]]; then
+            echo "Existing tag ${RELEASE_TAG} resolves to ${object_type}, expected commit" >&2
+            exit 1
+          fi
+          if [[ "$existing_target" != "$TARGET_COMMITISH" ]]; then
+            echo "Existing tag ${RELEASE_TAG} points at ${existing_target}, not ${TARGET_COMMITISH}" >&2
+            exit 1
+          fi
+          echo "Verified existing tag ${RELEASE_TAG} already points at ${TARGET_COMMITISH}"
 
       - name: Download artifact from source run
         env:
@@ -96,3 +141,28 @@ jobs:
           fail_on_unmatched_files: true
           prerelease: true
           make_latest: false
+
+      - name: Verify published release target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          TARGET_COMMITISH: ${{ inputs.target_commitish }}
+        run: |
+          set -euo pipefail
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish,isDraft,isPrerelease,assets)"
+          release_target="$(jq -r '.targetCommitish // ""' <<<"$release_json")"
+          is_draft="$(jq -r '.isDraft' <<<"$release_json")"
+          asset_count="$(jq '.assets | length' <<<"$release_json")"
+          if [[ "$release_target" != "$TARGET_COMMITISH" ]]; then
+            echo "Published release ${RELEASE_TAG} targetCommitish ${release_target} does not match ${TARGET_COMMITISH}" >&2
+            exit 1
+          fi
+          if [[ "$is_draft" != "false" ]]; then
+            echo "Published release ${RELEASE_TAG} is still draft" >&2
+            exit 1
+          fi
+          if [[ "$asset_count" -lt 1 ]]; then
+            echo "Published release ${RELEASE_TAG} has no assets" >&2
+            exit 1
+          fi
+          echo "Verified release ${RELEASE_TAG} target ${TARGET_COMMITISH} with ${asset_count} asset(s)"

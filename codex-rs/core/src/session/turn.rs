@@ -1156,7 +1156,10 @@ async fn run_sampling_request(
         Arc::clone(&router),
         Arc::clone(&turn_diff_tracker),
     );
-    let fallback_retry_threshold = turn_context.provider.info().stream_fallback_retry_threshold();
+    let fallback_retry_threshold = turn_context
+        .provider
+        .info()
+        .stream_fallback_retry_threshold();
     let retry_budget = turn_context.provider.info().stream_retry_budget();
     let mut retries = 0;
     let mut display_retries = 0;
@@ -1875,7 +1878,11 @@ async fn maybe_prefix_first_turn_checklist_visible_text(
         return;
     }
 
-    if sess.take_pending_first_turn_checklist_source().await.is_none() {
+    if sess
+        .take_pending_first_turn_checklist_source()
+        .await
+        .is_none()
+    {
         return;
     }
 
@@ -2332,18 +2339,18 @@ async fn try_run_sampling_request(
                     | ResponseItem::Other => false,
                 };
 
-                let active_agent_message_id = previously_streamed_item.as_ref().and_then(|previous| {
-                    if matches!(previous, TurnItem::AgentMessage(_)) {
-                        Some(previous.id())
-                    } else {
-                        None
-                    }
-                });
+                let active_agent_message_id =
+                    previously_streamed_item.as_ref().and_then(|previous| {
+                        if matches!(previous, TurnItem::AgentMessage(_)) {
+                            Some(previous.id())
+                        } else {
+                            None
+                        }
+                    });
                 let mut item = item;
                 let item_phase = assistant_message_phase(&item);
-                let completed_item_already_prefixed = active_agent_message_id
-                    .as_deref()
-                    .is_some_and(|item_id| {
+                let completed_item_already_prefixed =
+                    active_agent_message_id.as_deref().is_some_and(|item_id| {
                         first_turn_checklist_state.prefixed_item_id() == Some(item_id)
                     });
                 let completed_item_has_visible_text =
@@ -2354,7 +2361,10 @@ async fn try_run_sampling_request(
                 } else if completed_item_has_visible_text
                     && first_turn_checklist_state.prefixed_item_id().is_none()
                     && assistant_message_should_receive_first_turn_checklist(item_phase.as_ref())
-                    && sess.take_pending_first_turn_checklist_source().await.is_some()
+                    && sess
+                        .take_pending_first_turn_checklist_source()
+                        .await
+                        .is_some()
                 {
                     let prefix = local1_first_turn_checklist_prefix();
                     let _ = prepend_text_to_assistant_response_item(&mut item, &prefix);

@@ -93,8 +93,9 @@ impl<T: HttpTransport> ResponsesClient<T> {
 
         let provider = self.session.provider_snapshot();
         let body = if request.store && provider.is_azure_responses_endpoint() {
-            let mut body = serde_json::to_value(&request)
-                .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+            let mut body = serde_json::to_value(&request).map_err(|e| {
+                ApiError::Stream(format!("failed to encode responses request: {e}"))
+            })?;
             attach_item_ids(&mut body, &request.input);
             EncodedJsonBody::encode(&body)
                 .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?

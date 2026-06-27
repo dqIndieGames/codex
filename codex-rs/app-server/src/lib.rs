@@ -896,11 +896,12 @@ pub async fn run_main_with_transport_options(
         } else {
             NotificationCoalescing::Disabled
         };
-        let outgoing_message_sender = Arc::new(OutgoingMessageSender::new_with_notification_coalescing(
-            outgoing_tx,
-            notification_coalescing,
-            analytics_events_client.clone(),
-        ));
+        let outgoing_message_sender =
+            Arc::new(OutgoingMessageSender::new_with_notification_coalescing(
+                outgoing_tx,
+                notification_coalescing,
+                analytics_events_client.clone(),
+            ));
         let initialize_notification_sender = outgoing_message_sender.clone();
         let outbound_control_tx = outbound_control_tx;
         let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {

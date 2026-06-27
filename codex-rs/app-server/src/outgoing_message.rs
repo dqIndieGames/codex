@@ -1011,11 +1011,11 @@ mod tests {
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnCompletedNotification;
     use codex_app_server_protocol::TurnDiffUpdatedNotification;
+    use codex_app_server_protocol::TurnModerationMetadataNotification;
     use codex_app_server_protocol::TurnPlanStep;
     use codex_app_server_protocol::TurnPlanStepStatus;
     use codex_app_server_protocol::TurnPlanUpdatedNotification;
     use codex_app_server_protocol::TurnStatus;
-    use codex_app_server_protocol::TurnModerationMetadataNotification;
     use codex_protocol::ThreadId;
     use pretty_assertions::assert_eq;
     use serde_json::json;

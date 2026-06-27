@@ -183,7 +183,10 @@ impl ProviderRuntimeRefreshScope {
                 if matches!(
                     session_source,
                     SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-                ) => false,
+                ) =>
+            {
+                false
+            }
             Self::Console => matches!(
                 session_source,
                 SessionSource::Cli | SessionSource::Exec | SessionSource::Custom(_)
@@ -223,7 +226,9 @@ fn matches_parent_thread_scope(
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id, ..
             }) => current_parent_thread_id = *parent_thread_id,
-            SessionSource::SubAgent(SubAgentSource::Other(source)) if source.starts_with("agent_job:") => {
+            SessionSource::SubAgent(SubAgentSource::Other(source))
+                if source.starts_with("agent_job:") =>
+            {
                 let Some(parent_thread_id) = parent_thread_ids.get(&current_parent_thread_id)
                 else {
                     return false;
@@ -246,7 +251,9 @@ fn matches_parented_subagent_scope(
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id, ..
         }) => Some(*parent_thread_id),
-        SessionSource::SubAgent(SubAgentSource::Other(source)) if source.starts_with("agent_job:") => {
+        SessionSource::SubAgent(SubAgentSource::Other(source))
+            if source.starts_with("agent_job:") =>
+        {
             session_parent_thread_id
         }
         _ => None,

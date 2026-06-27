@@ -338,9 +338,8 @@ impl Session {
                 #[allow(deprecated)]
                 turn_context.cwd.to_path_buf()
             });
-        let mcp_runtime_context =
-            McpRuntimeContext::new(environment_manager, cwd)
-                .with_codex_self_exe(turn_context.codex_self_exe.clone());
+        let mcp_runtime_context = McpRuntimeContext::new(environment_manager, cwd)
+            .with_codex_self_exe(turn_context.codex_self_exe.clone());
         let mcp_startup_cancellation_token = {
             let mut guard = self.services.mcp_startup_cancellation_token.lock().await;
             guard.cancel();

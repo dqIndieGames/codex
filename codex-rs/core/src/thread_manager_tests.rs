@@ -92,10 +92,7 @@ fn provider_runtime_refresh_scope_matches_thread_spawn_parent_sources() {
     root_sources.insert(app_server_child_thread, app_server_child.clone());
     root_sources.insert(cycle_parent_a, thread_spawn_source(cycle_parent_b, 1));
     root_sources.insert(cycle_parent_b, thread_spawn_source(cycle_parent_a, 2));
-    root_sources.insert(
-        console_agent_job_thread,
-        agent_job_source("console-job"),
-    );
+    root_sources.insert(console_agent_job_thread, agent_job_source("console-job"));
     root_sources.insert(
         app_server_agent_job_thread,
         agent_job_source("app-server-job"),

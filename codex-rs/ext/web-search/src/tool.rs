@@ -1,5 +1,5 @@
-use codex_api::ReqwestTransport;
 use codex_api::RequestTelemetry;
+use codex_api::ReqwestTransport;
 use codex_api::SearchClient;
 use codex_api::SearchCommands;
 use codex_api::SearchQuery;
@@ -124,12 +124,15 @@ impl WebSearchTool {
                 .api_auth()
                 .await
                 .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
-            let client =
-                SearchClient::new(ReqwestTransport::new(build_reqwest_client()), api_provider, auth)
-                    .with_telemetry(Some(Arc::new(WebSearchRequestTelemetry {
-                        runtime: self.runtime.clone(),
-                        generation: snapshot.generation,
-                    })));
+            let client = SearchClient::new(
+                ReqwestTransport::new(build_reqwest_client()),
+                api_provider,
+                auth,
+            )
+            .with_telemetry(Some(Arc::new(WebSearchRequestTelemetry {
+                runtime: self.runtime.clone(),
+                generation: snapshot.generation,
+            })));
             let request = SearchRequest {
                 id: self.session_id.clone(),
                 model: call.model.clone(),

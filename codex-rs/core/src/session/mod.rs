@@ -64,11 +64,11 @@ use codex_extension_api::LoadedUserInstructions;
 use codex_extension_api::PromptFragment;
 use codex_extension_api::PromptSlot;
 use codex_extension_api::TurnContextContributionInput;
+use codex_features::FEATURES;
 use codex_features::Feature;
 use codex_features::FeatureConfigSource;
 use codex_features::FeatureOverrides;
 use codex_features::Features;
-use codex_features::FEATURES;
 use codex_features::unstable_features_warning_event;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
@@ -99,8 +99,8 @@ use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
-use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
@@ -211,9 +211,9 @@ use codex_config::ConfigLayerStackOrdering;
 use codex_config::config_toml::ConfigToml;
 use codex_config::loader::resolve_relative_paths_in_config_toml;
 use codex_config::types::McpServerConfig;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
-use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
@@ -1601,9 +1601,7 @@ impl Session {
                 .features
                 .set_enabled(Feature::FastMode, fast_mode_enabled)
             {
-                warn!(
-                    "failed to apply refreshed fast_mode feature state to session config: {err}"
-                );
+                warn!("failed to apply refreshed fast_mode feature state to session config: {err}");
             }
             if let Some(provider) = config.model_providers.get_mut(&provider_id) {
                 provider.base_url = base_url.clone();
@@ -1733,15 +1731,14 @@ impl Session {
             .config_layer_stack
             .with_user_config(&config_toml_path, user_config)
             .effective_config();
-        let cfg: ConfigToml = deserialize_config_toml_with_base(
-            merged_toml,
-            config_base_dir.as_path(),
-        )
-        .map_err(|err| {
-            CodexErr::InvalidRequest(format!(
-                "failed to parse effective config while refreshing provider runtime: {err}"
-            ))
-        })?;
+        let cfg: ConfigToml =
+            deserialize_config_toml_with_base(merged_toml, config_base_dir.as_path()).map_err(
+                |err| {
+                    CodexErr::InvalidRequest(format!(
+                        "failed to parse effective config while refreshing provider runtime: {err}"
+                    ))
+                },
+            )?;
 
         Self::resolve_provider_runtime_refresh(cfg, &config.model_provider_id, config)
     }

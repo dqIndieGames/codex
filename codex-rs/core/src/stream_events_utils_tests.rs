@@ -427,10 +427,7 @@ fn local1_first_turn_checklist_prefix_contains_current_local3_items() {
 #[test]
 fn local3_first_turn_checklist_entries_match_numbered_document() {
     let entries = local3_first_turn_checklist_entries();
-    let actual_ids = entries
-        .iter()
-        .map(|(index, _)| *index)
-        .collect::<Vec<_>>();
+    let actual_ids = entries.iter().map(|(index, _)| *index).collect::<Vec<_>>();
     let expected_ids = (1..=15).collect::<Vec<_>>();
 
     assert_eq!(actual_ids, expected_ids);

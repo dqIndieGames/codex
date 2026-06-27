@@ -669,9 +669,7 @@ impl ThreadRequestProcessor {
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let report = self
             .thread_manager
-            .refresh_loaded_provider_runtime(core_provider_runtime_refresh_scope(
-                params.scope,
-            ))
+            .refresh_loaded_provider_runtime(core_provider_runtime_refresh_scope(params.scope))
             .await;
         Ok(Some(
             ThreadProviderRuntimeRefreshAllLoadedResponse {
@@ -804,12 +802,15 @@ impl ThreadRequestProcessor {
         params: ThreadProviderRuntimeRefreshParams,
     ) -> Result<ThreadProviderRuntimeRefreshResponse, JSONRPCErrorError> {
         let (thread_id, thread) = self.load_thread(&params.thread_id).await?;
-        let status = thread.refresh_provider_runtime().await.map_err(|err| match err {
-            CodexErr::InvalidRequest(message) => invalid_request(format!(
-                "failed to refresh provider runtime: {message}"
-            )),
-            err => internal_error(format!("failed to refresh provider runtime: {err}")),
-        })?;
+        let status = thread
+            .refresh_provider_runtime()
+            .await
+            .map_err(|err| match err {
+                CodexErr::InvalidRequest(message) => {
+                    invalid_request(format!("failed to refresh provider runtime: {message}"))
+                }
+                err => internal_error(format!("failed to refresh provider runtime: {err}")),
+            })?;
         let status = match status {
             codex_core::ProviderRuntimeRefreshStatus::Applied => {
                 ThreadProviderRuntimeRefreshStatus::Applied
@@ -4232,9 +4233,7 @@ fn core_provider_runtime_refresh_scope(
     match scope.unwrap_or(ThreadProviderRuntimeRefreshScope::All) {
         ThreadProviderRuntimeRefreshScope::All => CoreProviderRuntimeRefreshScope::All,
         ThreadProviderRuntimeRefreshScope::Console => CoreProviderRuntimeRefreshScope::Console,
-        ThreadProviderRuntimeRefreshScope::AppServer => {
-            CoreProviderRuntimeRefreshScope::AppServer
-        }
+        ThreadProviderRuntimeRefreshScope::AppServer => CoreProviderRuntimeRefreshScope::AppServer,
     }
 }
 
