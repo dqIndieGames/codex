@@ -114,10 +114,15 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall {
         ConversationHistory::new(invocation.session.clone_history().await.into_raw_items());
     let mut environments = Vec::with_capacity(invocation.turn.environments.turn_environments.len());
     for environment in &invocation.turn.environments.turn_environments {
+        // TODO(anp): Migrate extension ToolEnvironment and granted-permission lookup to PathUri
+        // so extensions can receive foreign environment cwd values.
+        let Ok(native_cwd) = environment.cwd().to_abs_path() else {
+            continue;
+        };
         let additional_permissions = apply_granted_turn_permissions(
             invocation.session.as_ref(),
             &environment.environment_id,
-            environment.cwd().as_path(),
+            native_cwd.as_path(),
             SandboxPermissions::UseDefault,
             /*additional_permissions*/ None,
         )
@@ -125,10 +130,10 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall {
         .additional_permissions;
         let file_system_sandbox_context = invocation
             .turn
-            .file_system_sandbox_context(additional_permissions, environment.cwd_uri());
+            .file_system_sandbox_context(additional_permissions, environment.cwd());
         environments.push(ToolEnvironment {
             environment_id: environment.environment_id.clone(),
-            cwd: environment.cwd().clone(),
+            cwd: native_cwd,
             file_system: environment.environment.get_filesystem(),
             file_system_sandbox_context,
         });
@@ -138,7 +143,7 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall {
         call_id: invocation.call_id.clone(),
         tool_name: invocation.tool_name.clone(),
         model: invocation.turn.model_info.slug.clone(),
-        truncation_policy: invocation.turn.truncation_policy,
+        truncation_policy: invocation.turn.model_info.truncation_policy.into(),
         conversation_history,
         turn_item_emitter: Arc::new(CoreTurnItemEmitter {
             session: Arc::downgrade(&invocation.session),
@@ -310,12 +315,12 @@ mod tests {
         let weak_turn = Arc::downgrade(&turn);
         let turn_id = turn.sub_id.clone();
         let model = turn.model_info.slug.clone();
-        let truncation_policy = turn.truncation_policy;
+        let truncation_policy = turn.model_info.truncation_policy.into();
         let expected_sandbox_cwds = turn
             .environments
             .turn_environments
             .iter()
-            .map(|environment| Some(environment.cwd_uri().clone()))
+            .map(|environment| Some(environment.cwd().clone()))
             .collect::<Vec<_>>();
         let history_item = ResponseItem::Message {
             id: None,
@@ -324,15 +329,18 @@ mod tests {
                 text: "extension history".to_string(),
             }],
             phase: None,
+            internal_chat_message_metadata_passthrough: None,
         };
         session
             .record_conversation_items(&turn, std::slice::from_ref(&history_item))
             .await;
+        let mut expected_history_item = history_item.clone();
+        expected_history_item.set_turn_id_if_missing(&turn_id);
         let raw_history_event = rx.recv().await.expect("history raw response item event");
         let EventMsg::RawResponseItem(raw_history_item) = raw_history_event.msg else {
             panic!("expected raw response item event");
         };
-        assert_eq!(raw_history_item.item, history_item);
+        assert_eq!(raw_history_item.item, expected_history_item);
         let invocation = ToolInvocation {
             session,
             turn,
@@ -371,7 +379,7 @@ mod tests {
         );
         assert_eq!(
             captured_call.conversation_history.items(),
-            std::slice::from_ref(&history_item)
+            std::slice::from_ref(&expected_history_item)
         );
         match captured_call.payload {
             ToolPayload::Function { arguments } => {

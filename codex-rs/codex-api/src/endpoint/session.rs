@@ -3,6 +3,7 @@ use crate::error::ApiError;
 use crate::provider::Provider;
 use crate::provider::ProviderSource;
 use crate::telemetry::run_with_request_telemetry;
+use codex_client::EncodedJsonBody;
 use codex_client::HttpTransport;
 use codex_client::Request;
 use codex_client::RequestBody;
@@ -58,13 +59,13 @@ impl<T: HttpTransport> EndpointSession<T> {
         method: &Method,
         path: &str,
         extra_headers: &HeaderMap,
-        body: Option<&Value>,
+        body: Option<&RequestBody>,
     ) -> Request {
         let provider = self.provider_source.snapshot();
         let mut req = provider.build_request(method.clone(), path);
         req.headers.extend(extra_headers.clone());
         if let Some(body) = body {
-            req.body = Some(RequestBody::Json(body.clone()));
+            req.body = Some(body.clone());
         }
         req
     }
@@ -97,6 +98,7 @@ impl<T: HttpTransport> EndpointSession<T> {
     where
         C: Fn(&mut Request),
     {
+        let body = body.map(RequestBody::Json);
         let make_request = || {
             let mut req = self.make_request(&method, path, &extra_headers, body.as_ref());
             configure(&mut req);
@@ -123,27 +125,27 @@ impl<T: HttpTransport> EndpointSession<T> {
     }
 
     #[instrument(
-        name = "endpoint_session.stream_with",
+        name = "endpoint_session.stream_encoded_json_with",
         level = "info",
         skip_all,
         fields(http.method = %method, api.path = path)
     )]
-    pub(crate) async fn stream_with<C>(
+    pub(crate) async fn stream_encoded_json_with<C>(
         &self,
         method: Method,
         path: &str,
         extra_headers: HeaderMap,
-        body: Option<Value>,
+        body: Option<EncodedJsonBody>,
         configure: C,
     ) -> Result<StreamResponse, ApiError>
     where
         C: Fn(&mut Request),
     {
-        let make_request = || {
-            let mut req = self.make_request(&method, path, &extra_headers, body.as_ref());
-            configure(&mut req);
-            req
-        };
+        let body = body.map(RequestBody::EncodedJson);
+        let mut request = self.make_request(&method, path, &extra_headers, body.as_ref());
+        configure(&mut request);
+        let request = request.into_prepared().map_err(TransportError::Build)?;
+        let make_request = || request.clone();
 
         let stream = run_with_request_telemetry(
             self.provider_source.snapshot().retry.to_policy(),

@@ -25,6 +25,7 @@ use codex_login::AuthEnvTelemetry;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::BearerAuthProvider;
+use codex_model_provider::create_model_provider;
 use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
@@ -34,6 +35,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -85,6 +87,7 @@ fn test_model_client(session_source: SessionSource) -> ModelClient {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        /*item_ids_enabled*/ false,
         /*attestation_provider*/ None,
     )
 }
@@ -152,6 +155,20 @@ fn test_session_telemetry() -> SessionTelemetry {
         "test-terminal".to_string(),
         SessionSource::Cli,
     )
+}
+
+#[test]
+fn ultra_reasoning_uses_max_for_requests() {
+    assert_eq!(
+        (
+            super::reasoning_effort_for_request(ReasoningEffort::Ultra),
+            super::reasoning_effort_for_request(ReasoningEffort::High),
+        ),
+        (
+            ReasoningEffort::Custom("max".to_string()),
+            ReasoningEffort::High,
+        )
+    );
 }
 
 #[derive(Default)]
@@ -234,6 +251,7 @@ fn output_message(id: &str, text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
@@ -465,6 +483,39 @@ async fn response_stream_records_last_model_feedback_ids() {
 }
 
 #[tokio::test]
+async fn bedrock_unauthorized_error_uses_provider_mapping() {
+    let provider = create_model_provider(
+        ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
+        /*auth_manager*/ None,
+    );
+    let mut auth_recovery = None;
+    let url = "https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses";
+    let error = super::handle_unauthorized(
+        TransportError::Http {
+            status: http::StatusCode::UNAUTHORIZED,
+            url: Some(url.to_string()),
+            headers: None,
+            body: Some(
+                "Signature expired: 20260609T133205Z is now earlier than 20260614T062525Z"
+                    .to_string(),
+            ),
+        },
+        &mut auth_recovery,
+        &test_session_telemetry(),
+        &provider,
+    )
+    .await
+    .expect_err("expired Bedrock signature should fail");
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "Amazon Bedrock rejected the request because its AWS signature has expired. Refresh your AWS credentials and retry. If `AWS_BEARER_TOKEN_BEDROCK` is set, update or unset it, then restart Codex, url: {url}"
+        )
+    );
+}
+
+#[tokio::test]
 async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
 -> anyhow::Result<()> {
     let temp = TempDir::new()?;
@@ -554,6 +605,7 @@ fn api_telemetry_notifies_streaming_request_retry() {
         Some(notifier),
         None,
         None,
+        0,
     );
     let mut headers = HeaderMap::new();
     headers.insert("x-request-id", HeaderValue::from_static("req-503"));
@@ -587,6 +639,44 @@ fn api_telemetry_notifies_streaming_request_retry() {
     assert!(retry_events[0].details.contains("request id: req-503"));
     assert!(!retry_events[0].details.contains("secret token leaked"));
     assert!(!retry_events[0].details.contains("api_key"));
+}
+
+#[test]
+fn api_telemetry_offsets_visible_retry_count_after_route_recovery_restart() {
+    let retry_events = Arc::new(Mutex::new(Vec::<RequestRetryEvent>::new()));
+    let notifier = {
+        let retry_events = Arc::clone(&retry_events);
+        Arc::new(move |event| {
+            retry_events.lock().unwrap().push(event);
+        })
+    };
+    let telemetry = ApiTelemetry::new(
+        test_session_telemetry(),
+        AuthRequestTelemetryContext::new(
+            None,
+            &BearerAuthProvider::for_test(None, None),
+            PendingUnauthorizedRetry::default(),
+        ),
+        RequestRouteTelemetry::for_endpoint("/responses"),
+        AuthEnvTelemetry::default(),
+        Some(notifier),
+        None,
+        None,
+        3,
+    );
+    let error = TransportError::Http {
+        status: http::StatusCode::SERVICE_UNAVAILABLE,
+        url: Some("https://example.com/v1/responses".to_string()),
+        headers: None,
+        body: None,
+    };
+
+    telemetry.on_request_retry(1, 5, Some(http::StatusCode::SERVICE_UNAVAILABLE), &error);
+
+    let retry_events = retry_events.lock().unwrap();
+    assert_eq!(retry_events.len(), 1);
+    assert_eq!(retry_events[0].retry_number, 4);
+    assert_eq!(retry_events[0].max_attempts, 8);
 }
 
 fn model_client_with_counting_attestation(
@@ -634,6 +724,7 @@ fn model_client_with_counting_attestation(
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        /*item_ids_enabled*/ false,
         Some(Arc::new(CountingAttestationProvider {
             calls: attestation_calls.clone(),
         })),

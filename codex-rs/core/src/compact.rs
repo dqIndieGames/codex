@@ -32,6 +32,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CompactedItem;
@@ -78,7 +79,12 @@ pub(crate) async fn run_inline_auto_compact_task(
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
-    let prompt = turn_context.compact_prompt().to_string();
+    let prompt = turn_context
+        .config
+        .compact_prompt
+        .as_deref()
+        .unwrap_or(SUMMARIZATION_PROMPT)
+        .to_string();
     let input = vec![UserInput::Text {
         text: prompt,
         // Compaction prompt is synthesized; no UI element ranges to preserve.
@@ -210,7 +216,7 @@ async fn run_compact_task_inner_impl(
     let mut history = sess.clone_history().await;
     history.record_items(
         &[initial_input_for_turn.into()],
-        turn_context.truncation_policy,
+        turn_context.model_info.truncation_policy.into(),
     );
 
     let fallback_retry_threshold = turn_context
@@ -219,6 +225,7 @@ async fn run_compact_task_inner_impl(
         .stream_fallback_retry_threshold();
     let retry_budget = local_compaction_stream_retry_budget(turn_context.provider.info());
     let mut retries = 0;
+    let mut display_retries = 0;
     let mut client_session = sess.services.model_client.new_session();
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
     // request tracking)
@@ -239,7 +246,6 @@ async fn run_compact_task_inner_impl(
         let prompt = Prompt {
             input: turn_input,
             base_instructions: sess.get_base_instructions().await,
-            personality: turn_context.personality,
             ..Default::default()
         };
         let attempt_result = drain_to_completed(
@@ -255,8 +261,8 @@ async fn run_compact_task_inner_impl(
             Ok(()) => {
                 break;
             }
-            Err(CodexErr::Interrupted) => {
-                return Err(CodexErr::Interrupted);
+            Err(err @ (CodexErr::Interrupted | CodexErr::TurnAborted)) => {
+                return Err(err);
             }
             Err(e @ CodexErr::ContextWindowExceeded) => {
                 if turn_input_len > 1 {
@@ -284,6 +290,7 @@ async fn run_compact_task_inner_impl(
 
                 if let Err(e) = handle_retryable_response_stream_error(
                     &mut retries,
+                    &mut display_retries,
                     fallback_retry_threshold,
                     retry_budget,
                     e,
@@ -313,7 +320,12 @@ async fn run_compact_task_inner_impl(
     let user_messages = collect_user_messages(history_items);
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
-    let window_id = sess.advance_auto_compact_window_id().await;
+    if let Some(summary_item) = new_history.last_mut() {
+        // This replacement history skips `record_conversation_items`; only the appended summary
+        // belongs to this compaction turn.
+        summary_item.set_turn_id_if_missing(&turn_context.sub_id);
+    }
+    let (window_number, window_ids) = sess.advance_auto_compact_window().await;
 
     if matches!(
         initial_context_injection,
@@ -330,10 +342,18 @@ async fn run_compact_task_inner_impl(
     let compacted_item = CompactedItem {
         message: summary_text.clone(),
         replacement_history: Some(new_history.clone()),
-        window_id: Some(window_id),
+        window_number: Some(window_number),
+        first_window_id: Some(window_ids.first_window_id.to_string()),
+        previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
+        window_id: Some(window_ids.window_id.to_string()),
     };
-    sess.replace_compacted_history(new_history, reference_context_item, compacted_item)
-        .await;
+    sess.replace_compacted_history(
+        turn_context.as_ref(),
+        new_history,
+        reference_context_item,
+        compacted_item,
+    )
+    .await;
     sess.recompute_token_usage(&turn_context).await;
 
     sess.emit_turn_item_completed(&turn_context, compaction_item)
@@ -459,7 +479,13 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
     }
 }
 
-pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<String> {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CompactedUserMessage {
+    message: String,
+    internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+}
+
+pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<CompactedUserMessage> {
     items
         .iter()
         .filter_map(|item| match crate::event_mapping::parse_turn_item(item) {
@@ -467,7 +493,16 @@ pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<String> {
                 if is_summary_message(&user.message()) {
                     None
                 } else {
-                    Some(user.message())
+                    Some(CompactedUserMessage {
+                        message: user.message(),
+                        internal_chat_message_metadata_passthrough: match item {
+                            ResponseItem::Message {
+                                internal_chat_message_metadata_passthrough,
+                                ..
+                            } => internal_chat_message_metadata_passthrough.clone(),
+                            _ => None,
+                        },
+                    })
                 }
             }
             _ => None,
@@ -538,7 +573,7 @@ pub(crate) fn insert_initial_context_before_last_real_user_or_summary(
 
 pub(crate) fn build_compacted_history(
     initial_context: Vec<ResponseItem>,
-    user_messages: &[String],
+    user_messages: &[CompactedUserMessage],
     summary_text: &str,
 ) -> Vec<ResponseItem> {
     build_compacted_history_with_limit(
@@ -551,24 +586,30 @@ pub(crate) fn build_compacted_history(
 
 fn build_compacted_history_with_limit(
     mut history: Vec<ResponseItem>,
-    user_messages: &[String],
+    user_messages: &[CompactedUserMessage],
     summary_text: &str,
     max_tokens: usize,
 ) -> Vec<ResponseItem> {
-    let mut selected_messages: Vec<String> = Vec::new();
+    let mut selected_messages: Vec<CompactedUserMessage> = Vec::new();
     if max_tokens > 0 {
         let mut remaining = max_tokens;
         for message in user_messages.iter().rev() {
             if remaining == 0 {
                 break;
             }
-            let tokens = approx_token_count(message);
+            let tokens = approx_token_count(&message.message);
             if tokens <= remaining {
                 selected_messages.push(message.clone());
                 remaining = remaining.saturating_sub(tokens);
             } else {
-                let truncated = truncate_text(message, TruncationPolicy::Tokens(remaining));
-                selected_messages.push(truncated);
+                let truncated =
+                    truncate_text(&message.message, TruncationPolicy::Tokens(remaining));
+                selected_messages.push(CompactedUserMessage {
+                    message: truncated,
+                    internal_chat_message_metadata_passthrough: message
+                        .internal_chat_message_metadata_passthrough
+                        .clone(),
+                });
                 break;
             }
         }
@@ -580,9 +621,12 @@ fn build_compacted_history_with_limit(
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
-                text: message.clone(),
+                text: message.message.clone(),
             }],
             phase: None,
+            internal_chat_message_metadata_passthrough: message
+                .internal_chat_message_metadata_passthrough
+                .clone(),
         });
     }
 
@@ -597,6 +641,7 @@ fn build_compacted_history_with_limit(
         role: "user".to_string(),
         content: vec![ContentItem::InputText { text: summary_text }],
         phase: None,
+        internal_chat_message_metadata_passthrough: None,
     });
 
     history
@@ -644,7 +689,7 @@ async fn drain_to_completed(
             }
             Ok(ResponseEvent::Completed { token_usage, .. }) => {
                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
-                    .await;
+                    .await?;
                 return Ok(());
             }
             Ok(_) => continue,

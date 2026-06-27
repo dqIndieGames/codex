@@ -263,7 +263,9 @@ fn apply_agent_turn_context(
     config.model_reasoning_summary = Some(turn.reasoning_summary);
     config.developer_instructions = turn.developer_instructions.clone();
     config.compact_prompt = turn.compact_prompt.clone();
-    apply_spawn_agent_runtime_overrides(config, turn)
+    apply_spawn_agent_runtime_overrides(config, turn)?;
+
+    Ok(config)
 }
 
 pub(crate) fn reject_full_fork_spawn_overrides(
@@ -295,8 +297,6 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
             FunctionCallError::RespondToModel(format!("approval_policy is invalid: {err}"))
         })?;
     config.approvals_reviewer = turn.config.approvals_reviewer;
-    config.permissions.shell_environment_policy = turn.shell_environment_policy.clone();
-    config.codex_linux_sandbox_exe = turn.codex_linux_sandbox_exe.clone();
     #[allow(deprecated)]
     let turn_cwd = turn.cwd.clone();
     config.cwd = turn_cwd;

@@ -10,6 +10,8 @@ use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_login::AuthManager;
+#[cfg(debug_assertions)]
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::CliConfigOverrides;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -67,13 +69,11 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::Level;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
-use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::Registry;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -90,16 +90,19 @@ mod config_manager;
 mod config_manager_service;
 mod connection_cleanup;
 mod connection_rpc_gate;
+mod current_time;
 mod dynamic_tools;
 mod error_code;
 mod extensions;
 mod filters;
 mod fs_watch;
 mod fuzzy_file_search;
+mod image_url;
 pub mod in_process;
 mod mcp_refresh;
 mod message_processor;
 mod models;
+mod models_refresh_worker;
 mod outgoing_message;
 mod request_processors;
 mod request_serialization;
@@ -123,6 +126,8 @@ pub use crate::transport::take_remote_control_disabled_env;
 const LOG_FORMAT_ENV_VAR: &str = "LOG_FORMAT";
 const DEFAULT_APP_SERVER_LOG_FILTER: &str = "warn";
 const OTEL_SERVICE_NAME: &str = "codex-app-server";
+#[cfg(debug_assertions)]
+const TEST_USER_CONFIG_FILE_ENV_VAR: &str = "CODEX_APP_SERVER_TEST_USER_CONFIG_FILE";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LogFormat {
@@ -445,6 +450,10 @@ pub async fn run_main_with_transport_options(
     auth: AppServerWebsocketAuthSettings,
     runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<()> {
+    let loader_overrides = loader_overrides_with_test_user_config_file(
+        loader_overrides,
+        test_user_config_file_from_env(),
+    )?;
     let (transport_event_tx, mut transport_event_rx) =
         mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
     let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(CHANNEL_CAPACITY);
@@ -1336,6 +1345,43 @@ fn emit_state_db_backup_warning(message: &str) {
     }
 }
 
+fn test_user_config_file_from_env() -> Option<std::path::PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os(TEST_USER_CONFIG_FILE_ENV_VAR)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+
+    #[cfg(not(debug_assertions))]
+    None
+}
+
+fn loader_overrides_with_test_user_config_file(
+    mut loader_overrides: LoaderOverrides,
+    test_user_config_file: Option<std::path::PathBuf>,
+) -> IoResult<LoaderOverrides> {
+    #[cfg(debug_assertions)]
+    if let Some(path) = test_user_config_file {
+        let path = AbsolutePathBuf::from_absolute_path(path).map_err(|err| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid test user config path: {err}"),
+            )
+        })?;
+        warn!(
+            path = %path.as_path().display(),
+            "using debug-only app-server test user config file"
+        );
+        loader_overrides.user_config_path = Some(path);
+    }
+
+    #[cfg(not(debug_assertions))]
+    let _ = test_user_config_file;
+
+    Ok(loader_overrides)
+}
+
 fn analytics_rpc_transport(transport: &AppServerTransport) -> AppServerRpcTransport {
     match transport {
         AppServerTransport::Stdio => AppServerRpcTransport::Stdio,
@@ -1348,6 +1394,12 @@ fn analytics_rpc_transport(transport: &AppServerTransport) -> AppServerRpcTransp
 #[cfg(test)]
 mod tests {
     use super::LogFormat;
+    #[cfg(debug_assertions)]
+    use super::loader_overrides_with_test_user_config_file;
+    #[cfg(debug_assertions)]
+    use codex_config::LoaderOverrides;
+    #[cfg(debug_assertions)]
+    use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -1366,5 +1418,21 @@ mod tests {
         assert_eq!(LogFormat::from_env_value(Some("")), LogFormat::Default);
         assert_eq!(LogFormat::from_env_value(Some("text")), LogFormat::Default);
         assert_eq!(LogFormat::from_env_value(Some("jsonl")), LogFormat::Default);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_test_user_config_file_overrides_loader_path() {
+        let path = std::env::temp_dir().join("codex-app-server-test-config.toml");
+        let loader_overrides = loader_overrides_with_test_user_config_file(
+            LoaderOverrides::default(),
+            Some(path.clone()),
+        )
+        .expect("test config path should be valid");
+
+        assert_eq!(
+            loader_overrides.user_config_path,
+            Some(AbsolutePathBuf::from_absolute_path(path).expect("absolute test path"))
+        );
     }
 }

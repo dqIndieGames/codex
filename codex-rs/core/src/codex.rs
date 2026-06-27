@@ -6647,6 +6647,7 @@ async fn run_sampling_request(
         )
         .await;
     let mut retries = 0;
+    let mut display_retries = 0;
     loop {
         client_session.set_retry_chain_active(retries > 0);
         let err = match try_run_sampling_request(
@@ -6683,6 +6684,7 @@ async fn run_sampling_request(
 
         handle_retryable_response_stream_error(
             &mut retries,
+            &mut display_retries,
             turn_context.provider.stream_fallback_retry_threshold(),
             turn_context.provider.stream_retry_budget(),
             err,

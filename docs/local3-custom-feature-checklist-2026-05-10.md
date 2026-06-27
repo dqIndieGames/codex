@@ -81,3 +81,10 @@
 - `Selected model is at capacity. Please try a different model.` 必须作为 typed `ServerOverloaded` 进入 retry / hard route recovery；只改 UI 文案或只让 `is_retryable()` 返回 true 不够，必须覆盖普通 sampling、local compact、remote compact v2 三条会把错误变成终态 `ErrorEvent` 的链路。
 - capacity 可以穿透 zero/finite stream budget 争取第 3 次 sticky-break，但不能把所有 retryable 错误都顺手改成无界；compact 普通 500/timeout/断流仍要使用 compact 专属有限 terminal budget，否则历史压缩失败会让用户看到长时间卡住而不是明确失败。
 - 禁止本地编译时，验收必须走“subagent 静态反推 + GitHub Actions 远端 prerelease + 下载 release zip 运行下载的 `codex.exe --version` / `--help`”；旧 run 或本地旧 exe 不能替代新提交产物 smoke。
+
+## 2026-06-28 retry 计数器回绕修复经验
+
+- 用户可见 retry 序号必须和内部 route recovery 局部计数分离；第 3、6、9 次 sticky-break 可以重启 HTTP 请求、重置 WebSocket session 或刷新局部 fallback 计数，但 `503 retry N (unbounded)` / `Reconnecting... N (unbounded)` 的 N 必须继续累计为 4、5、6，不能回到 0 或 1。
+- HTTP request retry 的显示计数要在 telemetry 层加上已被 route recovery 消费的 retry offset；只减少下一轮 `max_attempts` 不够，否则新建 API client 后 `on_request_retry(1, ...)` 会让 UI 重新显示第 1 次 retry。
+- stream/WebSocket retry 要保留两个计数器：内部 `retries` 继续用于 backoff、fallback threshold 和 sticky-break 周期；独立的 display retry 只用于用户提示和日志显示，provider runtime refresh、fallback transport 或 session reset 不得清零 display retry。
+- 验证必须同时覆盖 request-layer 与 stream/WebSocket，至少断言连续 1..6 可见序号、不出现 `18446744073709551615`，并在最终 release smoke 中从 GitHub Release asset 重新下载 exe 后复核，不能用 Actions artifact 或本地旧 exe 代替。

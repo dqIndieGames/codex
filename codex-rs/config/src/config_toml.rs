@@ -136,6 +136,21 @@ of strings; comma-separated strings are not supported. Use \
     }
 }
 
+/// Orchestrator-owned feature settings.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct OrchestratorToml {
+    pub skills: Option<OrchestratorFeatureToml>,
+    pub mcp: Option<OrchestratorFeatureToml>,
+}
+
+/// Settings for a feature owned by the orchestrator.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct OrchestratorFeatureToml {
+    pub enabled: Option<bool>,
+}
+
 /// Base config deserialized from ~/.codex/config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -368,6 +383,9 @@ pub struct ConfigToml {
     /// Optional product SKU forwarded on host-owned Codex Apps MCP requests.
     pub apps_mcp_product_sku: Option<String>,
 
+    /// Orchestrator-owned feature settings.
+    pub orchestrator: Option<OrchestratorToml>,
+
     /// Base URL override for the built-in `openai` model provider.
     pub openai_base_url: Option<String>,
 
@@ -417,7 +435,7 @@ pub struct ConfigToml {
     pub experimental_thread_store: Option<ThreadStoreToml>,
     pub projects: Option<HashMap<String, ProjectConfig>>,
 
-    /// Controls the web search tool mode: disabled, cached, or live.
+    /// Controls the web search tool mode: disabled, cached, indexed, or live.
     pub web_search: Option<WebSearchMode>,
 
     /// Nested tools section for feature toggles
@@ -605,14 +623,12 @@ pub enum RealtimeTransport {
     Websocket,
 }
 
-pub use codex_protocol::protocol::RealtimeConversationArchitecture as RealtimeArchitecture;
 pub use codex_protocol::protocol::RealtimeConversationVersion as RealtimeWsVersion;
 pub use codex_protocol::protocol::RealtimeVoice;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct RealtimeConfig {
-    pub architecture: RealtimeArchitecture,
     pub version: RealtimeWsVersion,
     #[serde(rename = "type")]
     pub session_type: RealtimeWsMode,
@@ -623,7 +639,6 @@ pub struct RealtimeConfig {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct RealtimeToml {
-    pub architecture: Option<RealtimeArchitecture>,
     pub version: Option<RealtimeWsVersion>,
     #[serde(rename = "type")]
     pub session_type: Option<RealtimeWsMode>,

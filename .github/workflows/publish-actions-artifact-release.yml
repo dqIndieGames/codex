@@ -36,6 +36,24 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      - name: Verify source run commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          TARGET_COMMITISH: ${{ inputs.target_commitish }}
+        run: |
+          set -euo pipefail
+          source_head_sha="$(gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha --jq '.headSha')"
+          if [[ -z "$source_head_sha" || "$source_head_sha" == "null" ]]; then
+            echo "Failed to read headSha for source run ${SOURCE_RUN_ID}" >&2
+            exit 1
+          fi
+          if [[ "$source_head_sha" != "$TARGET_COMMITISH" ]]; then
+            echo "Source run headSha ${source_head_sha} does not match target_commitish ${TARGET_COMMITISH}" >&2
+            exit 1
+          fi
+          echo "Verified source run ${SOURCE_RUN_ID} was built from ${TARGET_COMMITISH}"
+
       - name: Download artifact from source run
         env:
           GH_TOKEN: ${{ github.token }}

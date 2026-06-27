@@ -26,6 +26,7 @@ pub(crate) enum ResponsesStreamRequest {
 /// retry the request loop.
 pub(crate) async fn handle_retryable_response_stream_error(
     retries: &mut u64,
+    display_retries: &mut u64,
     fallback_retry_threshold: u64,
     retry_budget: Option<u64>,
     err: CodexErr,
@@ -67,6 +68,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
     if effective_retry_budget.is_none_or(|max_retries| *retries < max_retries) {
         *retries += 1;
         let retry_count = *retries;
+        let display_retry_count = next_display_retry_count(display_retries);
         if allow_route_recovery && retry_count % ROUTE_RECOVERY_RETRY_THRESHOLD == 0 {
             client_session.activate_retry_route_recovery();
         }
@@ -81,26 +83,18 @@ pub(crate) async fn handle_retryable_response_stream_error(
             request,
             turn_context,
             &err,
-            retry_count,
+            display_retry_count,
             display_max_retries,
             delay,
         );
 
-        // In release builds, hide the first websocket retry notification to reduce noisy
-        // transient reconnect messages. In debug builds, keep full visibility for diagnosis.
-        let report_error = retry_count > 1
-            || cfg!(debug_assertions)
-            || !sess.services.model_client.responses_websocket_enabled();
-        if report_error {
-            // Surface retry information to any UI/front-end so the user understands what is
-            // happening instead of staring at a seemingly frozen screen.
-            sess.notify_stream_error(
-                turn_context,
-                transport_retry_status_message(retry_count, display_max_retries),
-                err,
-            )
-            .await;
-        }
+        // Surface every visible retry so the user-facing count remains continuous from 1.
+        sess.notify_stream_error(
+            turn_context,
+            transport_retry_status_message(display_retry_count, display_max_retries),
+            err,
+        )
+        .await;
         sleep_stream_retry_delay(delay, retries, client_session).await;
         return Ok(());
     }
@@ -147,6 +141,11 @@ fn transport_retry_status_message(retries: u64, max_retries: u64) -> String {
         "Reconnecting... {}",
         retry_status_suffix(retries, max_retries)
     )
+}
+
+fn next_display_retry_count(display_retries: &mut u64) -> u64 {
+    *display_retries = (*display_retries).saturating_add(1);
+    *display_retries
 }
 
 async fn sleep_stream_retry_delay(
@@ -207,5 +206,41 @@ fn log_retry(
                 "remote compaction v2 stream failed; retrying request after delay"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_display_retry_count;
+    use super::transport_retry_status_message;
+
+    #[test]
+    fn visible_stream_retry_count_survives_internal_retry_reset() {
+        let mut internal_retries = 0;
+        let mut display_retries = 0;
+
+        internal_retries += 1;
+        assert_eq!(internal_retries, 1);
+        assert_eq!(next_display_retry_count(&mut display_retries), 1);
+        internal_retries += 1;
+        assert_eq!(internal_retries, 2);
+        assert_eq!(next_display_retry_count(&mut display_retries), 2);
+        internal_retries += 1;
+        assert_eq!(internal_retries, 3);
+        assert_eq!(next_display_retry_count(&mut display_retries), 3);
+
+        internal_retries = 0;
+        internal_retries += 1;
+
+        assert_eq!(internal_retries, 1);
+        assert_eq!(next_display_retry_count(&mut display_retries), 4);
+    }
+
+    #[test]
+    fn visible_stream_retry_message_keeps_unbounded_sentinel_hidden() {
+        let message = transport_retry_status_message(6, u64::MAX);
+
+        assert_eq!(message, "Reconnecting... 6 (unbounded)");
+        assert!(!message.contains(&u64::MAX.to_string()));
     }
 }

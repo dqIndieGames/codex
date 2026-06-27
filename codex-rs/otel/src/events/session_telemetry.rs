@@ -718,7 +718,6 @@ impl SessionTelemetry {
         emit_log_trace: bool,
     ) {
         let mut kind = None;
-        let mut error_message = None;
         let mut success = true;
 
         match result {
@@ -735,49 +734,26 @@ impl SessionTelemetry {
                             }
                             if kind.as_deref() == Some("response.failed") {
                                 success = false;
-                                error_message = value
-                                    .get("response")
-                                    .and_then(|value| value.get("error"))
-                                    .map(serde_json::Value::to_string)
-                                    .or_else(|| Some("response.failed event received".to_string()));
                             }
                         }
-                        Err(err) => {
+                        Err(_) => {
                             kind = Some("parse_error".to_string());
-                            error_message = Some(err.to_string());
                             success = false;
                         }
                     }
-                }
-                tokio_tungstenite::tungstenite::Message::Binary(_) => {
-                    success = false;
-                    error_message = Some("unexpected binary websocket event".to_string());
                 }
                 tokio_tungstenite::tungstenite::Message::Ping(_)
                 | tokio_tungstenite::tungstenite::Message::Pong(_) => {
                     return;
                 }
-                tokio_tungstenite::tungstenite::Message::Close(_) => {
+                tokio_tungstenite::tungstenite::Message::Binary(_)
+                | tokio_tungstenite::tungstenite::Message::Close(_)
+                | tokio_tungstenite::tungstenite::Message::Frame(_) => {
                     success = false;
-                    error_message =
-                        Some("websocket closed by server before response.completed".to_string());
-                }
-                tokio_tungstenite::tungstenite::Message::Frame(_) => {
-                    success = false;
-                    error_message = Some("unexpected websocket frame".to_string());
                 }
             },
-            Ok(Some(Err(err))) => {
+            Ok(Some(Err(_))) | Ok(None) | Err(_) => {
                 success = false;
-                error_message = Some(err.to_string());
-            }
-            Ok(None) => {
-                success = false;
-                error_message = Some("stream closed before response.completed".to_string());
-            }
-            Err(err) => {
-                success = false;
-                error_message = Some(err.to_string());
             }
         }
 
@@ -1222,6 +1198,7 @@ impl SessionTelemetry {
             ResponseEvent::ServerModel(_) => "server_model".into(),
             ResponseEvent::ModelVerifications(_) => "model_verifications".into(),
             ResponseEvent::TurnModerationMetadata(_) => "turn_moderation_metadata".into(),
+            ResponseEvent::SafetyBuffering(_) => "safety_buffering".into(),
             ResponseEvent::ServerReasoningIncluded(_) => "server_reasoning_included".into(),
             ResponseEvent::RateLimits(_) => "rate_limits".into(),
             ResponseEvent::ModelsEtag(_) => "models_etag".into(),
@@ -1243,7 +1220,7 @@ impl SessionTelemetry {
             ResponseItem::WebSearchCall { .. } => "web_search_call".into(),
             ResponseItem::ImageGenerationCall { .. } => "image_generation_call".into(),
             ResponseItem::Compaction { .. } => "compaction".into(),
-            ResponseItem::CompactionTrigger => "compaction_trigger".into(),
+            ResponseItem::CompactionTrigger { .. } => "compaction_trigger".into(),
             ResponseItem::ContextCompaction { .. } => "context_compaction".into(),
             ResponseItem::Other => "other".into(),
         }

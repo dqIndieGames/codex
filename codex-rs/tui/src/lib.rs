@@ -10,6 +10,7 @@ use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::ConfigTomlLoadResult;
 use crate::legacy_core::config::load_config_toml_with_layer_stack;
 use crate::legacy_core::config::resolve_bootstrap_auth_keyring_backend_kind;
+use crate::legacy_core::config::resolve_bootstrap_auth_route_config;
 use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
 use crate::legacy_core::format_exec_policy_error_with_source;
@@ -74,12 +75,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 pub use token_usage::TokenUsage;
-use tracing::Level;
 use tracing::error;
 use tracing::warn;
 use tracing_appender::non_blocking;
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::filter::Targets;
 use tracing_subscriber::prelude::*;
 use url::Url;
 use uuid::Uuid;
@@ -200,6 +199,7 @@ mod width;
 #[cfg(any(target_os = "windows", test))]
 mod windows_sandbox;
 mod workspace_command;
+mod workspace_messages;
 
 mod wrapping;
 
@@ -400,6 +400,7 @@ async fn connect_remote_app_server(
         client_name: "codex-tui".to_string(),
         client_version: crate::version::CODEX_CLI_DISPLAY_VERSION.to_string(),
         experimental_api: true,
+        mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
         channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     })
@@ -563,6 +564,7 @@ where
         client_name: "codex-tui".to_string(),
         client_version: crate::version::CODEX_CLI_DISPLAY_VERSION.to_string(),
         experimental_api: true,
+        mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
         channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     })
@@ -624,6 +626,7 @@ async fn lookup_session_target_by_name_with_app_server(
                 model_providers: None,
                 source_kinds: Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode]),
                 archived: Some(false),
+                parent_thread_id: None,
                 cwd: None,
                 use_state_db_only: false,
                 search_term: Some(name.to_string()),
@@ -762,6 +765,7 @@ fn latest_session_lookup_params(
         model_providers: provider_filter.into_model_providers(),
         source_kinds: Some(resume_source_kinds(include_non_interactive)),
         archived: Some(false),
+        parent_thread_id: None,
         cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().to_string())),
         use_state_db_only: match lookup_mode {
             LatestSessionLookupMode::StateDbOnly => true,
@@ -981,6 +985,14 @@ pub async fn run_main(
         .chatgpt_base_url
         .clone()
         .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
+    let auth_route_config = resolve_bootstrap_auth_route_config(
+        bootstrap_config_toml,
+        bootstrap_config
+            .config_layer_stack
+            .requirements()
+            .feature_requirements
+            .as_ref(),
+    )?;
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
         codex_home.to_path_buf(),
         /*enable_codex_api_key_env*/ false,
@@ -989,6 +1001,7 @@ pub async fn run_main(
             .unwrap_or_default(),
         resolve_bootstrap_auth_keyring_backend_kind(&bootstrap_config)?,
         chatgpt_base_url,
+        auth_route_config,
     )
     .await;
 
@@ -1178,6 +1191,7 @@ pub async fn run_main(
     }
 
     if !app_server_target.uses_remote_workspace() {
+        let auth_route_config = config.auth_route_config();
         #[allow(clippy::print_stderr)]
         if let Err(err) = enforce_login_restrictions(&AuthConfig {
             codex_home: config.codex_home.to_path_buf(),
@@ -1186,6 +1200,7 @@ pub async fn run_main(
             forced_login_method: config.forced_login_method,
             forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
             chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
+            auth_route_config,
         })
         .await
         {
@@ -1257,7 +1272,7 @@ pub async fn run_main(
         .map(log_db::start);
     let log_db_layer = log_db
         .clone()
-        .map(|layer| layer.with_filter(Targets::new().with_default(Level::WARN)));
+        .map(|layer| layer.with_filter(log_db::default_filter()));
 
     let _ = tracing_subscriber::registry()
         .with(tui_file_layer)
@@ -1456,6 +1471,7 @@ async fn run_ratatui_app(
                 initial_config.cli_auth_credentials_store_mode,
                 initial_config.auth_keyring_backend_kind(),
                 initial_config.chatgpt_base_url.clone(),
+                initial_config.auth_route_config(),
             )
             .await;
         }
@@ -1907,7 +1923,7 @@ async fn get_login_status(
     Ok(match account.account {
         Some(AppServerAccount::ApiKey {}) => LoginStatus::AuthMode(AppServerAuthMode::ApiKey),
         Some(AppServerAccount::Chatgpt { .. }) => LoginStatus::AuthMode(AppServerAuthMode::Chatgpt),
-        Some(AppServerAccount::AmazonBedrock {}) => LoginStatus::NotAuthenticated,
+        Some(AppServerAccount::AmazonBedrock { .. }) => LoginStatus::NotAuthenticated,
         None => LoginStatus::NotAuthenticated,
     })
 }
@@ -2072,6 +2088,7 @@ mod tests {
         std::fs::create_dir_all(parent)?;
 
         let session_meta = codex_protocol::protocol::SessionMeta {
+            session_id: thread_id.into(),
             id: thread_id,
             timestamp: meta_rfc3339.to_string(),
             cwd: cwd.to_path_buf(),

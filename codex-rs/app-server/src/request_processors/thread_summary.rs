@@ -1,9 +1,9 @@
 use super::*;
-
 #[cfg(test)]
 use chrono::DateTime;
 #[cfg(test)]
 use chrono::Utc;
+use codex_protocol::config_types::MultiAgentMode;
 
 #[cfg(test)]
 pub(crate) async fn read_summary_from_rollout(
@@ -206,6 +206,7 @@ pub(crate) fn thread_settings_from_config_snapshot(
         effort: config_snapshot.reasoning_effort.clone(),
         summary: config_snapshot.reasoning_summary,
         collaboration_mode: config_snapshot.collaboration_mode.clone(),
+        multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         personality: config_snapshot.personality,
     }
 }
@@ -242,6 +243,7 @@ pub(crate) fn thread_settings_from_core_snapshot(
         effort: reasoning_effort,
         summary: reasoning_summary,
         collaboration_mode,
+        multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         personality,
     }
 }
@@ -320,6 +322,7 @@ pub(crate) fn summary_to_thread(
         model_provider,
         created_at: created_at.map(|dt| dt.timestamp()).unwrap_or(0),
         updated_at: updated_at.map(|dt| dt.timestamp()).unwrap_or(0),
+        recency_at: updated_at.map(|dt| dt.timestamp()),
         status: ThreadStatus::NotLoaded,
         path: (!path.as_os_str().is_empty()).then_some(path),
         cwd,
