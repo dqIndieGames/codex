@@ -262,10 +262,10 @@ fn apply_agent_turn_context(
         .or_else(|| turn.model_info.default_reasoning_level.clone());
     config.model_reasoning_summary = Some(turn.reasoning_summary);
     config.developer_instructions = turn.developer_instructions.clone();
-    config.compact_prompt = turn.compact_prompt.clone();
+    config.compact_prompt = turn.config.compact_prompt.clone();
     apply_spawn_agent_runtime_overrides(config, turn)?;
 
-    Ok(config)
+    Ok(())
 }
 
 pub(crate) fn reject_full_fork_spawn_overrides(

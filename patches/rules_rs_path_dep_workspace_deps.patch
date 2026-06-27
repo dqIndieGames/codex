@@ -6,7 +6,7 @@
 diff --git a/rs/extensions.bzl b/rs/extensions.bzl
 --- a/rs/extensions.bzl
 +++ b/rs/extensions.bzl
-@@ -426,16 +426,16 @@ def _generate_hub_and_spokes(
+@@ -426,15 +426,15 @@ def _generate_hub_and_spokes(
              cargo_toml_json = run_toml2json(mctx, cargo_toml_path)
 
              dependencies = [

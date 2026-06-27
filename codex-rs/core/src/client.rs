@@ -217,6 +217,8 @@ struct ModelProviderHandle {
 /// share the same auth/provider setup flow.
 struct CurrentClientSetup {
     auth: Option<CodexAuth>,
+    provider: SharedModelProvider,
+    provider_info: ModelProviderInfo,
     api_provider: ApiProvider,
     api_auth: SharedAuthProvider,
     provider_runtime_generation: u64,
@@ -694,6 +696,7 @@ impl ModelClient {
             );
             let request = self.build_responses_request(
                 &api_provider,
+                &client_setup.provider_info,
                 prompt,
                 model_info,
                 settings.effort.clone(),
@@ -1045,6 +1048,7 @@ impl ModelClient {
     fn build_responses_request(
         &self,
         provider: &codex_api::Provider,
+        provider_info: &ModelProviderInfo,
         prompt: &Prompt,
         model_info: &ModelInfo,
         effort: Option<ReasoningEffortConfig>,
@@ -1055,7 +1059,7 @@ impl ModelClient {
     ) -> Result<ResponsesApiRequest> {
         let instructions = &prompt.base_instructions.text;
         let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
-        if !self.state.provider.info().is_openai() {
+        if !provider_info.is_openai() {
             input
                 .iter_mut()
                 .for_each(ResponseItem::clear_internal_chat_message_metadata_passthrough);
@@ -1137,12 +1141,16 @@ impl ModelClient {
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
         loop {
             let provider_handle = self.current_provider_handle();
-            let auth = provider_handle.provider.auth().await;
-            let api_provider = provider_handle.provider.api_provider().await?;
-            let api_auth = provider_handle.provider.api_auth().await?;
+            let provider = provider_handle.provider.clone();
+            let provider_info = provider.info().clone();
+            let auth = provider.auth().await;
+            let api_provider = provider.api_provider().await?;
+            let api_auth = provider.api_auth().await?;
             if provider_handle.runtime_generation == self.current_provider_runtime_generation() {
                 return Ok(CurrentClientSetup {
                     auth,
+                    provider,
+                    provider_info,
                     api_provider,
                     api_auth,
                     provider_runtime_generation: provider_handle.runtime_generation,
@@ -1396,6 +1404,7 @@ impl ModelClientSession {
         request: &ResponsesApiRequest,
         last_response: Option<&LastResponse>,
         allow_empty_delta: bool,
+        provider_info: &ModelProviderInfo,
     ) -> Option<Vec<ResponseItem>> {
         // Checks whether the current request is an incremental extension of the previous request.
         // We only reuse an incremental input delta when non-input request fields are unchanged and
@@ -1417,7 +1426,7 @@ impl ModelClientSession {
         };
         let mut response_items =
             last_response.map_or_else(Vec::new, |response| response.items_added.clone());
-        if !self.client.state.provider.info().is_openai() {
+        if !provider_info.is_openai() {
             response_items
                 .iter_mut()
                 .for_each(ResponseItem::clear_internal_chat_message_metadata_passthrough);
@@ -1447,6 +1456,7 @@ impl ModelClientSession {
         &mut self,
         payload: ResponseCreateWsRequest,
         request: &ResponsesApiRequest,
+        provider_info: &ModelProviderInfo,
     ) -> (ResponsesWsRequest, bool) {
         let Some(last_response) = self.get_last_response() else {
             return (ResponsesWsRequest::ResponseCreate(payload), false);
@@ -1457,6 +1467,7 @@ impl ModelClientSession {
             request,
             Some(&last_response),
             /*allow_empty_delta*/ true,
+            provider_info,
         ) else {
             return (ResponsesWsRequest::ResponseCreate(payload), false);
         };
@@ -1661,6 +1672,7 @@ impl ModelClientSession {
 
             let mut request = self.client.build_responses_request(
                 &api_provider,
+                &client_setup.provider_info,
                 prompt,
                 model_info,
                 effort.clone(),
@@ -1715,7 +1727,7 @@ impl ModelClientSession {
                             unauthorized_transport,
                             &mut auth_recovery,
                             session_telemetry,
-                            &self.client.state.provider,
+                            &client_setup.provider,
                         )
                         .await?,
                     );
@@ -1807,6 +1819,7 @@ impl ModelClientSession {
             );
             let request = self.client.build_responses_request(
                 &client_setup.api_provider,
+                &client_setup.provider_info,
                 prompt,
                 model_info,
                 effort.clone(),
@@ -1870,7 +1883,7 @@ impl ModelClientSession {
                                     unauthorized_transport,
                                     &mut auth_recovery,
                                     session_telemetry,
-                                    &self.client.state.provider,
+                                    &client_setup.provider,
                                 )
                                 .await?,
                             );
@@ -1887,7 +1900,7 @@ impl ModelClientSession {
             }
 
             let (mut ws_request, previous_response_id_from_untraced_warmup) =
-                self.prepare_websocket_request(ws_payload, &request);
+                self.prepare_websocket_request(ws_payload, &request, &client_setup.provider_info);
             let inference_trace_attempt = if warmup {
                 // Prewarm sends `generate=false`; it is connection setup, not a
                 // model inference attempt that should appear in rollout traces.
@@ -1912,7 +1925,7 @@ impl ModelClientSession {
             self.websocket_session.last_response_from_untraced_warmup = warmup;
             let websocket_connection =
                 self.websocket_session.connection.as_ref().ok_or_else(|| {
-                    self.client.state.provider.map_api_error(ApiError::Stream(
+                    client_setup.provider.map_api_error(ApiError::Stream(
                         "websocket connection is unavailable".to_string(),
                     ))
                 })?;

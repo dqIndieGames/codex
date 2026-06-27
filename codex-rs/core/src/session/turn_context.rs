@@ -842,18 +842,10 @@ impl Session {
         self.apply_pending_provider_runtime_refresh_if_requested()
             .await;
         let session_configuration = self.default_turn_configuration().await;
-        let turn_environments = crate::environment_selection::resolve_environment_selections(
-            self.services.environment_manager.as_ref(),
-            session_configuration.environment_selections(),
-        )
-        .await
-        .unwrap_or_else(|err| {
-            warn!("failed to resolve stored session environments: {err}");
-            ResolvedTurnEnvironments::default()
-        });
+        let turn_environments = self.services.turn_environments.snapshot().await;
         let cwd = turn_environments
             .primary()
-            .map(|turn_environment| turn_environment.cwd().clone())
+            .and_then(|turn_environment| turn_environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
         let mut config = Self::build_effective_session_config(&session_configuration);
         config.cwd = cwd;
