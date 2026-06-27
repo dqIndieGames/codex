@@ -1,7 +1,8 @@
 # What: allow local path crates whose Cargo.toml inherits dependencies from the
 # workspace root to be resolved by the rules_rs module extension.
-# Scope: path dependency metadata parsing only; dependency resolution semantics
-# still come from Cargo.toml and Cargo.lock.
+# Scope: path dependency metadata parsing and workspace-member feature
+# initialization only; dependency resolution semantics still come from
+# Cargo.toml and Cargo.lock.
 
 diff --git a/rs/extensions.bzl b/rs/extensions.bzl
 --- a/rs/extensions.bzl
@@ -25,3 +26,12 @@ diff --git a/rs/extensions.bzl b/rs/extensions.bzl
 +                    converted = _spec_to_dep_dict(dep, spec, annotation, workspace_cargo_toml_json)
                      converted["target"] = target
                      dependencies.append(converted)
+@@ -603,7 +603,7 @@ def _generate_hub_and_spokes(
+         if watch_manifests:
+             mctx.watch(package["manifest_path"])
+
+-        fq_deps = workspace_fq_deps[package["name"]]
++        fq_deps = workspace_fq_deps.get(package["name"], {})
+
+         for dep in package["dependencies"]:
+             source = dep["source"]
