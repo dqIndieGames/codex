@@ -7,6 +7,10 @@ on:
         description: Release tag to create or update.
         required: true
         type: string
+      ci_run_id:
+        description: rust-ci run id that passed for this commit.
+        required: true
+        type: string
       target:
         description: Windows Rust target to build.
         required: false
@@ -20,6 +24,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -98,6 +103,29 @@ jobs:
           }
           Compress-Archive -Path (Join-Path $stage 'codex.exe') -DestinationPath $zip -Force
           "zip_path=dist/$zipName" >> $env:GITHUB_OUTPUT
+
+      - name: Verify CI run
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          TARGET_COMMITISH: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ci = gh run view "$env:CI_RUN_ID" --repo "$env:GITHUB_REPOSITORY" --json headSha,status,conclusion,workflowName | ConvertFrom-Json
+          if ($ci.workflowName -ne 'rust-ci') {
+            throw "CI run $env:CI_RUN_ID is workflow $($ci.workflowName), expected rust-ci"
+          }
+          if ([string]::IsNullOrWhiteSpace($ci.headSha)) {
+            throw "Failed to read headSha for CI run $env:CI_RUN_ID"
+          }
+          if ($ci.status -ne 'completed' -or $ci.conclusion -ne 'success') {
+            throw "CI run $env:CI_RUN_ID is $($ci.status)/$($ci.conclusion), expected completed/success"
+          }
+          if ($ci.headSha -ne $env:TARGET_COMMITISH) {
+            throw "CI run headSha $($ci.headSha) does not match target commit $env:TARGET_COMMITISH"
+          }
+          Write-Host "Verified rust-ci run $env:CI_RUN_ID completed successfully from $env:TARGET_COMMITISH"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2

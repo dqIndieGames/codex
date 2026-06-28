@@ -7,6 +7,10 @@ on:
         description: GitHub Actions run id that produced the artifact.
         required: true
         type: string
+      ci_run_id:
+        description: rust-ci run id that passed for target_commitish.
+        required: true
+        type: string
       artifact_name:
         description: Artifact name to publish from the source run.
         required: true
@@ -60,6 +64,36 @@ jobs:
             exit 1
           fi
           echo "Verified source run ${SOURCE_RUN_ID} completed successfully from ${TARGET_COMMITISH}"
+
+      - name: Verify CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          TARGET_COMMITISH: ${{ inputs.target_commitish }}
+        run: |
+          set -euo pipefail
+          ci_run_json="$(gh run view "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha,status,conclusion,workflowName)"
+          ci_head_sha="$(jq -r '.headSha // ""' <<<"$ci_run_json")"
+          ci_status="$(jq -r '.status // ""' <<<"$ci_run_json")"
+          ci_conclusion="$(jq -r '.conclusion // ""' <<<"$ci_run_json")"
+          ci_workflow="$(jq -r '.workflowName // ""' <<<"$ci_run_json")"
+          if [[ "$ci_workflow" != "rust-ci" ]]; then
+            echo "CI run ${CI_RUN_ID} is workflow ${ci_workflow}, expected rust-ci" >&2
+            exit 1
+          fi
+          if [[ -z "$ci_head_sha" || "$ci_head_sha" == "null" ]]; then
+            echo "Failed to read headSha for CI run ${CI_RUN_ID}" >&2
+            exit 1
+          fi
+          if [[ "$ci_status" != "completed" || "$ci_conclusion" != "success" ]]; then
+            echo "CI run ${CI_RUN_ID} is ${ci_status}/${ci_conclusion}, expected completed/success" >&2
+            exit 1
+          fi
+          if [[ "$ci_head_sha" != "$TARGET_COMMITISH" ]]; then
+            echo "CI run headSha ${ci_head_sha} does not match target_commitish ${TARGET_COMMITISH}" >&2
+            exit 1
+          fi
+          echo "Verified rust-ci run ${CI_RUN_ID} completed successfully from ${TARGET_COMMITISH}"
 
       - name: Verify existing release target
         env:
@@ -116,6 +150,7 @@ jobs:
       - name: Write release notes
         env:
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
           ARTIFACT_NAME: ${{ inputs.artifact_name }}
           TARGET_COMMITISH: ${{ inputs.target_commitish }}
         run: |
@@ -124,6 +159,7 @@ jobs:
             echo "Published from GitHub Actions artifact."
             echo
             echo "- Source run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}"
+            echo "- CI run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${CI_RUN_ID}"
             echo "- Source artifact: ${ARTIFACT_NAME}"
             echo "- Target commit: ${TARGET_COMMITISH}"
             echo
