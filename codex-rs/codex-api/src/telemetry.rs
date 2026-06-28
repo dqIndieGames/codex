@@ -189,6 +189,7 @@ async fn sleep_request_retry_delay(
 
 #[cfg(test)]
 mod tests {
+    use super::run_with_request_telemetry;
     use crate::provider::RequestRetryRoute;
     use codex_client::Request;
     use codex_client::RequestTelemetry;
