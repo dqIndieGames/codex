@@ -1,45 +1,163 @@
-# What: allow local path crates whose Cargo.toml inherits dependencies from the
-# workspace root to be resolved by the rules_rs module extension.
-# Scope: path dependency metadata parsing and workspace-member feature
-# initialization only; dependency resolution semantics still come from
-# Cargo.toml and Cargo.lock.
+# What: allow local path crates whose Cargo.toml inherits dependencies and
+# package metadata from the workspace root to be resolved by the rules_rs module
+# extension.
+# Scope: path dependency metadata parsing, workspace-member feature
+# initialization, and local crate BUILD metadata generation only; dependency
+# resolution semantics still come from Cargo.toml and Cargo.lock.
 
 diff --git a/rs/extensions.bzl b/rs/extensions.bzl
+index e883dfb..8d708cf 100644
 --- a/rs/extensions.bzl
 +++ b/rs/extensions.bzl
-@@ -428,3 +428,3 @@ def _generate_hub_and_spokes(
+@@ -426,16 +426,16 @@ def _generate_hub_and_spokes(
+             cargo_toml_json = run_toml2json(mctx, cargo_toml_path)
+ 
              dependencies = [
 -                _spec_to_dep_dict(dep, spec, annotation, {})
 +                _spec_to_dep_dict(dep, spec, annotation, workspace_cargo_toml_json)
                  for dep, spec in cargo_toml_json.get("dependencies", {}).items()
-@@ -431,3 +431,3 @@ def _generate_hub_and_spokes(
              ] + [
 -                _spec_to_dep_dict(dep, spec, annotation, {}, is_build = True)
 +                _spec_to_dep_dict(dep, spec, annotation, workspace_cargo_toml_json, is_build = True)
                  for dep, spec in cargo_toml_json.get("build-dependencies", {}).items()
-@@ -437,3 +437,3 @@ def _generate_hub_and_spokes(
+             ]
+ 
+             for target, value in cargo_toml_json.get("target", {}).items():
                  for dep, spec in value.get("dependencies", {}).items():
 -                    converted = _spec_to_dep_dict(dep, spec, annotation, {})
 +                    converted = _spec_to_dep_dict(dep, spec, annotation, workspace_cargo_toml_json)
                      converted["target"] = target
-@@ -593,3 +593,8 @@ def _generate_hub_and_spokes(
+                     dependencies.append(converted)
+ 
+@@ -591,6 +591,11 @@ def _generate_hub_and_spokes(
+     _date(mctx, "set up resolutions")
+ 
      workspace_fq_deps = _compute_workspace_fq_deps(workspace_members, resolver_versions_by_name)
--
 +    fallback_fq_deps_by_name = {}
 +    for package in packages:
 +        if package["name"] not in workspace_fq_deps:
 +            fallback_fq_deps_by_name[package["name"]] = _compute_package_fq_deps(
 +                package, resolver_versions_by_name, strict = False)
-+
+ 
      workspace_dep_versions_by_name = {}
-@@ -604,5 +609,7 @@ def _generate_hub_and_spokes(
+     workspace_dep_labels_by_triple = {triple: set() for triple in platform_triples}
+@@ -603,7 +608,9 @@ def _generate_hub_and_spokes(
+         if watch_manifests:
              mctx.watch(package["manifest_path"])
--
+ 
 -        fq_deps = workspace_fq_deps[package["name"]]
--
-+
 +        fq_deps = workspace_fq_deps.get(package["name"])
 +        if fq_deps == None:
 +            fq_deps = fallback_fq_deps_by_name.get(package["name"], {})
-+
+ 
          for dep in package["dependencies"]:
+             source = dep["source"]
+@@ -731,9 +738,22 @@ crate.annotation(
+                 crate = crate_name,
+                 formatted_well_known_annotation = suggested_annotation,
+             ))
++        workspace_package = workspace_cargo_toml_json.get("workspace", {}).get("package", {})
++        workspace_package_authors = workspace_package.get("authors", [])
++        if type(workspace_package_authors) != "list":
++            workspace_package_authors = []
+ 
+         kwargs = dict(
+             hub_name = hub_name,
++            workspace_package_version = workspace_package.get("version", ""),
++            workspace_package_edition = workspace_package.get("edition", ""),
++            workspace_package_license = workspace_package.get("license", ""),
++            workspace_package_rust_version = workspace_package.get("rust-version", ""),
++            workspace_package_authors = workspace_package_authors,
++            workspace_package_description = workspace_package.get("description", ""),
++            workspace_package_homepage = workspace_package.get("homepage", ""),
++            workspace_package_repository = workspace_package.get("repository", ""),
++            workspace_package_readme = workspace_package.get("readme", ""),
+             additive_build_file = annotation.additive_build_file,
+             additive_build_file_content = annotation.additive_build_file_content,
+             gen_build_script = annotation.gen_build_script,
+diff --git a/rs/private/repository_utils.bzl b/rs/private/repository_utils.bzl
+index 7acfa10..f996c0e 100644
+--- a/rs/private/repository_utils.bzl
++++ b/rs/private/repository_utils.bzl
+@@ -49,17 +49,34 @@ def _cargo_purl(package_name, version, qualifiers = {}):
+         ])
+     return purl
+ 
++def _workspace_package_value(package, key, default, workspace_value):
++    value = package.get(key, default)
++    if type(value) == "dict" and value.get("workspace") == True:
++        if workspace_value:
++            return workspace_value
++        fail("Crate %s inherits package.%s from the workspace, but the workspace value was not provided" % (
++            package.get("name", "<unknown>"),
++            key,
++        ))
++    return value
++
+ def generate_build_file(rctx, cargo_toml, purl_qualifiers = {}):
+     attr = rctx.attr
+     package = cargo_toml["package"]
+ 
+     name = package["name"]
+-    version = package["version"]
++    version = _workspace_package_value(package, "version", "", attr.workspace_package_version)
+     parsed_version = parse_full_version(version)
+ 
+-    readme = package.get("readme", "")
++    readme = _workspace_package_value(package, "readme", "", attr.workspace_package_readme)
+     if (not readme or readme == True) and rctx.path("README.md").exists:
+         readme = "README.md"
++    authors = _workspace_package_value(package, "authors", [], attr.workspace_package_authors)
++    description = _workspace_package_value(package, "description", "", attr.workspace_package_description)
++    homepage = _workspace_package_value(package, "homepage", "", attr.workspace_package_homepage)
++    repository = _workspace_package_value(package, "repository", "", attr.workspace_package_repository)
++    license = _workspace_package_value(package, "license", "", attr.workspace_package_license)
++    rust_version = _workspace_package_value(package, "rust-version", "", attr.workspace_package_rust_version)
+ 
+     cargo_toml_env_vars = {
+         "CARGO_PKG_VERSION": version,
+@@ -68,13 +85,13 @@ def generate_build_file(rctx, cargo_toml, purl_qualifiers = {}):
+         "CARGO_PKG_VERSION_PATCH": str(parsed_version[2]),
+         "CARGO_PKG_VERSION_PRE": parsed_version[3],
+         "CARGO_PKG_NAME": name,
+-        "CARGO_PKG_AUTHORS": ":".join(package.get("authors", [])),
+-        "CARGO_PKG_DESCRIPTION": package.get("description", "").replace("\n", "\\"),
+-        "CARGO_PKG_HOMEPAGE": package.get("homepage", ""),
+-        "CARGO_PKG_REPOSITORY": package.get("repository", ""),
+-        "CARGO_PKG_LICENSE": package.get("license", ""),
++        "CARGO_PKG_AUTHORS": ":".join(authors),
++        "CARGO_PKG_DESCRIPTION": description.replace("\n", "\\"),
++        "CARGO_PKG_HOMEPAGE": homepage,
++        "CARGO_PKG_REPOSITORY": repository,
++        "CARGO_PKG_LICENSE": license,
+         "CARGO_PKG_LICENSE_FILE": package.get("license_file", ""),
+-        "CARGO_PKG_RUST_VERSION": package.get("rust-version", ""),
++        "CARGO_PKG_RUST_VERSION": rust_version,
+         "CARGO_PKG_README": readme,
+     }
+ 
+@@ -99,7 +116,7 @@ def generate_build_file(rctx, cargo_toml, purl_qualifiers = {}):
+     is_proc_macro = lib.get("proc-macro") or lib.get("proc_macro") or False
+     crate_root = (lib.get("path") or "src/lib.rs").removeprefix("./")
+ 
+-    edition = package.get("edition", "2015")
++    edition = _workspace_package_value(package, "edition", "2015", attr.workspace_package_edition)
+     crate_name = lib.get("name")
+     links = package.get("links")
+ 
+@@ -236,6 +253,15 @@ common_attrs = {
+     "crate_features": attr.string_list(),
+     "crate_features_select": attr.string_list_dict(),
+     "gen_binaries": attr.string_list(),
++    "workspace_package_version": attr.string(),
++    "workspace_package_edition": attr.string(),
++    "workspace_package_license": attr.string(),
++    "workspace_package_rust_version": attr.string(),
++    "workspace_package_authors": attr.string_list(),
++    "workspace_package_description": attr.string(),
++    "workspace_package_homepage": attr.string(),
++    "workspace_package_repository": attr.string(),
++    "workspace_package_readme": attr.string(),
+ } | {
+     "strip_prefix": attr.string(
+         default = "",
