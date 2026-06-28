@@ -7,31 +7,39 @@
 diff --git a/rs/extensions.bzl b/rs/extensions.bzl
 --- a/rs/extensions.bzl
 +++ b/rs/extensions.bzl
-@@ -426,15 +426,15 @@ def _generate_hub_and_spokes(
-             cargo_toml_json = run_toml2json(mctx, cargo_toml_path)
-
+@@ -428,3 +428,3 @@ def _generate_hub_and_spokes(
              dependencies = [
 -                _spec_to_dep_dict(dep, spec, annotation, {})
 +                _spec_to_dep_dict(dep, spec, annotation, workspace_cargo_toml_json)
                  for dep, spec in cargo_toml_json.get("dependencies", {}).items()
+@@ -431,3 +431,3 @@ def _generate_hub_and_spokes(
              ] + [
 -                _spec_to_dep_dict(dep, spec, annotation, {}, is_build = True)
 +                _spec_to_dep_dict(dep, spec, annotation, workspace_cargo_toml_json, is_build = True)
                  for dep, spec in cargo_toml_json.get("build-dependencies", {}).items()
-             ]
-
-             for target, value in cargo_toml_json.get("target", {}).items():
+@@ -437,3 +437,3 @@ def _generate_hub_and_spokes(
                  for dep, spec in value.get("dependencies", {}).items():
 -                    converted = _spec_to_dep_dict(dep, spec, annotation, {})
 +                    converted = _spec_to_dep_dict(dep, spec, annotation, workspace_cargo_toml_json)
                      converted["target"] = target
-                     dependencies.append(converted)
-@@ -603,7 +603,7 @@ def _generate_hub_and_spokes(
-         if watch_manifests:
+@@ -593,3 +593,8 @@ def _generate_hub_and_spokes(
+     workspace_fq_deps = _compute_workspace_fq_deps(workspace_members, resolver_versions_by_name)
+-
++    fallback_fq_deps_by_name = {}
++    for package in packages:
++        if package["name"] not in workspace_fq_deps:
++            fallback_fq_deps_by_name[package["name"]] = _compute_package_fq_deps(
++                package, resolver_versions_by_name, strict = False)
++
+     workspace_dep_versions_by_name = {}
+@@ -604,5 +609,7 @@ def _generate_hub_and_spokes(
              mctx.watch(package["manifest_path"])
-
+-
 -        fq_deps = workspace_fq_deps[package["name"]]
-+        fq_deps = workspace_fq_deps.get(package["name"], {})
-
+-
++
++        fq_deps = workspace_fq_deps.get(package["name"])
++        if fq_deps == None:
++            fq_deps = fallback_fq_deps_by_name.get(package["name"], {})
++
          for dep in package["dependencies"]:
-             source = dep["source"]
