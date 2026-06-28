@@ -1,0 +1,189 @@
+name: publish-existing-release-artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: GitHub Actions run id that produced the artifact.
+        required: true
+        type: string
+      source_workflow_name:
+        description: Expected source workflow name.
+        required: true
+        default: rust-release-windows
+        type: string
+      expected_source_head_sha:
+        description: Expected head SHA for the source run.
+        required: true
+        default: ce7f213a7452d331eaffa3e2e47cf5cd5f25481d
+        type: string
+      artifact_name:
+        description: Artifact name to publish from the source run.
+        required: true
+        default: x86_64-pc-windows-msvc
+        type: string
+      release_tag:
+        description: Existing Release tag to upload into.
+        required: true
+        type: string
+      asset_glob:
+        description: Files from the downloaded artifact to upload.
+        required: true
+        default: '**/codex-x86_64-pc-windows-msvc.exe.zip'
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    name: Publish artifact into existing Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Verify source run and artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_WORKFLOW_NAME: ${{ inputs.source_workflow_name }}
+          EXPECTED_SOURCE_HEAD_SHA: ${{ inputs.expected_source_head_sha }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          source_run_json="$(gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha,status,conclusion,workflowName,url)"
+          source_head_sha="$(jq -r '.headSha // ""' <<<"$source_run_json")"
+          source_status="$(jq -r '.status // ""' <<<"$source_run_json")"
+          source_conclusion="$(jq -r '.conclusion // ""' <<<"$source_run_json")"
+          source_workflow="$(jq -r '.workflowName // ""' <<<"$source_run_json")"
+          source_url="$(jq -r '.url // ""' <<<"$source_run_json")"
+
+          if [[ -z "$source_head_sha" || "$source_head_sha" == "null" ]]; then
+            echo "Failed to read headSha for source run ${SOURCE_RUN_ID}" >&2
+            exit 1
+          fi
+          if [[ "$source_status" != "completed" || "$source_conclusion" != "success" ]]; then
+            echo "Source run ${SOURCE_RUN_ID} is ${source_status}/${source_conclusion}, expected completed/success" >&2
+            exit 1
+          fi
+          if [[ "$source_workflow" != "$SOURCE_WORKFLOW_NAME" ]]; then
+            echo "Source run ${SOURCE_RUN_ID} is workflow '${source_workflow}', expected '${SOURCE_WORKFLOW_NAME}'" >&2
+            exit 1
+          fi
+          if [[ "$source_head_sha" != "$EXPECTED_SOURCE_HEAD_SHA" ]]; then
+            echo "Source run ${SOURCE_RUN_ID} headSha is ${source_head_sha}, expected ${EXPECTED_SOURCE_HEAD_SHA}" >&2
+            exit 1
+          fi
+
+          artifact_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts")"
+          artifact_count="$(jq --arg name "$ARTIFACT_NAME" '[.artifacts[] | select(.name == $name and .expired == false)] | length' <<<"$artifact_json")"
+          if [[ "$artifact_count" != "1" ]]; then
+            echo "Expected exactly one non-expired artifact named ${ARTIFACT_NAME}, found ${artifact_count}" >&2
+            jq -r '.artifacts[] | "\(.name)\texpired=\(.expired)\tsize=\(.size_in_bytes)"' <<<"$artifact_json" >&2
+            exit 1
+          fi
+
+          {
+            echo "source_head_sha=${source_head_sha}"
+            echo "source_workflow=${source_workflow}"
+            echo "source_url=${source_url}"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify existing Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish,isDraft,isPrerelease,assets,url)"
+          tag_name="$(jq -r '.tagName // ""' <<<"$release_json")"
+          is_draft="$(jq -r '.isDraft' <<<"$release_json")"
+          release_url="$(jq -r '.url // ""' <<<"$release_json")"
+          asset_count="$(jq '.assets | length' <<<"$release_json")"
+          if [[ "$tag_name" != "$RELEASE_TAG" ]]; then
+            echo "Release lookup returned tag ${tag_name}, expected ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          if [[ "$is_draft" != "false" ]]; then
+            echo "Release ${RELEASE_TAG} is draft; refusing to upload to draft via this workflow" >&2
+            exit 1
+          fi
+          {
+            echo "release_url=${release_url}"
+            echo "existing_asset_count=${asset_count}"
+          } >> "$GITHUB_ENV"
+
+      - name: Download artifact from source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$ARTIFACT_NAME" \
+            --dir artifact
+          find artifact -maxdepth 3 -type f -print | sort
+
+      - name: Upload files to existing Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ASSET_GLOB: ${{ inputs.asset_glob }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob globstar
+          cd artifact
+          files=( $ASSET_GLOB )
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "No files matched asset_glob '${ASSET_GLOB}' under downloaded artifact" >&2
+            find . -type f -print >&2
+            exit 1
+          fi
+          printf 'Uploading %s file(s) to release %s\n' "${#files[@]}" "$RELEASE_TAG"
+          printf '%s\n' "${files[@]}"
+          gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Verify uploaded assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ASSET_GLOB: ${{ inputs.asset_glob }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob globstar
+          cd artifact
+          files=( $ASSET_GLOB )
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "No files matched asset_glob '${ASSET_GLOB}' under downloaded artifact during verification" >&2
+            find . -type f -print >&2
+            exit 1
+          fi
+          expected_names=()
+          for file in "${files[@]}"; do
+            expected_names+=( "$(basename "$file")" )
+          done
+          cd ..
+
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish,isDraft,isPrerelease,assets,url)"
+          asset_count="$(jq '.assets | length' <<<"$release_json")"
+          missing=0
+          for expected_name in "${expected_names[@]}"; do
+            if ! jq -e --arg name "$expected_name" '.assets[] | select(.name == $name)' <<<"$release_json" >/dev/null; then
+              echo "Expected uploaded asset '${expected_name}' was not found on release ${RELEASE_TAG}" >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" != "0" ]]; then
+            jq -r '.assets[] | "\(.name)\t\(.size)\t\(.digest // "")"' <<<"$release_json" >&2
+            exit 1
+          fi
+          if [[ "$asset_count" -le "$existing_asset_count" ]]; then
+            echo "Asset count did not increase; this is allowed when --clobber replaced an existing asset."
+          fi
+          echo "Published artifact from ${source_workflow} run ${{ inputs.source_run_id }} (${source_head_sha})"
+          echo "Release: ${release_url}"
+          jq -r '.assets[] | "\(.name)\t\(.size)\t\(.digest // "")"' <<<"$release_json" | sort
