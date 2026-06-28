@@ -9,6 +9,27 @@ diff --git a/rs/extensions.bzl b/rs/extensions.bzl
 index e883dfb..8d708cf 100644
 --- a/rs/extensions.bzl
 +++ b/rs/extensions.bzl
+@@ -289,9 +289,11 @@ def _generate_hub_and_spokes(
+ 
+     workspace_root = _normalize_path(cargo_metadata["workspace_root"])
+     workspace_root_prefix = workspace_root + "/"
+     workspace_member_keys = {}
++    workspace_member_names = {}
+     for package in cargo_metadata["packages"]:
+         workspace_member_keys[(package["name"], package["version"])] = True
++        workspace_member_names[package["name"]] = True
+ 
+     dep_paths_by_name = {}
+     for package in cargo_metadata["packages"]:
+@@ -331,7 +333,7 @@ def _generate_hub_and_spokes(
+             continue
+ 
+         key = (pkg["name"], pkg["version"])
+-        if key in workspace_member_keys:
++        if key in workspace_member_keys or pkg["name"] in workspace_member_names:
+             workspace_members.append(pkg)
+             continue
+ 
 @@ -426,16 +426,16 @@ def _generate_hub_and_spokes(
              cargo_toml_json = run_toml2json(mctx, cargo_toml_path)
  
@@ -29,7 +50,26 @@ index e883dfb..8d708cf 100644
                      converted["target"] = target
                      dependencies.append(converted)
  
-@@ -591,6 +591,11 @@ def _generate_hub_and_spokes(
+@@ -507,6 +509,7 @@ def _generate_hub_and_spokes(
+     resolver_versions_by_name = {name: versions[:] for name, versions in versions_by_name.items()}
+ 
+     workspace_members_by_key = {(package["name"], package["version"]): package for package in workspace_members}
++    workspace_members_by_name = {package["name"]: package for package in workspace_members}
+     resolver_packages = packages[:]
+     for package in cargo_metadata["packages"]:
+         name = package["name"]
+@@ -527,7 +530,9 @@ def _generate_hub_and_spokes(
+         )
+ 
+         package_index = len(resolver_packages)
+-        lockfile_pkg = workspace_members_by_key.get((name, version), {})
++        lockfile_pkg = workspace_members_by_key.get((name, version))
++        if lockfile_pkg == None:
++            lockfile_pkg = workspace_members_by_name.get(name, {})
+         resolver_package = {
+             "name": name,
+             "version": version,
+@@ -591,6 +596,11 @@ def _generate_hub_and_spokes(
      _date(mctx, "set up resolutions")
  
      workspace_fq_deps = _compute_workspace_fq_deps(workspace_members, resolver_versions_by_name)
@@ -41,7 +81,7 @@ index e883dfb..8d708cf 100644
  
      workspace_dep_versions_by_name = {}
      workspace_dep_labels_by_triple = {triple: set() for triple in platform_triples}
-@@ -603,7 +608,9 @@ def _generate_hub_and_spokes(
+@@ -603,7 +613,9 @@ def _generate_hub_and_spokes(
          if watch_manifests:
              mctx.watch(package["manifest_path"])
  
@@ -52,7 +92,7 @@ index e883dfb..8d708cf 100644
  
          for dep in package["dependencies"]:
              source = dep["source"]
-@@ -731,9 +738,22 @@ crate.annotation(
+@@ -731,9 +743,22 @@ crate.annotation(
                  crate = crate_name,
                  formatted_well_known_annotation = suggested_annotation,
              ))
