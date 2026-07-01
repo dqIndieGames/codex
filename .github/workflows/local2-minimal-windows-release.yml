@@ -8,8 +8,8 @@ on:
         required: true
         type: string
       ci_run_id:
-        description: rust-ci run id that passed for this commit.
-        required: true
+        description: Optional rust-ci run id that passed for this commit. Leave empty for Windows-only release.
+        required: false
         type: string
       target:
         description: Windows Rust target to build.
@@ -105,6 +105,7 @@ jobs:
           "zip_path=dist/$zipName" >> $env:GITHUB_OUTPUT
 
       - name: Verify CI run
+        if: ${{ inputs.ci_run_id != '' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -126,6 +127,52 @@ jobs:
             throw "CI run headSha $($ci.headSha) does not match target commit $env:TARGET_COMMITISH"
           }
           Write-Host "Verified rust-ci run $env:CI_RUN_ID completed successfully from $env:TARGET_COMMITISH"
+
+      - name: Record Windows-only release scope
+        if: ${{ inputs.ci_run_id == '' }}
+        shell: pwsh
+        run: |
+          Write-Host "No rust-ci run id was provided."
+          Write-Host "Proceeding with Windows-only build, smoke test, package, and release."
+
+      - name: Verify existing release tag target
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          TARGET_COMMITISH: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tagRefPath = "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG"
+          $tagRefOutput = & gh api $tagRefPath 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $message = $tagRefOutput -join "`n"
+            if ($message -match 'Not Found') {
+              Write-Host "No existing tag $env:RELEASE_TAG; release will create it at $env:TARGET_COMMITISH"
+              exit 0
+            }
+            throw $message
+          }
+
+          $tagRef = $tagRefOutput | ConvertFrom-Json
+          $existingTarget = $tagRef.object.sha
+          $objectType = $tagRef.object.type
+          if ($objectType -eq 'tag') {
+            $tagObject = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$existingTarget" | ConvertFrom-Json
+            $existingTarget = $tagObject.object.sha
+            $objectType = $tagObject.object.type
+          }
+
+          if ([string]::IsNullOrWhiteSpace($existingTarget)) {
+            throw "Failed to resolve existing tag $env:RELEASE_TAG"
+          }
+          if ($objectType -ne 'commit') {
+            throw "Existing tag $env:RELEASE_TAG resolves to $objectType, expected commit"
+          }
+          if ($existingTarget -ne $env:TARGET_COMMITISH) {
+            throw "Existing tag $env:RELEASE_TAG points at $existingTarget, not $env:TARGET_COMMITISH"
+          }
+          Write-Host "Verified existing tag $env:RELEASE_TAG already points at $env:TARGET_COMMITISH"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
