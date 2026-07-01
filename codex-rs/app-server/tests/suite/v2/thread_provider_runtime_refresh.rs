@@ -773,6 +773,112 @@ async fn config_batch_write_refreshes_loaded_thread_provider_runtime() -> Result
 }
 
 #[tokio::test]
+async fn config_batch_write_refreshes_loaded_thread_to_new_model_provider_id() -> Result<()> {
+    let old_server = create_mock_responses_server_repeating_assistant("Old").await;
+    let new_server = create_mock_responses_server_repeating_assistant("New").await;
+    let codex_home = TempDir::new()?;
+    let config_toml = format!(
+        r#"
+model = "mock-model"
+approval_policy = "never"
+sandbox_mode = "read-only"
+model_provider = "old_provider"
+chatgpt_base_url = "{chatgpt_base_url}"
+
+[features]
+plugins = false
+default_mode_request_user_input = true
+
+[model_providers.old_provider]
+name = "Old provider"
+base_url = "{old_base_url}"
+experimental_bearer_token = "old-token"
+wire_api = "responses"
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
+
+[model_providers.new_provider]
+name = "New provider"
+base_url = "{new_base_url}"
+experimental_bearer_token = "new-token"
+wire_api = "responses"
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
+"#,
+        chatgpt_base_url = old_server.uri(),
+        old_base_url = format!("{}/v1", old_server.uri()),
+        new_base_url = format!("{}/v1", new_server.uri()),
+    );
+    std::fs::write(codex_home.path().join("config.toml"), config_toml)?;
+
+    let mut mcp = init_mcp(codex_home.path()).await?;
+    let thread_id = start_thread(&mut mcp).await?;
+    run_text_turn(&mut mcp, &thread_id, "first request").await?;
+
+    let old_requests_before_write = old_server.received_requests().await.unwrap_or_default();
+    let old_headers_before_write =
+        response_request_authorization_headers(&old_requests_before_write);
+    assert_eq!(old_headers_before_write, vec![Some("Bearer old-token".to_string())]);
+    assert!(
+        new_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "new provider should not receive requests before provider switch"
+    );
+
+    let batch_id = mcp
+        .send_config_batch_write_request(ConfigBatchWriteParams {
+            file_path: Some(codex_home.path().join("config.toml").display().to_string()),
+            edits: vec![ConfigEdit {
+                key_path: "model_provider".to_string(),
+                value: json!("new_provider"),
+                merge_strategy: MergeStrategy::Replace,
+            }],
+            expected_version: None,
+            reload_user_config: true,
+        })
+        .await?;
+    let batch_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(batch_id)),
+    )
+    .await??;
+    let batch_write: ConfigWriteResponse = to_response(batch_response)?;
+    assert_eq!(batch_write.status, WriteStatus::Ok);
+
+    let refresh_response = refresh_thread(&mut mcp, &thread_id).await?;
+    assert_eq!(refresh_response.thread_id, thread_id);
+    assert_eq!(
+        refresh_response.status,
+        ThreadProviderRuntimeRefreshStatus::Applied
+    );
+
+    run_text_turn(&mut mcp, &thread_id, "second request").await?;
+
+    let old_requests_after_write = old_server.received_requests().await.unwrap_or_default();
+    let old_headers_after_write =
+        response_request_authorization_headers(&old_requests_after_write);
+    assert_eq!(
+        old_headers_after_write, old_headers_before_write,
+        "loaded thread should stop sending requests to the old provider after model_provider changes"
+    );
+
+    let new_requests_after_write = new_server.received_requests().await.unwrap_or_default();
+    let new_headers_after_write =
+        response_request_authorization_headers(&new_requests_after_write);
+    assert_eq!(
+        new_headers_after_write,
+        vec![Some("Bearer new-token".to_string())],
+        "loaded thread should send the next turn to the new provider id after refresh"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn retryable_503_request_emits_visible_retry_error_notification() -> Result<()> {
     let responses = vec![create_final_assistant_message_sse_response("Done")?];
     let server = create_mock_responses_server_sequence_after_one_503(responses).await;

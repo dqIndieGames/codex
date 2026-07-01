@@ -422,9 +422,10 @@ pub struct Codex {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingProviderRuntimeRefresh {
+    provider_id: String,
+    provider: ModelProviderInfo,
     base_url: Option<String>,
     experimental_bearer_token: Option<String>,
-    requires_openai_auth: bool,
     force_service_tier_priority: bool,
     service_tier: Option<String>,
     fast_mode_enabled: bool,
@@ -1568,9 +1569,10 @@ impl Session {
         refresh: PendingProviderRuntimeRefresh,
     ) -> CodexResult<()> {
         let PendingProviderRuntimeRefresh {
+            provider_id,
+            provider,
             base_url,
             experimental_bearer_token,
-            requires_openai_auth,
             force_service_tier_priority,
             service_tier,
             fast_mode_enabled,
@@ -1581,37 +1583,21 @@ impl Session {
             let mut state = self.state.lock().await;
             let previous_config = notify_config_contributors
                 .then(|| Self::build_effective_session_config(&state.session_configuration));
-            let provider_id = state
-                .session_configuration
-                .original_config_do_not_use
-                .model_provider_id
-                .clone();
-
-            state.session_configuration.provider.base_url = base_url.clone();
-            state
-                .session_configuration
-                .provider
-                .experimental_bearer_token = experimental_bearer_token.clone();
-            state.session_configuration.provider.requires_openai_auth = requires_openai_auth;
+            state.session_configuration.provider = provider.clone();
             state.session_configuration.service_tier = service_tier.clone();
 
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
+            config.model_provider_id = provider_id.clone();
+            config.model_provider = provider.clone();
             config.force_service_tier_priority = force_service_tier_priority;
             config.service_tier = service_tier.clone();
-            config.model_provider.base_url = base_url.clone();
-            config.model_provider.experimental_bearer_token = experimental_bearer_token.clone();
-            config.model_provider.requires_openai_auth = requires_openai_auth;
             if let Err(err) = config
                 .features
                 .set_enabled(Feature::FastMode, fast_mode_enabled)
             {
                 warn!("failed to apply refreshed fast_mode feature state to session config: {err}");
             }
-            if let Some(provider) = config.model_providers.get_mut(&provider_id) {
-                provider.base_url = base_url.clone();
-                provider.experimental_bearer_token = experimental_bearer_token.clone();
-                provider.requires_openai_auth = requires_openai_auth;
-            }
+            config.model_providers.insert(provider_id.clone(), provider.clone());
             state.session_configuration.original_config_do_not_use = Arc::new(config);
             let new_config = notify_config_contributors
                 .then(|| Self::build_effective_session_config(&state.session_configuration));
@@ -1634,7 +1620,7 @@ impl Session {
 
     fn resolve_provider_runtime_refresh(
         cfg: ConfigToml,
-        provider_id: &str,
+        fallback_provider_id: &str,
         config: &Config,
     ) -> CodexResult<PendingProviderRuntimeRefresh> {
         let configured_features = Features::from_sources(
@@ -1678,16 +1664,21 @@ impl Session {
         )
         .map_err(CodexErr::InvalidRequest)?;
 
-        let provider = providers.get(provider_id).ok_or_else(|| {
+        let provider_id = cfg
+            .model_provider
+            .clone()
+            .unwrap_or_else(|| fallback_provider_id.to_string());
+        let provider = providers.get(&provider_id).ok_or_else(|| {
             CodexErr::InvalidRequest(format!(
                 "model provider `{provider_id}` no longer exists in the latest config"
             ))
         })?;
 
         Ok(PendingProviderRuntimeRefresh {
+            provider_id,
+            provider: provider.clone(),
             base_url: provider.base_url.clone(),
             experimental_bearer_token: provider.experimental_bearer_token.clone(),
-            requires_openai_auth: provider.requires_openai_auth,
             force_service_tier_priority: cfg.force_service_tier_priority.unwrap_or(true),
             service_tier,
             fast_mode_enabled,
