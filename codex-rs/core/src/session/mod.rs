@@ -420,7 +420,7 @@ pub struct Codex {
     pub(crate) session_loop_termination: SessionLoopTermination,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PendingProviderRuntimeRefresh {
     provider_id: String,
     provider: ModelProviderInfo,
