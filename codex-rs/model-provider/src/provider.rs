@@ -312,20 +312,13 @@ impl ModelProvider for ConfiguredModelProvider {
         };
 
         match config_model_catalog {
-            Some(model_catalog) => Arc::new(StaticModelsManager::new(
-                auth_manager,
-                model_catalog,
-            )),
+            Some(model_catalog) => Arc::new(StaticModelsManager::new(auth_manager, model_catalog)),
             None => {
                 let endpoint = Arc::new(OpenAiModelsEndpoint::new(
                     self.info.clone(),
                     auth_manager.clone(),
                 ));
-                Arc::new(OpenAiModelsManager::new(
-                    codex_home,
-                    endpoint,
-                    auth_manager,
-                ))
+                Arc::new(OpenAiModelsManager::new(codex_home, endpoint, auth_manager))
             }
         }
     }

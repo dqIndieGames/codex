@@ -399,8 +399,18 @@ stream_max_retries = 0
     )
     .await??;
     let second: ModelListResponse = to_response(response)?;
-    assert!(second.data.iter().any(|model| model.model == new_model.slug));
-    assert!(!second.data.iter().any(|model| model.model == old_model.slug));
+    assert!(
+        second
+            .data
+            .iter()
+            .any(|model| model.model == new_model.slug)
+    );
+    assert!(
+        !second
+            .data
+            .iter()
+            .any(|model| model.model == old_model.slug)
+    );
     Ok(())
 }
 

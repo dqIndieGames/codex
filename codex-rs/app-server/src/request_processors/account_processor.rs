@@ -859,10 +859,8 @@ impl AccountRequestProcessor {
             self.refresh_token_if_requested(do_refresh).await;
         }
 
-        let provider = create_model_provider(
-            config.model_provider,
-            Some(self.auth_manager.clone()),
-        );
+        let provider =
+            create_model_provider(config.model_provider, Some(self.auth_manager.clone()));
         let account_state = match provider.account_state() {
             Ok(account_state) => account_state,
             Err(err) => return Err(invalid_request(err.to_string())),

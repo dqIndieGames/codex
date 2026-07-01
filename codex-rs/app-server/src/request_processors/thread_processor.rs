@@ -829,11 +829,19 @@ impl ThreadRequestProcessor {
     }
 
     async fn refresh_models_manager_for_latest_config(&self) {
-        match self.config_manager.load_latest_config(/*fallback_cwd*/ None).await {
-            Ok(config) => self.thread_manager.refresh_models_manager_from_config(&config).await,
-            Err(err) => warn!(
-                "failed to reload models manager before provider runtime refresh: {err}"
-            ),
+        match self
+            .config_manager
+            .load_latest_config(/*fallback_cwd*/ None)
+            .await
+        {
+            Ok(config) => {
+                self.thread_manager
+                    .refresh_models_manager_from_config(&config)
+                    .await
+            }
+            Err(err) => {
+                warn!("failed to reload models manager before provider runtime refresh: {err}")
+            }
         }
     }
 

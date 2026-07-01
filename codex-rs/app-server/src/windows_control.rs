@@ -403,7 +403,11 @@ async fn refresh_models_manager_for_latest_config(
     config_api: &ConfigRequestProcessor,
 ) {
     match config_api.load_latest_config(/*fallback_cwd*/ None).await {
-        Ok(config) => thread_manager.refresh_models_manager_from_config(&config).await,
+        Ok(config) => {
+            thread_manager
+                .refresh_models_manager_from_config(&config)
+                .await
+        }
         Err(err) => warn!(
             "failed to reload models manager before provider runtime refresh: {}",
             err.message
@@ -570,8 +574,10 @@ async fn apply_provider_runtime_from_effective_provider(
         },
         ConfigEdit {
             key_path: format!("model_providers.{current_model_provider_id}.name"),
-            value: json!(provider_field_as_non_empty_str(source_provider, "name")
-                .unwrap_or(source_provider_id)),
+            value: json!(
+                provider_field_as_non_empty_str(source_provider, "name")
+                    .unwrap_or(source_provider_id)
+            ),
             merge_strategy: MergeStrategy::Replace,
         },
         ConfigEdit {
