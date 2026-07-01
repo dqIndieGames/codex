@@ -182,6 +182,23 @@ pub struct ModelProviderAwsAuthInfo {
 }
 
 impl ModelProviderInfo {
+    /// Returns the configured provider-scoped bearer token when it is non-empty.
+    ///
+    /// Whitespace-only values are treated as absent so a config typo does not
+    /// produce a broken `Authorization: Bearer ` request or accidentally shadow
+    /// the normal AuthManager path.
+    pub fn experimental_bearer_token_non_empty(&self) -> Option<String> {
+        self.experimental_bearer_token
+            .as_ref()
+            .map(|token| token.trim())
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+    }
+
+    pub fn experimental_bearer_token_is_non_empty(&self) -> bool {
+        self.experimental_bearer_token_non_empty().is_some()
+    }
+
     pub fn validate(&self) -> std::result::Result<(), String> {
         if self.aws.is_some() {
             if self.supports_websockets {
@@ -270,6 +287,11 @@ impl ModelProviderInfo {
     }
 
     pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
+        let auth_mode = if self.experimental_bearer_token_is_non_empty() {
+            None
+        } else {
+            auth_mode
+        };
         let default_base_url = if matches!(
             auth_mode,
             Some(

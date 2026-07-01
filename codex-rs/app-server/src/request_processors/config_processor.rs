@@ -179,6 +179,13 @@ impl ConfigRequestProcessor {
     pub(crate) async fn handle_config_mutation(&self) {
         self.thread_manager.plugins_manager().clear_cache();
         self.thread_manager.skills_service().clear_cache();
+        match self.load_latest_config(/*fallback_cwd*/ None).await {
+            Ok(config) => self.thread_manager.refresh_models_manager_from_config(&config).await,
+            Err(err) => tracing::warn!(
+                "failed to reload models manager after config mutation: {}",
+                err.message
+            ),
+        }
         let report = self
             .thread_manager
             .refresh_all_loaded_provider_runtime()

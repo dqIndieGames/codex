@@ -1694,6 +1694,128 @@ async fn get_account_when_auth_not_required() -> Result<()> {
 }
 
 #[tokio::test]
+async fn get_account_and_auth_status_use_latest_provider_auth_config() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            ..Default::default()
+        },
+    )?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let account_id = mcp
+        .send_get_account_request(GetAccountParams {
+            refresh_token: false,
+        })
+        .await?;
+    let account_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(account_id)),
+    )
+    .await??;
+    let account: GetAccountResponse = to_response(account_resp)?;
+    assert_eq!(account.requires_openai_auth, true);
+
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            model_provider_id: Some("token_provider".to_string()),
+            extra_provider_config: Some(
+                r#"[model_providers.token_provider]
+name = "Token provider for test"
+base_url = "http://127.0.0.1:0/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+requires_openai_auth = true
+experimental_bearer_token = "provider-token"
+"#
+                .to_string(),
+            ),
+            ..Default::default()
+        },
+    )?;
+
+    let account_id = mcp
+        .send_get_account_request(GetAccountParams {
+            refresh_token: false,
+        })
+        .await?;
+    let account_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(account_id)),
+    )
+    .await??;
+    let account: GetAccountResponse = to_response(account_resp)?;
+    assert_eq!(
+        account.requires_openai_auth, false,
+        "provider token must suppress AuthManager even if latest config still says \
+         requires_openai_auth"
+    );
+    assert_eq!(account.account, None);
+
+    let auth_status_id = mcp
+        .send_get_auth_status_request(GetAuthStatusParams {
+            include_token: Some(true),
+            refresh_token: Some(true),
+        })
+        .await?;
+    let auth_status_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(auth_status_id)),
+    )
+    .await??;
+    let auth_status: GetAuthStatusResponse = to_response(auth_status_resp)?;
+    assert_eq!(auth_status.requires_openai_auth, Some(false));
+    assert_eq!(auth_status.auth_method, None);
+    assert_eq!(auth_status.auth_token, None);
+
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            requires_openai_auth: Some(true),
+            ..Default::default()
+        },
+    )?;
+
+    let account_id = mcp
+        .send_get_account_request(GetAccountParams {
+            refresh_token: false,
+        })
+        .await?;
+    let account_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(account_id)),
+    )
+    .await??;
+    let account: GetAccountResponse = to_response(account_resp)?;
+    assert_eq!(
+        account.requires_openai_auth, true,
+        "switching back to a no-token AuthManager provider must restore auth requirements"
+    );
+
+    let auth_status_id = mcp
+        .send_get_auth_status_request(GetAuthStatusParams {
+            include_token: Some(false),
+            refresh_token: Some(false),
+        })
+        .await?;
+    let auth_status_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(auth_status_id)),
+    )
+    .await??;
+    let auth_status: GetAuthStatusResponse = to_response(auth_status_resp)?;
+    assert_eq!(auth_status.requires_openai_auth, Some(true));
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_account_with_aws_provider() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(

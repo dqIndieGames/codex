@@ -50,6 +50,10 @@ impl OpenAiModelsEndpoint {
     }
 
     async fn auth(&self) -> Option<CodexAuth> {
+        if self.provider_info.experimental_bearer_token_is_non_empty() {
+            return None;
+        }
+
         match self.auth_manager.as_ref() {
             Some(auth_manager) => auth_manager.auth().await,
             None => None,
@@ -105,6 +109,7 @@ impl OpenAiModelsEndpoint {
 impl ModelsEndpointClient for OpenAiModelsEndpoint {
     fn has_command_auth(&self) -> bool {
         self.provider_info.has_command_auth()
+            || self.provider_info.experimental_bearer_token_is_non_empty()
     }
 
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {
@@ -256,5 +261,18 @@ mod tests {
         );
 
         assert!(!endpoint.has_command_auth());
+    }
+
+    #[test]
+    fn provider_bearer_token_reports_command_auth_for_model_refresh() {
+        let endpoint = OpenAiModelsEndpoint::new(
+            ModelProviderInfo {
+                experimental_bearer_token: Some("provider-token".to_string()),
+                ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+            },
+            /*auth_manager*/ None,
+        );
+
+        assert!(endpoint.has_command_auth());
     }
 }

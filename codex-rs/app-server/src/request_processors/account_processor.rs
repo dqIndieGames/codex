@@ -777,13 +777,15 @@ impl AccountRequestProcessor {
     ) -> Result<GetAuthStatusResponse, JSONRPCErrorError> {
         let include_token = params.include_token.unwrap_or(false);
         let do_refresh = params.refresh_token.unwrap_or(false);
-
-        self.refresh_token_if_requested(do_refresh).await;
+        let config = self.current_config().await?;
 
         // Determine whether auth is required based on the active model provider.
         // If a custom provider is configured with `requires_openai_auth == false`,
         // then no auth step is required; otherwise, default to requiring auth.
-        let requires_openai_auth = self.config.model_provider.requires_openai_auth;
+        let requires_openai_auth = config.model_provider.requires_openai_auth
+            && !config
+                .model_provider
+                .experimental_bearer_token_is_non_empty();
 
         let response = if !requires_openai_auth {
             GetAuthStatusResponse {
@@ -792,6 +794,7 @@ impl AccountRequestProcessor {
                 requires_openai_auth: Some(false),
             }
         } else {
+            self.refresh_token_if_requested(do_refresh).await;
             let auth = if do_refresh {
                 self.auth_manager.auth_cached()
             } else {
@@ -846,11 +849,18 @@ impl AccountRequestProcessor {
         params: GetAccountParams,
     ) -> Result<GetAccountResponse, JSONRPCErrorError> {
         let do_refresh = params.refresh_token;
+        let config = self.current_config().await?;
 
-        self.refresh_token_if_requested(do_refresh).await;
+        if config.model_provider.requires_openai_auth
+            && !config
+                .model_provider
+                .experimental_bearer_token_is_non_empty()
+        {
+            self.refresh_token_if_requested(do_refresh).await;
+        }
 
         let provider = create_model_provider(
-            self.config.model_provider.clone(),
+            config.model_provider,
             Some(self.auth_manager.clone()),
         );
         let account_state = match provider.account_state() {
@@ -863,6 +873,13 @@ impl AccountRequestProcessor {
             account,
             requires_openai_auth: account_state.requires_openai_auth,
         })
+    }
+
+    async fn current_config(&self) -> Result<Config, JSONRPCErrorError> {
+        self.config_manager
+            .load_latest_config(/*fallback_cwd*/ None)
+            .await
+            .map_err(|err| internal_error(format!("failed to reload config: {err}")))
     }
 
     async fn get_account_rate_limits_response(

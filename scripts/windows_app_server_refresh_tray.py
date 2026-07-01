@@ -51,8 +51,9 @@ STANDARD_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 TABLE_HEADER_RE = re.compile(r"^\s*\[(?P<name>[^\[\]]+)\]\s*(?:#.*)?$")
 ARRAY_TABLE_HEADER_RE = re.compile(r"^\s*\[\[(?P<name>[^\[\]]+)\]\]\s*(?:#.*)?$")
 ROOT_PROVIDER_KEY_RE = re.compile(
-    r"^(?P<indent>\s*)(?P<key>base_url|experimental_bearer_token)\s*="
+    r"^(?P<indent>\s*)(?P<key>base_url|experimental_bearer_token|requires_openai_auth)\s*="
 )
+ROOT_PROVIDER_NAME_KEY_RE = re.compile(r"^(?P<indent>\s*)name\s*=")
 ROOT_SCALAR_KEY_RE = re.compile(
     r"^(?P<indent>\s*)(?P<key>force_service_tier_priority|service_tier)\s*="
 )
@@ -471,6 +472,7 @@ def load_user_provider_catalog(codex_home: Path | None = None) -> dict[str, Any]
         display_name = provider.get("name")
         base_url = normalize_string(provider.get("base_url"))
         bearer_token = normalize_string(provider.get("experimental_bearer_token"))
+        requires_openai_auth = bool(provider.get("requires_openai_auth"))
         providers.append(
             {
                 "provider_id": provider_id,
@@ -481,7 +483,7 @@ def load_user_provider_catalog(codex_home: Path | None = None) -> dict[str, Any]
                 "experimental_bearer_token": bearer_token,
                 "has_base_url": base_url is not None,
                 "has_experimental_bearer_token": bearer_token is not None,
-                "requires_openai_auth": bool(provider.get("requires_openai_auth")),
+                "requires_openai_auth": requires_openai_auth,
             }
         )
     response["providers"] = providers
@@ -528,9 +530,13 @@ def toml_quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def toml_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
 def toml_quote_value(value: Any) -> str:
     if isinstance(value, bool):
-        return "true" if value else "false"
+        return toml_bool(value)
     if isinstance(value, str):
         return toml_quote(value)
     return json.dumps(value, ensure_ascii=False)
@@ -608,7 +614,9 @@ def rewrite_provider_runtime_section(
     raw_text: str,
     provider_id: str,
     base_url: str,
-    bearer_token: str,
+    bearer_token: str | None,
+    requires_openai_auth: bool = False,
+    display_name: str | None = None,
 ) -> str:
     lines = raw_text.splitlines(keepends=True)
     newline = detect_newline(raw_text)
@@ -626,6 +634,16 @@ def rewrite_provider_runtime_section(
     for line in body_lines:
         match = ROOT_PROVIDER_KEY_RE.match(line)
         if match is None:
+            name_match = ROOT_PROVIDER_NAME_KEY_RE.match(line)
+            if display_name is not None and name_match is not None:
+                seen_keys.add("name")
+                current_indent = name_match.group("indent")
+                if not indent:
+                    indent = current_indent
+                updated_body_lines.append(
+                    f"{current_indent}name = {toml_quote(display_name)}{newline}"
+                )
+                continue
             updated_body_lines.append(line)
             if not indent and line.strip() and not line.lstrip().startswith("#"):
                 indent_match = re.match(r"^\s*", line)
@@ -641,14 +659,26 @@ def rewrite_provider_runtime_section(
             updated_body_lines.append(
                 f"{current_indent}base_url = {toml_quote(base_url)}{newline}"
             )
+        elif key == "requires_openai_auth":
+            updated_body_lines.append(
+                f"{current_indent}requires_openai_auth = {toml_bool(requires_openai_auth)}{newline}"
+            )
+        elif bearer_token is None:
+            continue
         else:
             updated_body_lines.append(
                 f"{current_indent}experimental_bearer_token = {toml_quote(bearer_token)}{newline}"
             )
 
+    if display_name is not None and "name" not in seen_keys:
+        updated_body_lines.append(f"{indent}name = {toml_quote(display_name)}{newline}")
     if "base_url" not in seen_keys:
         updated_body_lines.append(f"{indent}base_url = {toml_quote(base_url)}{newline}")
-    if "experimental_bearer_token" not in seen_keys:
+    if "requires_openai_auth" not in seen_keys:
+        updated_body_lines.append(
+            f"{indent}requires_openai_auth = {toml_bool(requires_openai_auth)}{newline}"
+        )
+    if bearer_token is not None and "experimental_bearer_token" not in seen_keys:
         updated_body_lines.append(
             f"{indent}experimental_bearer_token = {toml_quote(bearer_token)}{newline}"
         )
@@ -848,19 +878,9 @@ def apply_selected_provider_to_config(
             "refresh_summary": None,
         }
 
-    source_bearer_token = normalize_string(
-        source_provider.get("experimental_bearer_token")
-    )
-    if source_bearer_token is None:
-        return {
-            "ok": False,
-            "message": "source provider 缺少 experimental_bearer_token",
-            "source_provider_id": source_provider_id,
-            "current_model_provider_id": current_model_provider_id,
-            "config_path": str(config_path),
-            "config_changed": False,
-            "refresh_summary": None,
-        }
+    source_bearer_token = normalize_string(source_provider.get("experimental_bearer_token"))
+    source_requires_openai_auth = bool(source_provider.get("requires_openai_auth"))
+    source_display_name = normalize_string(source_provider.get("name")) or source_provider_id
 
     target_provider = model_providers.get(current_model_provider_id)
     if target_provider is None:
@@ -886,6 +906,8 @@ def apply_selected_provider_to_config(
 
     target_base_url = normalize_string(target_provider.get("base_url"))
     target_bearer_token = normalize_string(target_provider.get("experimental_bearer_token"))
+    target_requires_openai_auth = bool(target_provider.get("requires_openai_auth"))
+    target_display_name = normalize_string(target_provider.get("name")) or current_model_provider_id
     source_force_service_tier_priority = bool(
         payload.get("force_service_tier_priority", True)
     )
@@ -897,7 +919,10 @@ def apply_selected_provider_to_config(
         **({"service_tier": source_service_tier} if source_service_tier is not None else {}),
     }
     provider_runtime_changed = not (
-        target_base_url == source_base_url and target_bearer_token == source_bearer_token
+        target_base_url == source_base_url
+        and target_bearer_token == source_bearer_token
+        and target_requires_openai_auth == source_requires_openai_auth
+        and target_display_name == source_display_name
     )
 
     try:
@@ -908,6 +933,8 @@ def apply_selected_provider_to_config(
                 current_model_provider_id,
                 source_base_url,
                 source_bearer_token,
+                source_requires_openai_auth,
+                source_display_name,
             )
         updated_text = rewrite_root_scalar_fields(updated_text, root_scalar_fields)
         updated_text = rewrite_features_fields(updated_text, {"fast_mode": source_fast_mode})
@@ -956,7 +983,7 @@ def apply_selected_provider_to_config(
 
 def apply_runtime_values_to_current_provider(
     base_url: str,
-    bearer_token: str,
+    bearer_token: str | None,
     codex_home: Path | None = None,
     registry_dir: Path | None = None,
     pid_checker: Callable[[int], bool] = is_pid_alive,
@@ -977,17 +1004,7 @@ def apply_runtime_values_to_current_provider(
         }
 
     next_bearer_token = normalize_string(bearer_token)
-    if next_bearer_token is None:
-        return {
-            "ok": False,
-            "message": "新的 Token 不能为空",
-            "source_provider_id": None,
-            "current_model_provider_id": None,
-            "config_path": str(config_toml_path(codex_home)),
-            "config_changed": False,
-            "apply_strategy": "manual_runtime_values",
-            "refresh_summary": None,
-        }
+    next_requires_openai_auth = next_bearer_token is None
 
     try:
         config_path, raw_text, payload = parse_config_for_apply(codex_home)
@@ -1057,8 +1074,11 @@ def apply_runtime_values_to_current_provider(
     current_bearer_token = normalize_string(
         target_provider.get("experimental_bearer_token")
     )
+    current_requires_openai_auth = bool(target_provider.get("requires_openai_auth"))
     runtime_changed = not (
-        current_base_url == next_base_url and current_bearer_token == next_bearer_token
+        current_base_url == next_base_url
+        and current_bearer_token == next_bearer_token
+        and current_requires_openai_auth == next_requires_openai_auth
     )
 
     try:
@@ -1068,6 +1088,7 @@ def apply_runtime_values_to_current_provider(
                 current_model_provider_id,
                 next_base_url,
                 next_bearer_token,
+                next_requires_openai_auth,
             )
             if runtime_changed
             else raw_text
@@ -1566,10 +1587,10 @@ def format_refresh_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
 
 
 def format_apply_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
-    title = "Codex URL/token Apply"
+    title = "Codex URL/token/AuthManager Apply"
     if not bool(summary.get("ok")):
         lines = [
-            "无法应用新的 URL/token",
+            "无法应用新的 URL/token/AuthManager",
             "",
             f"原因: {summary.get('message') or '未知错误'}",
         ]
@@ -1601,23 +1622,23 @@ def format_apply_summary(summary: dict[str, Any]) -> tuple[str, str, int]:
 
     if total_instances == 0:
         headline = (
-            "已应用新的 URL/token，当前没有已打开的 Codex 实例"
+            "已应用新的 URL/token/AuthManager，当前没有已打开的 Codex 实例"
             if config_changed
-            else "当前 provider 已经使用这组 URL/token，未刷新任何 Codex 实例"
+            else "当前 provider 已经使用这组 URL/token/AuthManager，未刷新任何 Codex 实例"
         )
         icon_flag = MB_ICONINFORMATION
     elif failed_instances == 0:
         headline = (
-            "已应用新的 URL/token，并已刷新 Codex"
+            "已应用新的 URL/token/AuthManager，并已刷新 Codex"
             if config_changed
-            else "当前 provider 已经使用这组 URL/token，并已刷新 Codex"
+            else "当前 provider 已经使用这组 URL/token/AuthManager，并已刷新 Codex"
         )
         icon_flag = MB_ICONINFORMATION
     else:
         headline = (
-            "已应用新的 URL/token，但部分 Codex 实例刷新失败"
+            "已应用新的 URL/token/AuthManager，但部分 Codex 实例刷新失败"
             if config_changed
-            else "当前 provider 已经使用这组 URL/token，但部分 Codex 实例刷新失败"
+            else "当前 provider 已经使用这组 URL/token/AuthManager，但部分 Codex 实例刷新失败"
         )
         icon_flag = MB_ICONWARNING
 
@@ -1662,17 +1683,15 @@ def mask_secret(value: str | None) -> str:
 
 
 def provider_status_text(provider: dict[str, Any]) -> tuple[str, bool]:
-    if bool(provider.get("requires_openai_auth")):
-        return "不支持", False
     has_base_url = bool(provider.get("has_base_url"))
     has_token = bool(provider.get("has_experimental_bearer_token"))
-    if has_base_url and has_token:
-        return "可用于填入", True
-    if not has_base_url and not has_token:
-        return "缺少 base_url 和 token", False
     if not has_base_url:
         return "缺少 base_url", False
-    return "缺少 token", False
+    if bool(provider.get("requires_openai_auth")):
+        return "AuthManager provider，可用于填入", True
+    if has_token:
+        return "可用于填入", True
+    return "无 token，将恢复 AuthManager", True
 
 
 def provider_display_rows(
@@ -1906,20 +1925,20 @@ class DashboardController:
         self.provider_tree.bind("<<TreeviewSelect>>", self._on_provider_selected)
         ttk.Button(
             providers,
-            text="填入 URL/token",
+            text="填入 URL/token/AuthManager",
             command=self.fill_from_selected_provider,
         ).grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
 
-        target = ttk.LabelFrame(frame, text="准备应用的新 URL/token")
+        target = ttk.LabelFrame(frame, text="准备应用的新 URL/token/AuthManager")
         target.grid(row=1, column=1, sticky="nsew")
         target.columnconfigure(0, weight=1)
         ttk.Label(target, text="新的 Base URL").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 2))
         ttk.Entry(target, textvariable=self.new_base_url_var).grid(row=1, column=0, sticky="ew", padx=8, pady=2)
-        ttk.Label(target, text="新的 Token").grid(row=2, column=0, sticky="w", padx=8, pady=(8, 2))
+        ttk.Label(target, text="新的 Token（留空则恢复 AuthManager）").grid(row=2, column=0, sticky="w", padx=8, pady=(8, 2))
         ttk.Entry(target, textvariable=self.new_token_var, show="*").grid(row=3, column=0, sticky="ew", padx=8, pady=2)
         ttk.Label(
             target,
-            text="点击应用后只覆盖当前 provider 的 base_url 和 token，不切换 model_provider。",
+            text="点击应用后只覆盖当前 provider 的 base_url 和 token/AuthManager，不切换 model_provider。",
             wraplength=240,
         ).grid(row=4, column=0, sticky="w", padx=8, pady=(10, 2))
         ttk.Label(target, textvariable=self.config_status_var).grid(row=5, column=0, sticky="w", padx=8, pady=(12, 2))
@@ -1974,7 +1993,7 @@ class DashboardController:
         if model["can_apply"]:
             self.apply_button.state(["!disabled"])
             self.apply_hint_var.set(
-                f"将覆盖当前 provider「{model['current_provider_label']}」的 base_url 和 token，并刷新已打开的 Codex。"
+                f"将覆盖当前 provider「{model['current_provider_label']}」的 base_url 和 token/AuthManager，并刷新已打开的 Codex。"
             )
         else:
             self.apply_button.state(["disabled"])
@@ -2016,7 +2035,7 @@ class DashboardController:
     def fill_from_selected_provider(self) -> None:
         selected_provider_id = self.state.snapshot().get("selected_provider_id")
         if not isinstance(selected_provider_id, str) or not selected_provider_id:
-            self.last_result = "请选择一个 provider 作为 URL/token 来源。"
+            self.last_result = "请选择一个 provider 作为 URL/token/AuthManager 来源。"
             self.refresh_view()
             return
         provider = next(
@@ -2033,13 +2052,14 @@ class DashboardController:
             return
         base_url = normalize_string(provider.get("base_url"))
         token = normalize_string(provider.get("experimental_bearer_token"))
-        if base_url is None or token is None:
+        if base_url is None:
             self.last_result = f"所选 provider {provider_status_text(provider)[0]}，不能填入。"
             self.refresh_view()
             return
         self.new_base_url_var.set(base_url)
-        self.new_token_var.set(token)
-        self.last_result = f"已从 {provider.get('display_name') or selected_provider_id} 填入 URL/token，尚未应用。"
+        self.new_token_var.set(token or "")
+        token_note = "token" if token is not None else "AuthManager 模式"
+        self.last_result = f"已从 {provider.get('display_name') or selected_provider_id} 填入 URL/{token_note}，尚未应用。"
         self.refresh_view()
 
     def _run_worker(self, work: Callable[[], tuple[str, str, int]]) -> None:

@@ -191,6 +191,7 @@ struct ModelClientState {
     window_generation: AtomicU64,
     provider: ArcSwap<ModelProviderHandle>,
     provider_runtime_generation: AtomicU64,
+    auth_manager: Option<Arc<AuthManager>>,
     auth_env_telemetry: AuthEnvTelemetry,
     session_source: SessionSource,
     model_verbosity: Option<VerbosityConfig>,
@@ -199,7 +200,6 @@ struct ModelClientState {
     include_timing_metrics: bool,
     beta_features_header: Option<String>,
     item_ids_enabled: bool,
-    include_attestation: bool,
     attestation_provider: Option<Arc<dyn AttestationProvider>>,
     disable_websockets: AtomicBool,
     cached_websocket_session: StdMutex<WebsocketSession>,
@@ -468,14 +468,13 @@ impl ModelClient {
         item_ids_enabled: bool,
         attestation_provider: Option<Arc<dyn AttestationProvider>>,
     ) -> Self {
-        let model_provider = create_model_provider(provider_info, auth_manager);
+        let model_provider = create_model_provider(provider_info, auth_manager.clone());
         let codex_api_key_env_enabled = model_provider
             .auth_manager()
             .as_ref()
             .is_some_and(|manager| manager.codex_api_key_env_enabled());
         let auth_env_telemetry =
             collect_auth_env_telemetry(model_provider.info(), codex_api_key_env_enabled);
-        let include_attestation = model_provider.supports_attestation();
         Self {
             state: Arc::new(ModelClientState {
                 thread_id,
@@ -485,6 +484,7 @@ impl ModelClient {
                     runtime_generation: 0,
                 }),
                 provider_runtime_generation: AtomicU64::new(0),
+                auth_manager,
                 auth_env_telemetry,
                 session_source,
                 model_verbosity,
@@ -493,7 +493,6 @@ impl ModelClient {
                 include_timing_metrics,
                 beta_features_header,
                 item_ids_enabled,
-                include_attestation,
                 attestation_provider,
                 disable_websockets: AtomicBool::new(false),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
@@ -568,7 +567,11 @@ impl ModelClient {
             let provider_handle = self.current_provider_handle();
             let auth = provider_handle.provider.auth().await;
             let provider_info = provider_handle.provider.info().clone();
-            let mut api_provider = provider_info.to_api_provider(Some(AuthMode::ApiKey))?;
+            let mut api_provider = if provider_info.experimental_bearer_token_is_non_empty() {
+                provider_handle.provider.api_provider().await?
+            } else {
+                provider_info.to_api_provider(Some(AuthMode::ApiKey))?
+            };
             if let Some(realtime_ws_base_url) = realtime_ws_base_url.as_ref() {
                 api_provider.base_url = realtime_ws_base_url.clone();
             }
@@ -595,8 +598,7 @@ impl ModelClient {
         self.state
             .force_service_tier_priority
             .store(force_service_tier_priority, Ordering::Relaxed);
-        let current_provider = self.current_provider_handle();
-        let auth_manager = current_provider.provider.auth_manager();
+        let auth_manager = self.state.auth_manager.clone();
         let runtime_generation = self
             .state
             .provider_runtime_generation
@@ -981,7 +983,7 @@ impl ModelClient {
     }
 
     async fn generate_attestation_header_for(&self) -> Option<HeaderValue> {
-        if !self.state.include_attestation {
+        if !self.current_provider().supports_attestation() {
             return None;
         }
 

@@ -14,6 +14,7 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::InitialHistory;
@@ -29,6 +30,7 @@ use core_test_support::PathBufExt;
 use core_test_support::PathExt;
 use core_test_support::responses::mount_models_once;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 use std::time::Duration;
 use tempfile::tempdir;
 use wiremock::MockServer;
@@ -1276,6 +1278,163 @@ async fn new_uses_active_provider_for_model_refresh() {
 
     let _ = manager.list_models(RefreshStrategy::Online).await;
     assert_eq!(models_mock.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn refresh_models_manager_updates_existing_shared_handles() {
+    let old_server = MockServer::start().await;
+    let new_server = MockServer::start().await;
+    let old_models_mock = mount_models_once(
+        &old_server,
+        ModelsResponse {
+            models: vec![refreshable_manager_test_model("old-provider-model", true)],
+        },
+    )
+    .await;
+    let new_models_mock = mount_models_once(
+        &new_server,
+        ModelsResponse {
+            models: vec![refreshable_manager_test_model("new-provider-model", true)],
+        },
+    )
+    .await;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    config.model_catalog = None;
+    config.model_provider.base_url = Some(old_server.uri());
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager,
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, /*state_db*/ None),
+        /*state_db*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let shared_handle = manager.get_models_manager();
+    let old_models = shared_handle.list_models(RefreshStrategy::Online).await;
+    assert_eq!(old_models_mock.requests().len(), 1);
+    assert_eq!(new_models_mock.requests().len(), 0);
+    assert!(
+        old_models
+            .iter()
+            .any(|model| model.model == "old-provider-model")
+    );
+
+    config.model_provider.base_url = Some(new_server.uri());
+    manager.refresh_models_manager_from_config(&config).await;
+    assert_eq!(old_models_mock.requests().len(), 1);
+    assert_eq!(new_models_mock.requests().len(), 1);
+
+    let refreshed_models = shared_handle
+        .try_list_models()
+        .expect("refreshed models from existing shared handle");
+    assert_eq!(old_models_mock.requests().len(), 1);
+    assert_eq!(new_models_mock.requests().len(), 1);
+    assert!(
+        refreshed_models
+            .iter()
+            .any(|model| model.model == "new-provider-model"),
+        "existing SharedModelsManager handle must see the refreshed provider models"
+    );
+    assert!(
+        !refreshed_models
+            .iter()
+            .any(|model| model.model == "old-provider-model"),
+        "existing SharedModelsManager handle must not keep the old provider-only model"
+    );
+}
+
+fn refreshable_manager_test_model(slug: &str, supported_in_api: bool) -> ModelInfo {
+    serde_json::from_value(json!({
+        "slug": slug,
+        "display_name": slug,
+        "description": format!("{slug} desc"),
+        "default_reasoning_level": "medium",
+        "supported_reasoning_levels": [
+            {"effort": "medium", "description": "Medium"}
+        ],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "minimal_client_version": [0, 1, 0],
+        "supported_in_api": supported_in_api,
+        "priority": 0,
+        "upgrade": null,
+        "base_instructions": "base instructions",
+        "supports_reasoning_summaries": false,
+        "support_verbosity": false,
+        "default_verbosity": null,
+        "apply_patch_tool_type": null,
+        "truncation_policy": {"mode": "bytes", "limit": 10_000},
+        "supports_parallel_tool_calls": false,
+        "supports_image_detail_original": false,
+        "context_window": 272_000,
+        "max_context_window": 272_000,
+        "experimental_supported_tools": [],
+    }))
+    .expect("valid refreshable manager test model")
+}
+
+#[tokio::test]
+async fn refreshable_models_manager_delegates_auth_filtering_to_current_inner() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    config.model_catalog = Some(ModelsResponse {
+        models: vec![
+            refreshable_manager_test_model("chatgpt-only-model", false),
+            refreshable_manager_test_model("api-model", true),
+        ],
+    });
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager,
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, /*state_db*/ None),
+        /*state_db*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let shared_handle = manager.get_models_manager();
+    let models = shared_handle
+        .try_list_models()
+        .expect("refreshable manager try_list_models");
+    assert!(
+        models
+            .iter()
+            .any(|model| model.model == "chatgpt-only-model"),
+        "wrapper handles must preserve ChatGPT/AuthManager-only models"
+    );
+    assert!(models.iter().any(|model| model.model == "api-model"));
+
+    let default_model = shared_handle
+        .get_default_model(&None, RefreshStrategy::Offline)
+        .await;
+    assert_eq!(default_model, "chatgpt-only-model");
 }
 
 #[test]

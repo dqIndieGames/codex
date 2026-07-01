@@ -16,6 +16,7 @@ use codex_app_server_protocol::ModelServiceTier;
 use codex_app_server_protocol::ModelUpgradeInfo;
 use codex_app_server_protocol::ReasoningEffortOption;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadProviderRuntimeRefreshAllLoadedParams;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
@@ -25,10 +26,43 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
+use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path_regex;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+
+fn remote_model(slug: &str, display_name: &str) -> Result<ModelInfo> {
+    Ok(serde_json::from_value(json!({
+        "slug": slug,
+        "display_name": display_name,
+        "description": format!("Remote model {slug}"),
+        "default_reasoning_level": "max",
+        "supported_reasoning_levels": [
+            {"effort": "max", "description": "Maximum"}
+        ],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "minimal_client_version": [0, 1, 0],
+        "supported_in_api": true,
+        "priority": 0,
+        "upgrade": null,
+        "base_instructions": "base instructions",
+        "supports_reasoning_summaries": false,
+        "support_verbosity": false,
+        "default_verbosity": null,
+        "apply_patch_tool_type": null,
+        "truncation_policy": {"mode": "bytes", "limit": 10_000},
+        "supports_parallel_tool_calls": false,
+        "supports_image_detail_original": false,
+        "context_window": 272_000,
+        "max_context_window": 272_000,
+        "experimental_supported_tools": [],
+    }))?)
+}
 
 fn model_from_preset(preset: &ModelPreset) -> Model {
     Model {
@@ -161,34 +195,12 @@ async fn list_models_includes_hidden_models() -> Result<()> {
 #[tokio::test]
 async fn list_models_uses_chatgpt_remote_catalog_as_source_of_truth() -> Result<()> {
     let server = MockServer::start().await;
-    let remote_model: ModelInfo = serde_json::from_value(json!({
-        "slug": "chatgpt-remote-only",
-        "display_name": "ChatGPT Remote Only",
-        "description": "Remote-only model for app-server model/list coverage",
-        "default_reasoning_level": "max",
-        "supported_reasoning_levels": [
-            {"effort": "max", "description": "Maximum"},
-            {"effort": "low", "description": "Low"},
-            {"effort": "focused", "description": "Focused"}
-        ],
-        "shell_type": "shell_command",
-        "visibility": "list",
-        "minimal_client_version": [0, 1, 0],
-        "supported_in_api": true,
-        "priority": 0,
-        "upgrade": null,
-        "base_instructions": "base instructions",
-        "supports_reasoning_summaries": false,
-        "support_verbosity": false,
-        "default_verbosity": null,
-        "apply_patch_tool_type": null,
-        "truncation_policy": {"mode": "bytes", "limit": 10_000},
-        "supports_parallel_tool_calls": false,
-        "supports_image_detail_original": false,
-        "context_window": 272_000,
-        "max_context_window": 272_000,
-        "experimental_supported_tools": [],
-    }))?;
+    let mut remote_model = remote_model("chatgpt-remote-only", "ChatGPT Remote Only")?;
+    remote_model.supported_reasoning_levels = serde_json::from_value(json!([
+        {"effort": "max", "description": "Maximum"},
+        {"effort": "low", "description": "Low"},
+        {"effort": "focused", "description": "Focused"}
+    ]))?;
     let models_mock = mount_models_once(
         &server,
         ModelsResponse {
@@ -266,6 +278,129 @@ openai_base_url = "{server_uri}/v1"
         1,
         "expected a single /models request"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_models_follows_provider_runtime_refresh_to_provider_token_endpoint() -> Result<()> {
+    let old_server = MockServer::start().await;
+    let new_server = MockServer::start().await;
+    let old_model = remote_model("old-provider-model", "Old Provider Model")?;
+    let new_model = remote_model("new-provider-model", "New Provider Model")?;
+    Mock::given(method("GET"))
+        .and(path_regex(".*/models$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(ModelsResponse {
+                    models: vec![old_model.clone()],
+                }),
+        )
+        .mount(&old_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(".*/models$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(ModelsResponse {
+                    models: vec![new_model.clone()],
+                }),
+        )
+        .mount(&new_server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            r#"
+model = "mock-model"
+approval_policy = "never"
+sandbox_mode = "read-only"
+model_provider = "mock_provider"
+
+[model_providers.mock_provider]
+name = "Mock provider for test"
+base_url = "{old_base_url}"
+experimental_bearer_token = "old-provider-token"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+"#,
+            old_base_url = old_server.uri(),
+        ),
+    )?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_list_models_request(ModelListParams {
+            limit: Some(100),
+            cursor: None,
+            include_hidden: None,
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let first: ModelListResponse = to_response(response)?;
+    assert!(first.data.iter().any(|model| model.model == old_model.slug));
+
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            r#"
+model = "mock-model"
+approval_policy = "never"
+sandbox_mode = "read-only"
+model_provider = "mock_provider"
+
+[model_providers.mock_provider]
+name = "Mock provider for test"
+base_url = "{new_base_url}"
+experimental_bearer_token = "new-provider-token"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+"#,
+            new_base_url = new_server.uri(),
+        ),
+    )?;
+
+    let refresh_id = mcp
+        .send_raw_request(
+            "thread/providerRuntime/refreshAllLoaded",
+            Some(serde_json::to_value(
+                ThreadProviderRuntimeRefreshAllLoadedParams::default(),
+            )?),
+        )
+        .await?;
+    let _: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(refresh_id)),
+    )
+    .await??;
+
+    let request_id = mcp
+        .send_list_models_request(ModelListParams {
+            limit: Some(100),
+            cursor: None,
+            include_hidden: None,
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let second: ModelListResponse = to_response(response)?;
+    assert!(second.data.iter().any(|model| model.model == new_model.slug));
+    assert!(!second.data.iter().any(|model| model.model == old_model.slug));
     Ok(())
 }
 

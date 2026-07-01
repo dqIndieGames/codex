@@ -9,7 +9,7 @@
 
 4. 重试期间的可见提示、日志噪声和统计口径保持平衡；原来中间态可能刷屏或让诊断信息丢失，修改后用户仍能看到首次重连、重试次数、重试详情等提示，但所有 `willRetry=true`、`EventMsg::StreamError`、HTTP request retry、stream/WebSocket reconnect 和 compact retry 的中间失败默认不得以 `warn!` / `error!` 写入普通运行日志或 app-server stderr，也不应生成每次 retry 一条的高噪日志；只有最终失败、用户显式开启 debug/trace 诊断、或低频汇总型诊断才允许落日志，同时 retry metrics/counter 继续保留，这样用户界面和后台日志更安静，排查问题时仍有统计依据。
 
-   - retry 中间态目标清单：retry 中间态就应该只是“内部继续重试 + TUI 上同一个状态栏数字增加”。除了必要的网络重试、等待、一次轻量状态通知、TUI 覆盖刷新和 metrics 计数，不应该再写日志、写历史、进 fork、进 replay 或污染上下文。当前源码已经避免了大部分历史/fork 污染，但还需要去掉 retry 中间态 `warn!`，并且如果想做得更干净，应该把 retry 从普通事件链改成真正的 transient status update。
+   - retry 中间态目标清单：retry 中间态就应该只是“内部继续重试 + TUI 上同一个状态栏数字增加”。除了必要的网络重试、等待、一次轻量状态通知、TUI 覆盖刷新和 metrics 计数，不应该再写日志、写历史、进 fork、进 replay 或污染上下文。落地时必须同时去掉 retry 中间态 `warn!` / `error!` 噪声，并把 retry 中间态从普通持久事件链改成真正的 transient status update；不能把普通 `EventMsg::StreamError` / `EventMsg::Warning` 进入 rollout/history/fork/replay 的路径当作完成证据。
 
 5. 历史会话默认跨 provider 可发现，并且继续旧线程时使用当前顶层 provider；原来历史入口可能按 provider 收窄，修改后历史列表、最近会话、resume picker 和 `codex://threads/{id}` deep link 默认都能看到旧会话，并且恢复旧线程时不能因历史 `session_meta.model_provider`、已加载线程快照或 `thread/read` 回退继续粘住旧 provider；若旧线程 provider 与当前顶层 provider 不一致，应重建/换绑到当前 provider，做不到时必须明确提示仍在使用旧 provider，这样用户切换 provider 后仍能找回并继续之前的工作，不会误以为已经走新 provider。
 

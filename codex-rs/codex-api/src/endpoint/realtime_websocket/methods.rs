@@ -44,7 +44,6 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
-use tracing::warn;
 use tungstenite::protocol::WebSocketConfig;
 use url::Url;
 
@@ -676,7 +675,7 @@ impl RealtimeWebsocketClient {
                         return Err(self.request_retry_interrupted());
                     }
                     let delay = backoff(self.provider.retry.base_delay, attempt + 1);
-                    warn!(
+                    debug!(
                         attempt = attempt + 1,
                         call_id,
                         delay_ms = delay.as_millis(),

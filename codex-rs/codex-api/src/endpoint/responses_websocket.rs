@@ -40,7 +40,6 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tracing::Instrument;
 use tracing::Span;
 use tracing::debug;
-use tracing::error;
 use tracing::info;
 use tracing::instrument;
 use tungstenite::extensions::ExtensionsConfig;
@@ -471,10 +470,7 @@ async fn connect_websocket(
             );
             (stream, response)
         }
-        Err(err) => {
-            error!("failed to connect to websocket: {err}, url: {url}");
-            return Err(map_ws_error(err, &url));
-        }
+        Err(err) => return Err(map_ws_error(err, &url)),
     };
 
     let reasoning_included = response.headers().contains_key(X_REASONING_INCLUDED_HEADER);

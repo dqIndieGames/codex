@@ -424,6 +424,7 @@ pub struct Codex {
 pub(crate) struct PendingProviderRuntimeRefresh {
     base_url: Option<String>,
     experimental_bearer_token: Option<String>,
+    requires_openai_auth: bool,
     force_service_tier_priority: bool,
     service_tier: Option<String>,
     fast_mode_enabled: bool,
@@ -1569,6 +1570,7 @@ impl Session {
         let PendingProviderRuntimeRefresh {
             base_url,
             experimental_bearer_token,
+            requires_openai_auth,
             force_service_tier_priority,
             service_tier,
             fast_mode_enabled,
@@ -1590,6 +1592,7 @@ impl Session {
                 .session_configuration
                 .provider
                 .experimental_bearer_token = experimental_bearer_token.clone();
+            state.session_configuration.provider.requires_openai_auth = requires_openai_auth;
             state.session_configuration.service_tier = service_tier.clone();
 
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
@@ -1597,6 +1600,7 @@ impl Session {
             config.service_tier = service_tier.clone();
             config.model_provider.base_url = base_url.clone();
             config.model_provider.experimental_bearer_token = experimental_bearer_token.clone();
+            config.model_provider.requires_openai_auth = requires_openai_auth;
             if let Err(err) = config
                 .features
                 .set_enabled(Feature::FastMode, fast_mode_enabled)
@@ -1606,6 +1610,7 @@ impl Session {
             if let Some(provider) = config.model_providers.get_mut(&provider_id) {
                 provider.base_url = base_url.clone();
                 provider.experimental_bearer_token = experimental_bearer_token.clone();
+                provider.requires_openai_auth = requires_openai_auth;
             }
             state.session_configuration.original_config_do_not_use = Arc::new(config);
             let new_config = notify_config_contributors
@@ -1682,6 +1687,7 @@ impl Session {
         Ok(PendingProviderRuntimeRefresh {
             base_url: provider.base_url.clone(),
             experimental_bearer_token: provider.experimental_bearer_token.clone(),
+            requires_openai_auth: provider.requires_openai_auth,
             force_service_tier_priority: cfg.force_service_tier_priority.unwrap_or(true),
             service_tier,
             fast_mode_enabled,
@@ -2139,6 +2145,16 @@ impl Session {
             .rollout_thread_trace
             .record_protocol_event(&event.msg);
         self.deliver_event_raw(event).await;
+    }
+
+    /// Send a live-only status event to clients without recording rollout,
+    /// protocol trace, history, fork, or replay state.
+    pub(crate) async fn send_transient_event(&self, turn_context: &TurnContext, msg: EventMsg) {
+        self.deliver_event_raw(Event {
+            id: turn_context.sub_id.clone(),
+            msg,
+        })
+        .await;
     }
 
     async fn deliver_event_raw(&self, event: Event) {
@@ -3947,6 +3963,24 @@ impl Session {
             additional_details: Some(additional_details),
         });
         self.send_event(turn_context, event).await;
+    }
+
+    pub(crate) async fn notify_transient_stream_error(
+        &self,
+        turn_context: &TurnContext,
+        message: impl Into<String>,
+        codex_error: CodexErr,
+    ) {
+        let additional_details = codex_error.to_string();
+        let codex_error_info = CodexErrorInfo::ResponseStreamDisconnected {
+            http_status_code: codex_error.http_status_code_value(),
+        };
+        let event = EventMsg::StreamError(StreamErrorEvent {
+            message: message.into(),
+            codex_error_info: Some(codex_error_info),
+            additional_details: Some(additional_details),
+        });
+        self.send_transient_event(turn_context, event).await;
     }
 
     /// Inject additional user input into the currently active turn.

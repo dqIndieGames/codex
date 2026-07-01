@@ -47,15 +47,15 @@ fn local3_first_turn_checklist_entries() -> Vec<(usize, String)> {
             let trimmed = line.trim();
             let (index, text) = trimmed.split_once(". ")?;
             let index = index.parse::<usize>().ok()?;
-            (1..=15).contains(&index).then(|| (index, text.to_string()))
+            (index > 0).then(|| (index, text.to_string()))
         })
         .collect::<Vec<_>>();
 
-    let expected_ids = (1..=15).collect::<Vec<_>>();
+    let expected_ids = (1..=entries.len()).collect::<Vec<_>>();
     let actual_ids = entries.iter().map(|(index, _)| *index).collect::<Vec<_>>();
     debug_assert_eq!(
         actual_ids, expected_ids,
-        "local3 checklist rows must contain numbered items 1..15 in order"
+        "local3 checklist rows must contain contiguous numbered items in order"
     );
 
     entries

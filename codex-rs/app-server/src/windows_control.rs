@@ -102,6 +102,7 @@ struct EffectiveProviderEntry {
     display_name: String,
     has_base_url: bool,
     has_experimental_bearer_token: bool,
+    requires_openai_auth: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -305,6 +306,7 @@ async fn handle_named_pipe_client(
     let response = match request.op.as_str() {
         "ping" => serde_json::to_vec(&PingResponse { ok: true }).map_err(io::Error::other)?,
         "refresh_all_loaded_threads" => {
+            refresh_models_manager_for_latest_config(&thread_manager, &config_api).await;
             let report = thread_manager
                 .refresh_loaded_provider_runtime(core_refresh_scope(
                     request.scope.unwrap_or(ControlRefreshScope::All),
@@ -313,12 +315,14 @@ async fn handle_named_pipe_client(
             serde_json::to_vec(&refresh_response_from_report(report)).map_err(io::Error::other)?
         }
         "refresh_console_loaded_threads" => {
+            refresh_models_manager_for_latest_config(&thread_manager, &config_api).await;
             let report = thread_manager
                 .refresh_loaded_provider_runtime(ProviderRuntimeRefreshScope::Console)
                 .await;
             serde_json::to_vec(&refresh_response_from_report(report)).map_err(io::Error::other)?
         }
         "refresh_app_server_loaded_threads" => {
+            refresh_models_manager_for_latest_config(&thread_manager, &config_api).await;
             let report = thread_manager
                 .refresh_loaded_provider_runtime(ProviderRuntimeRefreshScope::AppServer)
                 .await;
@@ -391,6 +395,19 @@ fn refresh_response_from_report(
                 message: failure.message,
             })
             .collect(),
+    }
+}
+
+async fn refresh_models_manager_for_latest_config(
+    thread_manager: &ThreadManager,
+    config_api: &ConfigRequestProcessor,
+) {
+    match config_api.load_latest_config(/*fallback_cwd*/ None).await {
+        Ok(config) => thread_manager.refresh_models_manager_from_config(&config).await,
+        Err(err) => warn!(
+            "failed to reload models manager before provider runtime refresh: {}",
+            err.message
+        ),
     }
 }
 
@@ -508,24 +525,19 @@ async fn apply_provider_runtime_from_effective_provider(
     let source_base_url = provider_field_as_non_empty_str(source_provider, "base_url");
     let source_experimental_bearer_token =
         provider_field_as_non_empty_str(source_provider, "experimental_bearer_token");
-    let mut missing_fields = Vec::new();
-    if source_base_url.is_none() {
-        missing_fields.push("base_url");
-    }
-    if source_experimental_bearer_token.is_none() {
-        missing_fields.push("experimental_bearer_token");
-    }
-    if !missing_fields.is_empty() {
+    let source_requires_openai_auth = source_provider
+        .as_object()
+        .and_then(|object| object.get("requires_openai_auth"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let Some(source_base_url) = source_base_url else {
         return apply_failure_response(
             "provider_field_missing",
             Some(source_provider_id.to_string()),
             Some(current_model_provider_id),
-            format!(
-                "source provider `{source_provider_id}` is missing required fields: {}",
-                missing_fields.join(", ")
-            ),
+            format!("source provider `{source_provider_id}` is missing required field: base_url"),
         );
-    }
+    };
     if !json_path_exists(
         &user_layer.config,
         &["model_providers", current_model_provider_id.as_str()],
@@ -548,7 +560,18 @@ async fn apply_provider_runtime_from_effective_provider(
             key_path: format!(
                 "model_providers.{current_model_provider_id}.experimental_bearer_token"
             ),
-            value: json!(source_experimental_bearer_token),
+            value: source_experimental_bearer_token.map_or(Value::Null, |value| json!(value)),
+            merge_strategy: MergeStrategy::Replace,
+        },
+        ConfigEdit {
+            key_path: format!("model_providers.{current_model_provider_id}.requires_openai_auth"),
+            value: json!(source_requires_openai_auth),
+            merge_strategy: MergeStrategy::Replace,
+        },
+        ConfigEdit {
+            key_path: format!("model_providers.{current_model_provider_id}.name"),
+            value: json!(provider_field_as_non_empty_str(source_provider, "name")
+                .unwrap_or(source_provider_id)),
             merge_strategy: MergeStrategy::Replace,
         },
         ConfigEdit {
@@ -590,6 +613,8 @@ async fn apply_provider_runtime_from_effective_provider(
             err.message,
         );
     }
+
+    refresh_models_manager_for_latest_config(thread_manager, config_api).await;
 
     let refresh_response = refresh_response_from_report(
         thread_manager
@@ -674,6 +699,11 @@ fn user_model_provider_entries(user_layer: &ConfigLayer) -> Option<Vec<Effective
                     "experimental_bearer_token",
                 )
                 .is_some(),
+                requires_openai_auth: provider
+                    .as_object()
+                    .and_then(|object| object.get("requires_openai_auth"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
             .collect(),
     )

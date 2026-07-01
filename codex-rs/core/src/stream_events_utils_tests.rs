@@ -412,14 +412,15 @@ fn local1_first_turn_checklist_prefix_contains_current_local3_items() {
         env!("CARGO_PKG_VERSION")
     )));
     assert!(prefix.contains("1. local3 版本身份保留"));
-    assert!(prefix.contains("3. 远端请求失败后的自动重试覆盖所有错误"));
+    assert!(prefix.contains("3. 远端请求失败后的自动重试覆盖所有远端/模型请求错误"));
     assert!(prefix.contains("9. Provider refresh 的刷新范围扩大到所有正在使用的 Codex 入口"));
     assert!(prefix.contains("10. Provider refresh 不是只在 retry 时才生效"));
-    assert!(prefix.contains("11. 连续 stream/WebSocket 断流后的恢复重点不是"));
+    assert!(prefix.contains("11. 所有 Codex retry 入口都要接入 hard route recovery"));
     assert!(prefix.contains("12. 无 live instance 的 provider 字段复制仍视为成功"));
     assert!(prefix.contains("13. app-server stderr 默认保持安静"));
     assert!(prefix.contains("14. `node_repl` MCP 自动继承当前 local3 CLI 路径"));
     assert!(prefix.contains("15. app-server 退出时只补已有 runtime 引用清理"));
+    assert!(prefix.contains("16. 配置了 `experimental_bearer_token` 的 provider"));
     assert!(!prefix.contains("-local2"));
     assert!(prefix.ends_with("\n\n"));
 }
@@ -428,7 +429,7 @@ fn local1_first_turn_checklist_prefix_contains_current_local3_items() {
 fn local3_first_turn_checklist_entries_match_numbered_document() {
     let entries = local3_first_turn_checklist_entries();
     let actual_ids = entries.iter().map(|(index, _)| *index).collect::<Vec<_>>();
-    let expected_ids = (1..=15).collect::<Vec<_>>();
+    let expected_ids = (1..=16).collect::<Vec<_>>();
 
     assert_eq!(actual_ids, expected_ids);
 }

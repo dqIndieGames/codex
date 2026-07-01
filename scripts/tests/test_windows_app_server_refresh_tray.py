@@ -335,6 +335,7 @@ experimental_bearer_token = "new-token"
 
 [model_providers.yunyi]
 base_url = "https://api.old.example/v1"
+requires_openai_auth = true
 experimental_bearer_token = "old-token"
 """.strip()
                 + "\n",
@@ -644,10 +645,87 @@ experimental_bearer_token = "old-token"
 
             updated = config_path.read_text(encoding="utf-8")
             self.assertIn('base_url = "https://api.manual.example/v1"', updated)
+            self.assertIn("requires_openai_auth = false", updated)
             self.assertIn('experimental_bearer_token = "manual-token"', updated)
             self.assertIn("force_service_tier_priority = false", updated)
             self.assertIn('service_tier = "fast"', updated)
             self.assertIn("fast_mode = true", updated)
+
+    def test_apply_provider_fallback_clears_token_for_auth_manager_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            codex_home = Path(tempdir)
+            registry_dir = codex_home / TRAY.APP_SERVERS_DIR_NAME
+            registry_dir.mkdir()
+            (codex_home / TRAY.CONFIG_TOML_FILE_NAME).write_text(
+                """
+model_provider = "yunyi"
+
+[model_providers.openai_http]
+name = "OpenAI HTTP only"
+base_url = "https://chatgpt.com/backend-api/codex"
+requires_openai_auth = true
+
+[model_providers.yunyi]
+name = "Yunyi"
+base_url = "https://api.old.example/v1"
+experimental_bearer_token = "old-token"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            summary = TRAY.apply_provider_runtime_smart_first(
+                "openai_http",
+                codex_home=codex_home,
+                registry_dir=registry_dir,
+                pid_checker=lambda _pid: True,
+                ping_checker=lambda _endpoint: True,
+                send_request=lambda _endpoint, _payload: {},
+            )
+
+            self.assertTrue(summary["ok"])
+            self.assertEqual(summary["apply_strategy"], "legacy_config_write_no_live_instances")
+            updated = (codex_home / TRAY.CONFIG_TOML_FILE_NAME).read_text(encoding="utf-8")
+            self.assertIn('name = "OpenAI HTTP only"', updated)
+            self.assertIn('base_url = "https://chatgpt.com/backend-api/codex"', updated)
+            yunyi_section = updated.split("[model_providers.yunyi]", 1)[1]
+            self.assertIn("requires_openai_auth = true", yunyi_section)
+            self.assertNotIn("experimental_bearer_token", yunyi_section)
+
+    def test_apply_runtime_values_without_token_restores_auth_manager_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            codex_home = Path(tempdir)
+            registry_dir = codex_home / TRAY.APP_SERVERS_DIR_NAME
+            registry_dir.mkdir()
+            config_path = codex_home / TRAY.CONFIG_TOML_FILE_NAME
+            config_path.write_text(
+                """
+model_provider = "yunyi"
+
+[model_providers.yunyi]
+base_url = "https://api.old.example/v1"
+requires_openai_auth = false
+experimental_bearer_token = "old-token"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            summary = TRAY.apply_runtime_values_to_current_provider(
+                "https://chatgpt.com/backend-api/codex",
+                "  ",
+                codex_home=codex_home,
+                registry_dir=registry_dir,
+                pid_checker=lambda _pid: True,
+                ping_checker=lambda _endpoint: True,
+                send_request=lambda _endpoint, _payload: {},
+            )
+
+            self.assertTrue(summary["ok"])
+            updated = config_path.read_text(encoding="utf-8")
+            self.assertIn('base_url = "https://chatgpt.com/backend-api/codex"', updated)
+            self.assertIn("requires_openai_auth = true", updated)
+            self.assertNotIn("experimental_bearer_token", updated)
 
     def test_apply_runtime_values_rejects_blank_base_url(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -816,9 +894,9 @@ base_url = "https://chatgpt.com/backend-api/codex"
             }
         )
 
-        self.assertEqual(title, "Codex URL/token Apply")
+        self.assertEqual(title, "Codex URL/token/AuthManager Apply")
         self.assertEqual(icon_flag, TRAY.MB_ICONINFORMATION)
-        self.assertIn("已应用新的 URL/token", message)
+        self.assertIn("已应用新的 URL/token/AuthManager", message)
         self.assertIn("来源配置: saki", message)
         self.assertIn("当前 provider: yunyi", message)
         self.assertNotIn("应用方式", message)
@@ -872,7 +950,7 @@ base_url = "https://chatgpt.com/backend-api/codex"
 
             _title, message, icon_flag = TRAY.format_apply_summary(summary)
             self.assertEqual(icon_flag, TRAY.MB_ICONWARNING)
-            self.assertIn("已应用新的 URL/token，但部分 Codex 实例刷新失败", message)
+            self.assertIn("已应用新的 URL/token/AuthManager，但部分 Codex 实例刷新失败", message)
             self.assertIn("failed_threads=1", message)
 
     def test_format_apply_summary_shows_smart_apply_failure_message(self) -> None:
@@ -912,7 +990,7 @@ base_url = "https://chatgpt.com/backend-api/codex"
         )
 
         self.assertEqual(icon_flag, TRAY.MB_ICONERROR)
-        self.assertIn("无法应用新的 URL/token", message)
+        self.assertIn("无法应用新的 URL/token/AuthManager", message)
         self.assertIn("current model_provider is not backed", message)
 
     def test_provider_display_rows_explain_copy_readiness(self) -> None:
@@ -960,21 +1038,21 @@ base_url = "https://chatgpt.com/backend-api/codex"
                 {
                     "provider_id": "local",
                     "display_name": "Local",
-                    "status": "缺少 token",
+                    "status": "无 token，将恢复 AuthManager",
                     "selected": True,
-                    "can_apply": False,
+                    "can_apply": True,
                 },
                 {
                     "provider_id": "openai_http",
                     "display_name": "OpenAI HTTP only",
-                    "status": "不支持",
+                    "status": "AuthManager provider，可用于填入",
                     "selected": False,
-                    "can_apply": False,
+                    "can_apply": True,
                 },
                 {
                     "provider_id": "empty",
                     "display_name": "Empty",
-                    "status": "缺少 base_url 和 token",
+                    "status": "缺少 base_url",
                     "selected": False,
                     "can_apply": False,
                 },
@@ -1023,7 +1101,7 @@ base_url = "https://chatgpt.com/backend-api/codex"
         self.assertEqual(model["live_instances_label"], "2")
         self.assertTrue(model["can_apply"])
         self.assertIsNone(model["apply_disabled_reason"])
-        self.assertEqual(model["provider_rows"][1]["status"], "缺少 token")
+        self.assertEqual(model["provider_rows"][1]["status"], "无 token，将恢复 AuthManager")
 
     def test_reload_catalog_from_tray_queues_reload_without_refresh(self) -> None:
         class AliveThread:

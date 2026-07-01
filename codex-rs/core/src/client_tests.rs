@@ -789,3 +789,32 @@ async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
     );
     assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
 }
+
+#[tokio::test]
+async fn realtime_websocket_setup_for_provider_token_ignores_chatgpt_auth_mode() {
+    let mut provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    provider.experimental_bearer_token = Some("provider-token".to_string());
+    let model_client = ModelClient::new(
+        Some(AuthManager::from_auth_for_testing(
+            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        )),
+        ThreadId::new(),
+        provider,
+        SessionSource::Exec,
+        /*model_verbosity*/ None,
+        /*force_service_tier_priority*/ true,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*item_ids_enabled*/ false,
+        /*attestation_provider*/ None,
+    );
+
+    let setup = model_client
+        .current_realtime_websocket_runtime_setup(/*realtime_ws_base_url*/ None)
+        .await
+        .expect("realtime websocket setup");
+
+    assert_eq!(setup.auth, None);
+    assert_eq!(setup.api_provider.base_url, "https://api.openai.com/v1");
+}

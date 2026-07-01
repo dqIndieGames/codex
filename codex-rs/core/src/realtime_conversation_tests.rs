@@ -1,11 +1,14 @@
 use super::RealtimeHandoffState;
 use super::RealtimeSessionKind;
+use super::realtime_api_key;
 use super::realtime_delegation_from_handoff;
 use super::realtime_request_headers;
 use super::realtime_text_from_handoff_request;
 use super::wrap_realtime_delegation_input;
 use async_channel::bounded;
 use codex_config::config_toml::RealtimeWsVersion;
+use codex_login::CodexAuth;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::protocol::RealtimeHandoffRequested;
 use codex_protocol::protocol::RealtimeTranscriptEntry;
 use pretty_assertions::assert_eq;
@@ -31,6 +34,20 @@ fn prefers_handoff_input_transcript_over_active_transcript() {
         realtime_text_from_handoff_request(&handoff),
         Some("ignored".to_string())
     );
+}
+
+#[test]
+fn realtime_api_key_prefers_provider_experimental_bearer_token() {
+    let auth = CodexAuth::from_api_key("auth-json-key");
+    let provider = ModelProviderInfo {
+        experimental_bearer_token: Some("provider-token".to_string()),
+        env_key: Some("CODEX_REALTIME_TEST_API_KEY".to_string()),
+        ..Default::default()
+    };
+
+    let key = realtime_api_key(Some(&auth), &provider).expect("realtime api key");
+
+    assert_eq!(key, "provider-token");
 }
 
 #[test]

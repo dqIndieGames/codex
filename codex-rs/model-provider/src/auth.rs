@@ -69,6 +69,10 @@ pub(crate) fn auth_manager_for_provider(
     auth_manager: Option<Arc<AuthManager>>,
     provider: &ModelProviderInfo,
 ) -> Option<Arc<AuthManager>> {
+    if provider.experimental_bearer_token_is_non_empty() {
+        return None;
+    }
+
     match provider.auth.clone() {
         Some(config) => Some(AuthManager::external_bearer_only(config)),
         None => auth_manager,
@@ -98,12 +102,12 @@ pub(crate) fn resolve_provider_auth(
 fn bearer_auth_for_provider(
     provider: &ModelProviderInfo,
 ) -> codex_protocol::error::Result<Option<BearerAuthProvider>> {
-    if let Some(api_key) = provider.api_key()? {
-        return Ok(Some(BearerAuthProvider::new(api_key)));
+    if let Some(token) = provider.experimental_bearer_token_non_empty() {
+        return Ok(Some(BearerAuthProvider::new(token)));
     }
 
-    if let Some(token) = provider.experimental_bearer_token.clone() {
-        return Ok(Some(BearerAuthProvider::new(token)));
+    if let Some(api_key) = provider.api_key()? {
+        return Ok(Some(BearerAuthProvider::new(api_key)));
     }
 
     Ok(None)
@@ -135,6 +139,24 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn experimental_bearer_token_takes_precedence_over_env_key() {
+        let mut provider =
+            create_oss_provider_with_base_url("http://localhost:11434/v1", WireApi::Responses);
+        provider.env_key = Some("LOCAL3_MISSING_PROVIDER_API_KEY".to_string());
+        provider.experimental_bearer_token = Some("provider-token".to_string());
+
+        let auth = resolve_provider_auth(/*auth*/ None, &provider).expect("provider token wins");
+        let headers = auth.to_auth_headers();
+
+        assert_eq!(
+            headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer provider-token")
+        );
+    }
 
     #[test]
     fn unauthenticated_auth_provider_adds_no_headers() {

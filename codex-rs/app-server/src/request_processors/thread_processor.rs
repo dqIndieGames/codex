@@ -667,6 +667,7 @@ impl ThreadRequestProcessor {
         &self,
         params: ThreadProviderRuntimeRefreshAllLoadedParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.refresh_models_manager_for_latest_config().await;
         let report = self
             .thread_manager
             .refresh_loaded_provider_runtime(core_provider_runtime_refresh_scope(params.scope))
@@ -801,6 +802,7 @@ impl ThreadRequestProcessor {
         &self,
         params: ThreadProviderRuntimeRefreshParams,
     ) -> Result<ThreadProviderRuntimeRefreshResponse, JSONRPCErrorError> {
+        self.refresh_models_manager_for_latest_config().await;
         let (thread_id, thread) = self.load_thread(&params.thread_id).await?;
         let status = thread
             .refresh_provider_runtime()
@@ -824,6 +826,15 @@ impl ThreadRequestProcessor {
             thread_id: thread_id.to_string(),
             status,
         })
+    }
+
+    async fn refresh_models_manager_for_latest_config(&self) {
+        match self.config_manager.load_latest_config(/*fallback_cwd*/ None).await {
+            Ok(config) => self.thread_manager.refresh_models_manager_from_config(&config).await,
+            Err(err) => warn!(
+                "failed to reload models manager before provider runtime refresh: {err}"
+            ),
+        }
     }
 
     pub(super) async fn acquire_thread_list_state_permit(

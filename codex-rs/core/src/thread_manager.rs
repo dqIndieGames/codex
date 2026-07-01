@@ -35,13 +35,18 @@ use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_models_manager::manager::ModelsManager;
+use codex_models_manager::manager::ModelsManagerFuture;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
+use codex_models_manager::ModelsManagerConfig;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
@@ -81,6 +86,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use tokio::sync::TryLockError;
 use tokio::sync::broadcast;
 use tracing::instrument;
 use tracing::warn;
@@ -306,7 +312,7 @@ pub(crate) struct ThreadManagerState {
     threads: Arc<RwLock<HashMap<ThreadId, Arc<CodexThread>>>>,
     thread_created_tx: broadcast::Sender<ThreadId>,
     auth_manager: Arc<AuthManager>,
-    models_manager: SharedModelsManager,
+    models_manager: Arc<RefreshableModelsManager>,
     environment_manager: Arc<EnvironmentManager>,
     skills_service: Arc<SkillsService>,
     plugins_manager: Arc<PluginsManager>,
@@ -333,6 +339,99 @@ pub fn build_models_manager(
         config.codex_home.to_path_buf(),
         config.model_catalog.clone(),
     )
+}
+
+#[derive(Debug)]
+struct RefreshableModelsManager {
+    inner: std::sync::RwLock<SharedModelsManager>,
+}
+
+impl RefreshableModelsManager {
+    fn new(inner: SharedModelsManager) -> Self {
+        Self {
+            inner: std::sync::RwLock::new(inner),
+        }
+    }
+
+    fn current(&self) -> SharedModelsManager {
+        self.inner
+            .read()
+            .expect("refreshable models manager lock poisoned")
+            .clone()
+    }
+
+    fn replace(&self, inner: SharedModelsManager) {
+        *self
+            .inner
+            .write()
+            .expect("refreshable models manager lock poisoned") = inner;
+    }
+}
+
+impl ModelsManager for RefreshableModelsManager {
+    fn list_models(
+        &self,
+        refresh_strategy: RefreshStrategy,
+    ) -> ModelsManagerFuture<'_, Vec<ModelPreset>> {
+        let manager = self.current();
+        Box::pin(async move { manager.list_models(refresh_strategy).await })
+    }
+
+    fn raw_model_catalog(
+        &self,
+        refresh_strategy: RefreshStrategy,
+    ) -> ModelsManagerFuture<'_, ModelsResponse> {
+        let manager = self.current();
+        Box::pin(async move { manager.raw_model_catalog(refresh_strategy).await })
+    }
+
+    fn get_remote_models(&self) -> ModelsManagerFuture<'_, Vec<ModelInfo>> {
+        let manager = self.current();
+        Box::pin(async move { manager.get_remote_models().await })
+    }
+
+    fn try_get_remote_models(&self) -> Result<Vec<ModelInfo>, TryLockError> {
+        self.current().try_get_remote_models()
+    }
+
+    fn auth_manager(&self) -> Option<&AuthManager> {
+        None
+    }
+
+    fn build_available_models(&self, remote_models: Vec<ModelInfo>) -> Vec<ModelPreset> {
+        self.current().build_available_models(remote_models)
+    }
+
+    fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
+        self.current().list_collaboration_modes()
+    }
+
+    fn try_list_models(&self) -> Result<Vec<ModelPreset>, TryLockError> {
+        self.current().try_list_models()
+    }
+
+    fn get_default_model<'a>(
+        &'a self,
+        model: &'a Option<String>,
+        refresh_strategy: RefreshStrategy,
+    ) -> ModelsManagerFuture<'a, String> {
+        let manager = self.current();
+        Box::pin(async move { manager.get_default_model(model, refresh_strategy).await })
+    }
+
+    fn get_model_info<'a>(
+        &'a self,
+        model: &'a str,
+        config: &'a ModelsManagerConfig,
+    ) -> ModelsManagerFuture<'a, ModelInfo> {
+        let manager = self.current();
+        Box::pin(async move { manager.get_model_info(model, config).await })
+    }
+
+    fn refresh_if_new_etag(&self, etag: String) -> ModelsManagerFuture<'_, ()> {
+        let manager = self.current();
+        Box::pin(async move { manager.refresh_if_new_etag(etag).await })
+    }
 }
 
 pub fn thread_store_from_config(
@@ -393,7 +492,10 @@ impl ThreadManager {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
                 thread_created_tx,
-                models_manager: build_models_manager(config, auth_manager.clone()),
+                models_manager: Arc::new(RefreshableModelsManager::new(build_models_manager(
+                    config,
+                    auth_manager.clone(),
+                ))),
                 environment_manager,
                 skills_service,
                 plugins_manager,
@@ -497,8 +599,10 @@ impl ThreadManager {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
                 thread_created_tx,
-                models_manager: create_model_provider(provider, Some(auth_manager.clone()))
-                    .models_manager(codex_home, /*config_model_catalog*/ None),
+                models_manager: Arc::new(RefreshableModelsManager::new(
+                    create_model_provider(provider, Some(auth_manager.clone()))
+                        .models_manager(codex_home, /*config_model_catalog*/ None),
+                )),
                 environment_manager,
                 skills_service,
                 plugins_manager,
@@ -579,7 +683,14 @@ impl ThreadManager {
     }
 
     pub fn get_models_manager(&self) -> SharedModelsManager {
-        self.state.models_manager.clone()
+        let manager: SharedModelsManager = self.state.models_manager.clone();
+        manager
+    }
+
+    pub async fn refresh_models_manager_from_config(&self, config: &Config) {
+        let models_manager = build_models_manager(config, self.state.auth_manager.clone());
+        models_manager.list_models(RefreshStrategy::Online).await;
+        self.state.models_manager.replace(models_manager);
     }
 
     pub async fn list_models(&self, refresh_strategy: RefreshStrategy) -> Vec<ModelPreset> {
@@ -1626,6 +1737,7 @@ impl ThreadManagerState {
                 forked_from_thread_id,
             )
             .await;
+        let models_manager: SharedModelsManager = self.models_manager.clone();
         let CodexSpawnOk {
             codex, thread_id, ..
         } = Box::pin(Codex::spawn(CodexSpawnArgs {
@@ -1633,7 +1745,7 @@ impl ThreadManagerState {
             user_instructions,
             installation_id: self.installation_id.clone(),
             auth_manager,
-            models_manager: Arc::clone(&self.models_manager),
+            models_manager,
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),
             plugins_manager: Arc::clone(&self.plugins_manager),

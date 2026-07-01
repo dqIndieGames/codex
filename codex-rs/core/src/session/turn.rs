@@ -1612,7 +1612,7 @@ async fn emit_request_retry_status_event(
     max_attempts: u64,
     details: String,
 ) {
-    sess.send_event(
+    sess.send_transient_event(
         turn_context,
         EventMsg::StreamError(StreamErrorEvent {
             message: request_retry_message_for_status(status, retry_number, max_attempts),
@@ -1630,7 +1630,7 @@ async fn emit_transport_request_retry_status_event(
     max_attempts: u64,
     details: String,
 ) {
-    sess.send_event(
+    sess.send_transient_event(
         turn_context,
         EventMsg::StreamError(StreamErrorEvent {
             message: transport_retry_status_message(retry_number, max_attempts),

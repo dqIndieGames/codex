@@ -152,7 +152,11 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     /// Returns provider configuration adapted for the API client.
     fn api_provider(&self) -> ModelProviderFuture<'_, codex_protocol::error::Result<Provider>> {
         Box::pin(async move {
-            let auth = self.auth().await;
+            let auth = if self.info().experimental_bearer_token_is_non_empty() {
+                None
+            } else {
+                self.auth().await
+            };
             self.info()
                 .to_api_provider(auth.as_ref().map(CodexAuth::auth_mode))
         })
@@ -227,6 +231,10 @@ impl ModelProvider for ConfiguredModelProvider {
     }
 
     fn supports_attestation(&self) -> bool {
+        if self.info.experimental_bearer_token_is_non_empty() {
+            return false;
+        }
+
         self.auth_manager
             .as_ref()
             .and_then(|auth_manager| auth_manager.auth_cached())
@@ -235,6 +243,10 @@ impl ModelProvider for ConfiguredModelProvider {
 
     fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>> {
         Box::pin(async move {
+            if self.info.experimental_bearer_token_is_non_empty() {
+                return None;
+            }
+
             match self.auth_manager.as_ref() {
                 Some(auth_manager) => auth_manager.auth().await,
                 None => None,
@@ -244,6 +256,13 @@ impl ModelProvider for ConfiguredModelProvider {
 
     fn account_state(&self) -> ProviderAccountResult {
         let account = if self.info.requires_openai_auth {
+            if self.info.experimental_bearer_token_is_non_empty() {
+                return Ok(ProviderAccountState {
+                    account: None,
+                    requires_openai_auth: false,
+                });
+            }
+
             self.auth_manager
                 .as_ref()
                 .and_then(|auth_manager| {
@@ -286,20 +305,26 @@ impl ModelProvider for ConfiguredModelProvider {
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
+        let auth_manager = if self.info.experimental_bearer_token_is_non_empty() {
+            None
+        } else {
+            self.auth_manager.clone()
+        };
+
         match config_model_catalog {
             Some(model_catalog) => Arc::new(StaticModelsManager::new(
-                self.auth_manager.clone(),
+                auth_manager,
                 model_catalog,
             )),
             None => {
                 let endpoint = Arc::new(OpenAiModelsEndpoint::new(
                     self.info.clone(),
-                    self.auth_manager.clone(),
+                    auth_manager.clone(),
                 ));
                 Arc::new(OpenAiModelsManager::new(
                     codex_home,
                     endpoint,
-                    self.auth_manager.clone(),
+                    auth_manager,
                 ))
             }
         }
@@ -663,6 +688,37 @@ mod tests {
         );
         assert_eq!(catalog.models[0].service_tiers, Vec::new());
         assert_eq!(catalog.models[0].default_service_tier, None);
+    }
+
+    #[tokio::test]
+    async fn experimental_bearer_token_provider_ignores_auth_manager_state() {
+        let mut provider_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        provider_info.experimental_bearer_token = Some("provider-token".to_string());
+        let provider = create_model_provider(
+            provider_info,
+            Some(AuthManager::from_auth_for_testing(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            )),
+        );
+
+        assert!(provider.auth_manager().is_none());
+        assert_eq!(provider.auth().await, None);
+        assert!(!provider.supports_attestation());
+        assert_eq!(
+            provider.account_state(),
+            Ok(ProviderAccountState {
+                account: None,
+                requires_openai_auth: false,
+            })
+        );
+        assert_eq!(
+            provider
+                .api_provider()
+                .await
+                .expect("provider token API provider")
+                .base_url,
+            "https://api.openai.com/v1"
+        );
     }
 
     #[tokio::test]

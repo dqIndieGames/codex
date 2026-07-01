@@ -8,9 +8,6 @@ use crate::session::turn_context::TurnContext;
 use crate::util::backoff;
 use crate::util::cap_retry_delay;
 use codex_protocol::error::CodexErr;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::WarningEvent;
-use tracing::warn;
 
 const STREAM_RETRY_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
@@ -33,7 +30,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
     client_session: &mut ModelClientSession,
     sess: &Session,
     turn_context: &TurnContext,
-    request: ResponsesStreamRequest,
+    _request: ResponsesStreamRequest,
     allow_route_recovery: bool,
 ) -> Result<(), CodexErr> {
     if client_session.provider_runtime_changed() {
@@ -54,11 +51,10 @@ pub(crate) async fn handle_retryable_response_stream_error(
             &turn_context.model_info,
         )
     {
-        sess.send_event(
+        sess.notify_transient_stream_error(
             turn_context,
-            EventMsg::Warning(WarningEvent {
-                message: format!("Falling back from WebSockets to HTTPS transport. {err:#}"),
-            }),
+            format!("Falling back from WebSockets to HTTPS transport. {err:#}"),
+            err,
         )
         .await;
         *retries = 0;
@@ -79,17 +75,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
             }
             _ => backoff(retry_count),
         });
-        log_retry(
-            request,
-            turn_context,
-            &err,
-            display_retry_count,
-            display_max_retries,
-            delay,
-        );
-
         // Surface every visible retry so the user-facing count remains continuous from 1.
-        sess.notify_stream_error(
+        sess.notify_transient_stream_error(
             turn_context,
             transport_retry_status_message(display_retry_count, display_max_retries),
             err,
@@ -171,41 +158,6 @@ async fn sleep_stream_retry_delay(
         }
 
         tokio::time::sleep((delay - elapsed).min(STREAM_RETRY_INTERRUPT_POLL_INTERVAL)).await;
-    }
-}
-
-fn log_retry(
-    request: ResponsesStreamRequest,
-    turn_context: &TurnContext,
-    err: &CodexErr,
-    retries: u64,
-    max_retries: u64,
-    delay: Duration,
-) {
-    match request {
-        ResponsesStreamRequest::Sampling => {
-            warn!(
-                retry = %retry_status_suffix(retries, max_retries),
-                "stream disconnected - retrying sampling request in {delay:?}...",
-            );
-        }
-        ResponsesStreamRequest::LocalCompaction => {
-            warn!(
-                turn_id = %turn_context.sub_id,
-                retry = %retry_status_suffix(retries, max_retries),
-                compact_error = %err,
-                "local compaction stream failed; retrying request in {delay:?}..."
-            );
-        }
-        ResponsesStreamRequest::RemoteCompactionV2 => {
-            warn!(
-                turn_id = %turn_context.sub_id,
-                retries,
-                max_retries,
-                compact_error = %err,
-                "remote compaction v2 stream failed; retrying request after delay"
-            );
-        }
     }
 }
 
