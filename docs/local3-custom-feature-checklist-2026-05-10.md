@@ -7,7 +7,9 @@
 
 3. 远端请求失败后的自动重试覆盖所有远端/模型请求错误，不能有错误类型豁免，保持更耐用、更少打断的体验；原来只有部分远端错误会按白名单重试，修改后所有由模型服务、HTTP、SSE、WebSocket、compact 或其他 Codex 请求链路返回的错误都进入普通自动重试，任何旧 `is_retryable=false`、状态码、错误码、协议层映射或错误分类都不能绕过 retry；`Selected model is at capacity. Please try a different model.`、context window、usage/quota、policy 等服务端返回错误也必须按同一 retry budget 处理；所有 retry 等待间隔最高 `8s`，包括 HTTP 请求 retry、stream/WebSocket retry、compact retry 和服务端 `Retry-After` 建议等待；中间失败不写入历史，只保留可见重连提示和可诊断信息，这样用户在模型容量、临时鉴权、网络、服务抖动或其他远端异常时更少看到终态失败，也不会被越来越长的本地重试等待卡住。
 
-4. 重试期间的可见提示、日志噪声和统计口径保持平衡；原来中间态可能刷屏或让诊断信息丢失，修改后用户仍能看到首次重连、重试次数、重试详情等提示，日志不再被中间失败刷屏，同时 retry metrics 继续保留，这样用户界面更安静，排查问题时仍有统计依据。
+4. 重试期间的可见提示、日志噪声和统计口径保持平衡；原来中间态可能刷屏或让诊断信息丢失，修改后用户仍能看到首次重连、重试次数、重试详情等提示，但所有 `willRetry=true`、`EventMsg::StreamError`、HTTP request retry、stream/WebSocket reconnect 和 compact retry 的中间失败默认不得以 `warn!` / `error!` 写入普通运行日志或 app-server stderr，也不应生成每次 retry 一条的高噪日志；只有最终失败、用户显式开启 debug/trace 诊断、或低频汇总型诊断才允许落日志，同时 retry metrics/counter 继续保留，这样用户界面和后台日志更安静，排查问题时仍有统计依据。
+
+   - retry 中间态目标清单：retry 中间态就应该只是“内部继续重试 + TUI 上同一个状态栏数字增加”。除了必要的网络重试、等待、一次轻量状态通知、TUI 覆盖刷新和 metrics 计数，不应该再写日志、写历史、进 fork、进 replay 或污染上下文。当前源码已经避免了大部分历史/fork 污染，但还需要去掉 retry 中间态 `warn!`，并且如果想做得更干净，应该把 retry 从普通事件链改成真正的 transient status update。
 
 5. 历史会话默认跨 provider 可发现，并且继续旧线程时使用当前顶层 provider；原来历史入口可能按 provider 收窄，修改后历史列表、最近会话、resume picker 和 `codex://threads/{id}` deep link 默认都能看到旧会话，并且恢复旧线程时不能因历史 `session_meta.model_provider`、已加载线程快照或 `thread/read` 回退继续粘住旧 provider；若旧线程 provider 与当前顶层 provider 不一致，应重建/换绑到当前 provider，做不到时必须明确提示仍在使用旧 provider，这样用户切换 provider 后仍能找回并继续之前的工作，不会误以为已经走新 provider。
 
@@ -30,6 +32,17 @@
 14. `node_repl` MCP 自动继承当前 local3 CLI 路径；原来用户实际运行 local3 时，`node_repl` 子进程仍可能使用 AppData 自动安装目录里的旧版 `codex.exe`，修改后启动 `[mcp_servers.node_repl]` 时会把 `CODEX_CLI_PATH` 指向当前 `Config.codex_self_exe`，这样 refresh、诊断和 app-server 行为跟当前 local3 版本保持一致。
 
 15. app-server 退出时只补已有 runtime 引用清理，不做激进进程管理；原来 shutdown 路径可能漏释放外部 auth、apps runtime 和 skills watcher 引用，修改后主 app-server 退出时补调已有 `clear_runtime_references()`，但不新增 idle timeout，不全局扫描或 kill `node_repl.exe`，也不因为当前 UI 订阅断开就杀仍加载的线程，这样能减少残留引用，同时避免误伤正在使用的会话。
+
+16. 配置了 `experimental_bearer_token` 的 provider 必须按 provider 自带 token 隔离发请求，不受全局 `AuthManager` 登录态影响；原来请求头虽然优先使用 `experimental_bearer_token`，但 `provider.auth()`、`api_provider()`、`/models` 拉取、auth mode、ChatGPT account header、FedRAMP header 或 attestation 仍可能间接受 `auth.json` / ChatGPT / API key 登录态污染，导致外部 provider 请求被错误路由或错误鉴权。修改后只要当前 provider 有非空 `experimental_bearer_token`，聊天请求、compact 请求、模型列表请求、WebSocket / HTTP 请求和 provider runtime refresh 后的下一次请求都必须使用 `Authorization: Bearer <experimental_bearer_token>`，并且不得从 `AuthManager` 读取或继承 auth mode、账号 ID、FedRAMP、ChatGPT backend routing 或 attestation；没有 `experimental_bearer_token` 的 provider 继续保持原有 AuthManager 行为。这样用户切到自带 bearer token 的外部 provider 时，请求只按该 provider 的 token 和 base_url 发送，不会被本机 Codex 登录态带偏。
+
+## 2026-07-01 experimental_bearer_token provider 隔离思路
+
+- 目标口径：`experimental_bearer_token` 是 provider-scoped 静态 bearer token；用户能感知到的是“这个 provider 自己的 token 管自己”，不因为本机登录了 ChatGPT 或保存了 `auth.json` 就改用 ChatGPT 路由、账号 header 或其他全局登录上下文。
+- 最小 hook 边界：不要只在 `resolve_provider_auth()` 修 `Authorization` header；还要阻断 `ConfiguredModelProvider::auth()`、`OpenAiModelsEndpoint::auth()` 和 `supports_attestation()` 从全局 `AuthManager` 取值。否则 header 可能是 provider token，但 `auth_mode`、默认 base_url、`/models`、ChatGPT account header 或 attestation 仍会被 AuthManager 间接污染。
+- 推荐实现打法：当 `experimental_bearer_token` 非空时，provider 请求路径直接把当前 provider auth 视为 `None`，再由 provider 配置生成 `BearerAuthProvider`；保留没有 token 的 provider 继续走原 AuthManager。若要支持运行时移除 token 后回退 AuthManager，优先在 `auth()` 等读取点早返回，不要过早丢弃保存的 AuthManager 引用。
+- Provider runtime refresh 必须支持“带非空 `experimental_bearer_token` 的 provider”与“无 `experimental_bearer_token`、继续使用 AuthManager 的 provider”这两类代表 provider 之间双向互刷；`openai_http ↔ yunyi` 只是当前配置里的代表样例，不应写死为特例。无 token provider 刷新到有 token provider 时，下一次请求必须进入 provider-scoped bearer token 隔离模式；有 token provider 刷新回无 token provider 时，必须清掉旧 provider token 状态并恢复原有 AuthManager / `auth.json` 行为。实现上不能把 AuthManager 全局丢弃，只能在当前 provider 有非空 token 时让请求读取点临时忽略 AuthManager；这样任意两个同类 provider 互相 refresh 都不会串旧 token、旧 auth mode、ChatGPT account header、FedRAMP header 或 attestation。
+- 优先级与空值：`experimental_bearer_token` 必须按非空字符串判断；空字符串不能生成 `Bearer ` 坏请求。若同一 provider 同时配置 `env_key` 与 `experimental_bearer_token`，必须明确最终优先级；local3 目标是“有非空 `experimental_bearer_token` 就优先用它”，避免环境变量或 AuthManager 抢占。
+- 验收清单：即使 AuthManager 内存在 ChatGPT token、API key、account id 或 FedRAMP 状态，聊天请求、`/models` 请求和 refresh 后请求都必须只带 `Authorization: Bearer <experimental_bearer_token>`；不得带 AuthManager 派生的 `ChatGPT-Account-ID`、FedRAMP header 或 ChatGPT auth mode；移除 `experimental_bearer_token` 后，未配置 token 的 provider 旧行为不回归破坏。
 
 ## 2026-05-30 回归经验
 
