@@ -873,7 +873,42 @@ async fn remote_compact_request_retry_route_recovers_after_three_failures() -> R
     wait_for_turn_complete(&codex).await;
 
     codex.submit(Op::Compact).await?;
-    wait_for_turn_complete(&codex).await;
+    let mut compact_retry_messages = Vec::new();
+    let mut compact_turn_complete = false;
+    while compact_retry_messages.len() < 3 || !compact_turn_complete {
+        let event = tokio::time::timeout(Duration::from_secs(10), codex.next_event())
+            .await
+            .expect("timeout waiting for compact retry/complete events")
+            .expect("event stream ended unexpectedly");
+        match event.msg {
+            EventMsg::StreamError(err)
+                if matches!(
+                    err.message.as_str(),
+                    "503 retry 1/5" | "503 retry 2/5" | "503 retry 3/5"
+                ) =>
+            {
+                compact_retry_messages.push(err);
+            }
+            EventMsg::TurnComplete(_) => {
+                compact_turn_complete = true;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        compact_retry_messages
+            .iter()
+            .map(|err| err.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["503 retry 1/5", "503 retry 2/5", "503 retry 3/5"]
+    );
+    assert!(
+        compact_retry_messages[0]
+            .additional_details
+            .as_deref()
+            .unwrap_or_default()
+            .contains("HTTP 503 Service Unavailable")
+    );
 
     codex
         .submit(Op::UserInput {

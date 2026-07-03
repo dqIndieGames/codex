@@ -667,6 +667,7 @@ impl ModelClient {
         session_telemetry: &SessionTelemetry,
         compaction_trace: &CompactionTraceContext,
         responses_metadata: &CodexResponsesMetadata,
+        request_retry_notifier: Option<RequestRetryNotifier>,
     ) -> Result<Vec<ResponseItem>> {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
@@ -692,6 +693,7 @@ impl ModelClient {
                 ),
                 RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
                 self.state.auth_env_telemetry.clone(),
+                request_retry_notifier.clone(),
                 Some(self.request_retry_guard(runtime_generation)),
                 Some(request_route_recovery.clone()),
                 request_route_retry_count_consumed,
@@ -830,6 +832,7 @@ impl ModelClient {
                 ),
                 RequestRouteTelemetry::for_endpoint(REALTIME_CALLS_ENDPOINT),
                 self.state.auth_env_telemetry.clone(),
+                None,
                 Some(self.request_retry_guard(runtime_generation)),
                 None,
                 0,
@@ -893,6 +896,7 @@ impl ModelClient {
                 ),
                 RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
                 self.state.auth_env_telemetry.clone(),
+                None,
                 Some(self.request_retry_guard(runtime_generation)),
                 None,
                 0,
@@ -1002,6 +1006,7 @@ impl ModelClient {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         auth_env_telemetry: AuthEnvTelemetry,
+        request_retry_notifier: Option<RequestRetryNotifier>,
         request_retry_guard: Option<RequestRetryGuard>,
         request_route_recovery: Option<RequestRouteRecovery>,
         request_retry_display_offset: u64,
@@ -1011,7 +1016,7 @@ impl ModelClient {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
-            None,
+            request_retry_notifier,
             request_retry_guard,
             request_route_recovery,
             request_retry_display_offset,

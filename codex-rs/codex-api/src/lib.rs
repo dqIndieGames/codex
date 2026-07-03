@@ -53,6 +53,8 @@ pub use crate::endpoint::RealtimeCallClient;
 pub use crate::endpoint::RealtimeCallResponse;
 pub use crate::endpoint::RealtimeEventParser;
 pub use crate::endpoint::RealtimeOutputModality;
+pub use crate::endpoint::RealtimeRetryEvent;
+pub use crate::endpoint::RealtimeRetryNotifier;
 pub use crate::endpoint::RealtimeSessionConfig;
 pub use crate::endpoint::RealtimeSessionMode;
 pub use crate::endpoint::RealtimeWebsocketClient;

@@ -50,10 +50,10 @@ use tracing::info;
 // Mirror the current /responses/compact retained-message default while the
 // server-side path remains the reference implementation.
 const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
-// Compact attempts can run much longer than normal turns, so keep the ordinary
-// per-transport retry budget smaller than the general Responses stream loop.
-// Capacity errors are promoted to persistent route recovery inside the shared
-// retry helper.
+// Compact attempts can run much longer than normal turns. When the provider is
+// in bounded retry mode, keep the ordinary per-transport retry budget smaller
+// than the general Responses stream loop. In unbounded retry mode, preserve the
+// unbounded budget so every third failure can still trigger route recovery.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
 const REMOTE_COMPACTION_V2_FALLBACK_RETRY_THRESHOLD: u64 = 3;
 
@@ -446,11 +446,9 @@ async fn collect_compaction_output(
 }
 
 fn remote_compaction_v2_stream_retry_budget(provider: &ModelProviderInfo) -> Option<u64> {
-    Some(
-        provider
-            .stream_max_retries()
-            .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES),
-    )
+    provider
+        .stream_retry_budget()
+        .map(|budget| budget.min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES))
 }
 
 fn build_v2_compacted_history(
@@ -622,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_compaction_v2_retry_budget_stays_finite_when_provider_uses_default_retries() {
+    fn remote_compaction_v2_retry_budget_caps_finite_provider_budget() {
         let provider = ModelProviderInfo {
             stream_max_retries: None,
             ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)

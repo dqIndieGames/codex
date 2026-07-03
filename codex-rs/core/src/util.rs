@@ -7,7 +7,7 @@ use tracing::error;
 
 const INITIAL_DELAY_MS: u64 = 200;
 const BACKOFF_FACTOR: f64 = 2.0;
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(8);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// Emit structured feedback metadata as key/value pairs.
 ///

@@ -3,6 +3,8 @@ use std::sync::OnceLock;
 
 use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
+use crate::client::RequestRetryEvent;
+use crate::client::RequestRetryNotifier;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::InitialContextInjection;
@@ -32,7 +34,9 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CompactedItem;
+use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::StreamErrorEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
 use tokio_util::sync::CancellationToken;
@@ -256,6 +260,7 @@ async fn run_remote_compact_task_inner_impl(
             &turn_context.session_telemetry,
             &compaction_trace,
             &responses_metadata,
+            Some(compact_request_retry_notifier(sess, turn_context)),
         )
         .await?;
     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
@@ -298,6 +303,66 @@ async fn run_remote_compact_task_inner_impl(
     sess.emit_turn_item_completed(turn_context, compaction_item)
         .await;
     Ok(())
+}
+
+fn compact_request_retry_notifier(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+) -> RequestRetryNotifier {
+    let sess = Arc::clone(sess);
+    let turn_context = Arc::clone(turn_context);
+    Arc::new(move |event: RequestRetryEvent| {
+        let sess = Arc::clone(&sess);
+        let turn_context = Arc::clone(&turn_context);
+        tokio::spawn(async move {
+            let codex_error_info = match event.status {
+                Some(http::StatusCode::PAYMENT_REQUIRED) => CodexErrorInfo::UsageLimitExceeded,
+                Some(status) => CodexErrorInfo::ResponseTooManyFailedAttempts {
+                    http_status_code: Some(status.as_u16()),
+                },
+                None => CodexErrorInfo::ResponseStreamDisconnected {
+                    http_status_code: None,
+                },
+            };
+            let message = match event.status {
+                Some(status) => compact_request_retry_message(
+                    status.as_u16(),
+                    event.retry_number,
+                    event.max_attempts,
+                ),
+                None => compact_transport_retry_message(event.retry_number, event.max_attempts),
+            };
+            sess.send_transient_event(
+                &turn_context,
+                EventMsg::StreamError(StreamErrorEvent {
+                    message,
+                    codex_error_info: Some(codex_error_info),
+                    additional_details: Some(event.details),
+                }),
+            )
+            .await;
+        });
+    })
+}
+
+fn compact_request_retry_message(
+    status_code: u16,
+    retry_number: u64,
+    max_attempts: u64,
+) -> String {
+    if max_attempts == u64::MAX {
+        format!("{status_code} retry {retry_number} (unbounded)")
+    } else {
+        format!("{status_code} retry {retry_number}/{max_attempts}")
+    }
+}
+
+fn compact_transport_retry_message(retry_number: u64, max_attempts: u64) -> String {
+    if max_attempts == u64::MAX {
+        format!("Reconnecting... {retry_number} (unbounded)")
+    } else {
+        format!("Reconnecting... {retry_number}/{max_attempts}")
+    }
 }
 
 pub(crate) async fn process_compacted_history(

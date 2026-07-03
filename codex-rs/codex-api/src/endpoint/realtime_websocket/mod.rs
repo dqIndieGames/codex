@@ -7,6 +7,8 @@ mod protocol_common;
 mod protocol_v1;
 mod protocol_v2;
 
+pub use methods::RealtimeRetryEvent;
+pub use methods::RealtimeRetryNotifier;
 pub use methods::RealtimeWebsocketClient;
 pub use methods::RealtimeWebsocketConnection;
 pub use methods::RealtimeWebsocketEvents;

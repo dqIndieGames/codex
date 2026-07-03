@@ -39,6 +39,8 @@ use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
+use futures::SinkExt;
+use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -47,8 +49,11 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 use wiremock::Match;
 use wiremock::Mock;
@@ -412,6 +417,128 @@ async fn conversation_start_audio_text_close_round_trip() -> Result<()> {
     ));
 
     server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_start_retry_status_is_transient_and_route_recovers() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await.expect("accept failed handshake");
+            drop(stream);
+        }
+
+        let (stream, _) = listener.accept().await.expect("accept successful handshake");
+        let mut ws = accept_async(stream).await.expect("accept ws");
+        let first = ws
+            .next()
+            .await
+            .expect("first msg")
+            .expect("first msg ok")
+            .into_text()
+            .expect("text");
+        let first_json: Value = serde_json::from_str(&first).expect("json");
+        assert_eq!(first_json["type"], "session.update");
+
+        ws.send(Message::Text(
+            json!({
+                "type": "session.updated",
+                "session": {"id": "sess_retry_recovery", "instructions": "backend prompt"}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send session.updated");
+    });
+
+    let api_server = start_mock_server().await;
+    let realtime_base_url = format!("http://{addr}");
+    let mut builder = test_codex().with_config(move |config| {
+        config.experimental_realtime_ws_base_url = Some(realtime_base_url);
+        config.experimental_realtime_ws_startup_context = Some(String::new());
+        config.experimental_realtime_ws_backend_prompt = Some("backend prompt".to_string());
+        config.model_provider.request_max_retries = Some(3);
+    });
+    let test = builder.build(&api_server).await?;
+
+    test.codex
+        .submit(Op::RealtimeConversationStart(ConversationStartParams {
+            client_managed_handoffs: false,
+            codex_responses_as_items: false,
+            codex_response_item_prefix: None,
+            codex_response_handoff_prefix: None,
+            model: Some("realtime-test-model".to_string()),
+            output_modality: RealtimeOutputModality::Audio,
+            include_startup_context: false,
+            prompt: Some(Some("backend prompt".to_string())),
+            realtime_session_id: None,
+            transport: None,
+            version: None,
+            voice: None,
+        }))
+        .await?;
+
+    let mut retry_messages = Vec::new();
+    let mut session_updated = None;
+    while retry_messages.len() < 3 || session_updated.is_none() {
+        let event = timeout(Duration::from_secs(10), test.codex.next_event())
+            .await
+            .expect("timeout waiting for realtime retry/start events")
+            .expect("event stream ended unexpectedly");
+        match event.msg {
+            EventMsg::StreamError(err)
+                if err.message == "Reconnecting realtime... 1/3"
+                    || err.message == "Reconnecting realtime... 2/3"
+                    || err.message == "Reconnecting realtime... 3/3; route recovery 1" =>
+            {
+                retry_messages.push(err);
+            }
+            EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
+                payload:
+                    RealtimeEvent::SessionUpdated {
+                        realtime_session_id,
+                        ..
+                    },
+            }) => {
+                session_updated = Some(realtime_session_id);
+            }
+            EventMsg::Error(err) => panic!("realtime start failed: {}", err.message),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        retry_messages
+            .iter()
+            .map(|err| err.message.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Reconnecting realtime... 1/3",
+            "Reconnecting realtime... 2/3",
+            "Reconnecting realtime... 3/3; route recovery 1",
+        ]
+    );
+    assert!(
+        retry_messages[0]
+            .additional_details
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Realtime websocket connection failed")
+    );
+    assert!(
+        retry_messages[2]
+            .additional_details
+            .as_deref()
+            .unwrap_or_default()
+            .contains("route recovery generation 1")
+    );
+    assert_eq!(session_updated.as_deref(), Some("sess_retry_recovery"));
+
+    server.await?;
     Ok(())
 }
 

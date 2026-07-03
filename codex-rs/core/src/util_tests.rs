@@ -24,15 +24,15 @@ fn feedback_tags_macro_compiles() {
 }
 
 #[test]
-fn core_backoff_is_capped_to_eight_seconds() {
-    assert_eq!(backoff(12), std::time::Duration::from_secs(8));
+fn core_backoff_is_capped_to_five_seconds() {
+    assert_eq!(backoff(12), std::time::Duration::from_secs(5));
 }
 
 #[test]
-fn explicit_retry_delay_is_capped_to_eight_seconds() {
+fn explicit_retry_delay_is_capped_to_five_seconds() {
     assert_eq!(
         cap_retry_delay(std::time::Duration::from_secs(30)),
-        std::time::Duration::from_secs(8)
+        std::time::Duration::from_secs(5)
     );
 }
 

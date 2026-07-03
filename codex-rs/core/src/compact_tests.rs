@@ -277,7 +277,7 @@ fn should_use_remote_compact_task_for_azure_provider() {
 }
 
 #[test]
-fn local_compaction_retry_budget_stays_finite_when_provider_uses_default_retries() {
+fn local_compaction_retry_budget_uses_provider_stream_retry_budget() {
     let provider = ModelProviderInfo {
         stream_max_retries: None,
         ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
@@ -285,7 +285,7 @@ fn local_compaction_retry_budget_stays_finite_when_provider_uses_default_retries
 
     assert_eq!(
         local_compaction_stream_retry_budget(&provider),
-        Some(provider.stream_max_retries())
+        provider.stream_retry_budget()
     );
 }
 

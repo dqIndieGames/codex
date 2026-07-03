@@ -1,6 +1,8 @@
 #![allow(clippy::expect_used)]
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use codex_api::Provider;
@@ -8,6 +10,8 @@ use codex_api::RealtimeAudioFrame;
 use codex_api::RealtimeEvent;
 use codex_api::RealtimeEventParser;
 use codex_api::RealtimeOutputModality;
+use codex_api::RealtimeRetryEvent;
+use codex_api::RealtimeRetryNotifier;
 use codex_api::RealtimeSessionConfig;
 use codex_api::RealtimeSessionMode;
 use codex_api::RealtimeWebsocketClient;
@@ -339,6 +343,203 @@ async fn try_realtime_ws_connect_webrtc_sideband_retry() -> Result<(), String> {
         .await
         .map_err(|err| format!("server task join: {err}"))??;
     Ok(())
+}
+
+#[tokio::test]
+async fn realtime_ws_connect_retries_and_route_recovers_after_three_failures() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await.expect("accept failed handshake");
+            drop(stream);
+        }
+
+        let (stream, _) = listener.accept().await.expect("accept successful handshake");
+        let mut ws = accept_async(stream).await.expect("accept ws");
+        let first = ws
+            .next()
+            .await
+            .expect("first msg")
+            .expect("first msg ok")
+            .into_text()
+            .expect("text");
+        let first_json: Value = serde_json::from_str(&first).expect("json");
+        assert_eq!(first_json["type"], "session.update");
+
+        ws.send(Message::Text(
+            json!({
+                "type": "session.updated",
+                "session": {"id": "sess_after_recovery", "instructions": "backend prompt"}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send session.updated");
+    });
+
+    let retry_events = Arc::new(Mutex::new(Vec::<RealtimeRetryEvent>::new()));
+    let notifier: RealtimeRetryNotifier = {
+        let retry_events = Arc::clone(&retry_events);
+        Arc::new(move |event| {
+            retry_events.lock().expect("retry events lock").push(event);
+        })
+    };
+    let mut provider = test_provider(format!("http://{addr}"));
+    provider.retry.max_attempts = 3;
+    provider.retry.base_delay = Duration::from_millis(1);
+
+    let client =
+        RealtimeWebsocketClient::new(provider).with_request_retry_notifier(Some(notifier));
+    let connection = client
+        .connect(
+            RealtimeSessionConfig {
+                instructions: "backend prompt".to_string(),
+                model: Some("realtime-test-model".to_string()),
+                session_id: Some("conv_123".to_string()),
+                event_parser: RealtimeEventParser::V1,
+                session_mode: RealtimeSessionMode::Conversational,
+                output_modality: RealtimeOutputModality::Audio,
+                voice: RealtimeVoice::Cove,
+            },
+            HeaderMap::new(),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("connect after retry recovery");
+
+    let event = connection
+        .next_event()
+        .await
+        .expect("next event")
+        .expect("event");
+    assert_eq!(
+        event,
+        RealtimeEvent::SessionUpdated {
+            realtime_session_id: "sess_after_recovery".to_string(),
+            instructions: Some("backend prompt".to_string()),
+        }
+    );
+
+    let retry_events = retry_events.lock().expect("retry events lock");
+    assert_eq!(retry_events.len(), 3);
+    assert_eq!(retry_events[0].retry_number, 1);
+    assert_eq!(retry_events[0].recovery_generation, 0);
+    assert_eq!(retry_events[1].retry_number, 2);
+    assert_eq!(retry_events[1].recovery_generation, 0);
+    assert_eq!(retry_events[2].retry_number, 3);
+    assert_eq!(retry_events[2].max_attempts, 3);
+    assert_eq!(retry_events[2].recovery_generation, 1);
+    assert!(
+        retry_events[2]
+            .details
+            .contains("route recovery generation 1")
+    );
+    drop(retry_events);
+
+    connection.close().await.expect("close");
+    server.await.expect("server task");
+}
+
+#[tokio::test]
+async fn realtime_ws_sideband_retries_and_route_recovers_after_three_failures() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await.expect("accept failed handshake");
+            drop(stream);
+        }
+
+        let (stream, _) = listener.accept().await.expect("accept successful handshake");
+        let mut ws = accept_async(stream).await.expect("accept ws");
+        let first = ws
+            .next()
+            .await
+            .expect("first msg")
+            .expect("first msg ok")
+            .into_text()
+            .expect("text");
+        let first_json: Value = serde_json::from_str(&first).expect("json");
+        assert_eq!(first_json["type"], "session.update");
+
+        ws.send(Message::Text(
+            json!({
+                "type": "session.updated",
+                "session": {"id": "sess_sideband_after_recovery", "instructions": "backend prompt"}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send session.updated");
+    });
+
+    let retry_events = Arc::new(Mutex::new(Vec::<RealtimeRetryEvent>::new()));
+    let notifier: RealtimeRetryNotifier = {
+        let retry_events = Arc::clone(&retry_events);
+        Arc::new(move |event| {
+            retry_events.lock().expect("retry events lock").push(event);
+        })
+    };
+    let mut provider = test_provider(format!("http://{addr}"));
+    provider.retry.max_attempts = 3;
+    provider.retry.base_delay = Duration::from_millis(1);
+
+    let client =
+        RealtimeWebsocketClient::new(provider).with_request_retry_notifier(Some(notifier));
+    let connection = client
+        .connect_webrtc_sideband(
+            RealtimeSessionConfig {
+                instructions: "backend prompt".to_string(),
+                model: Some("realtime-test-model".to_string()),
+                session_id: Some("conv_123".to_string()),
+                event_parser: RealtimeEventParser::RealtimeV2,
+                session_mode: RealtimeSessionMode::Conversational,
+                output_modality: RealtimeOutputModality::Audio,
+                voice: RealtimeVoice::Marin,
+            },
+            "rtc_test",
+            HeaderMap::new(),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("connect sideband after retry recovery");
+
+    let event = connection
+        .next_event()
+        .await
+        .expect("next event")
+        .expect("event");
+    assert_eq!(
+        event,
+        RealtimeEvent::SessionUpdated {
+            realtime_session_id: "sess_sideband_after_recovery".to_string(),
+            instructions: Some("backend prompt".to_string()),
+        }
+    );
+
+    let retry_events = retry_events.lock().expect("retry events lock");
+    assert_eq!(retry_events.len(), 3);
+    assert_eq!(
+        retry_events
+            .iter()
+            .map(|event| event.retry_number)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(retry_events[2].max_attempts, 3);
+    assert_eq!(retry_events[2].recovery_generation, 1);
+    assert!(
+        retry_events[2]
+            .details
+            .contains("route recovery generation 1")
+    );
+    drop(retry_events);
+
+    connection.close().await.expect("close");
+    server.await.expect("server task");
 }
 
 #[tokio::test]

@@ -15,6 +15,8 @@ use codex_api::Provider as ApiProvider;
 use codex_api::RealtimeAudioFrame;
 use codex_api::RealtimeEvent;
 use codex_api::RealtimeEventParser;
+use codex_api::RealtimeRetryEvent;
+use codex_api::RealtimeRetryNotifier;
 use codex_api::RealtimeSessionConfig;
 use codex_api::RealtimeSessionMode;
 use codex_api::RealtimeWebsocketClient;
@@ -47,6 +49,7 @@ use codex_protocol::protocol::RealtimeConversationSdpEvent;
 use codex_protocol::protocol::RealtimeConversationStartedEvent;
 use codex_protocol::protocol::RealtimeHandoffRequested;
 use codex_protocol::protocol::RealtimeOutputModality;
+use codex_protocol::protocol::StreamErrorEvent;
 use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::RealtimeVoicesList;
 use http::HeaderMap;
@@ -255,6 +258,7 @@ struct RealtimeStart {
     model_client: ModelClient,
     session_telemetry: SessionTelemetry,
     websocket_client: RealtimeWebsocketClient,
+    websocket_retry_notifier: Option<RealtimeRetryNotifier>,
     sdp: Option<String>,
 }
 
@@ -313,6 +317,7 @@ impl RealtimeConversationManager {
             model_client,
             session_telemetry,
             websocket_client,
+            websocket_retry_notifier,
             sdp,
         } = start;
         let event_parser = session_config.event_parser;
@@ -358,7 +363,8 @@ impl RealtimeConversationManager {
             let client = RealtimeWebsocketClient::new(call.sideband_api_provider)
                 .with_request_retry_guard(Some(
                     model_client.request_retry_guard(call.provider_runtime_generation),
-                ));
+                ))
+                .with_request_retry_notifier(websocket_retry_notifier.clone());
             let task = spawn_webrtc_sideband_input_task(RealtimeWebrtcSidebandInputTask {
                 client,
                 session_config,
@@ -946,6 +952,49 @@ fn validate_realtime_voice(version: RealtimeWsVersion, voice: RealtimeVoice) -> 
     )))
 }
 
+fn realtime_retry_notifier(sess: &Arc<Session>, sub_id: &str) -> RealtimeRetryNotifier {
+    let sess = Arc::clone(sess);
+    let sub_id = sub_id.to_string();
+    Arc::new(move |event: RealtimeRetryEvent| {
+        let sess = Arc::clone(&sess);
+        let sub_id = sub_id.clone();
+        tokio::spawn(async move {
+            sess.send_transient_event_for_sub_id(
+                &sub_id,
+                EventMsg::StreamError(StreamErrorEvent {
+                    message: realtime_retry_status_message(
+                        event.retry_number,
+                        event.max_attempts,
+                        event.recovery_generation,
+                    ),
+                    codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
+                        http_status_code: None,
+                    }),
+                    additional_details: Some(event.details),
+                }),
+            )
+            .await;
+        });
+    })
+}
+
+fn realtime_retry_status_message(
+    retry_number: u64,
+    max_attempts: u64,
+    recovery_generation: u64,
+) -> String {
+    let retry_status = if max_attempts == u64::MAX {
+        format!("{retry_number} (unbounded)")
+    } else {
+        format!("{retry_number}/{max_attempts}")
+    };
+    if recovery_generation == 0 {
+        format!("Reconnecting realtime... {retry_status}")
+    } else {
+        format!("Reconnecting realtime... {retry_status}; route recovery {recovery_generation}")
+    }
+}
+
 async fn handle_start_inner(
     sess: &Arc<Session>,
     sub_id: &str,
@@ -993,7 +1042,8 @@ async fn handle_start_inner(
                 sess.services
                     .model_client
                     .request_retry_guard(runtime_setup.provider_runtime_generation),
-            ));
+            ))
+            .with_request_retry_notifier(Some(realtime_retry_notifier(sess, sub_id)));
         let realtime_call_api_provider = realtime_call_base_url.as_ref().map(|base_url| {
             let mut api_provider = runtime_setup.api_provider.clone();
             api_provider.base_url = base_url.clone();
@@ -1014,6 +1064,7 @@ async fn handle_start_inner(
             model_client: sess.services.model_client.clone(),
             session_telemetry: sess.services.session_telemetry.clone(),
             websocket_client,
+            websocket_retry_notifier: Some(realtime_retry_notifier(sess, sub_id)),
             sdp,
         };
         match sess.conversation.start(start).await {

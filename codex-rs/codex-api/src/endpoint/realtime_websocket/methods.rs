@@ -26,6 +26,7 @@ use futures::StreamExt;
 use http::HeaderMap;
 use http::HeaderValue;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -49,7 +50,18 @@ use url::Url;
 
 const REALTIME_WIRE_LOG_TARGET: &str = "codex_api::realtime_websocket::wire";
 const REALTIME_RETRY_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
 pub type RequestRetryGuard = Arc<dyn Fn() -> bool + Send + Sync>;
+
+#[derive(Debug, Clone)]
+pub struct RealtimeRetryEvent {
+    pub retry_number: u64,
+    pub max_attempts: u64,
+    pub recovery_generation: u64,
+    pub details: String,
+}
+
+pub type RealtimeRetryNotifier = Arc<dyn Fn(RealtimeRetryEvent) + Send + Sync>;
 
 struct WsStream {
     tx_command: mpsc::Sender<WsCommand>,
@@ -579,13 +591,15 @@ fn contains_transcript_entry(entries: &[RealtimeTranscriptEntry], role: &str, te
 pub struct RealtimeWebsocketClient {
     provider: Provider,
     request_retry_guard: Option<RequestRetryGuard>,
+    request_retry_notifier: Option<RealtimeRetryNotifier>,
 }
 
 impl RealtimeWebsocketClient {
     pub fn new(provider: Provider) -> Self {
         Self {
-            provider: provider.with_retry_max_attempts(/*max_attempts*/ 1),
+            provider,
             request_retry_guard: None,
+            request_retry_notifier: None,
         }
     }
 
@@ -594,6 +608,14 @@ impl RealtimeWebsocketClient {
         guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ) -> Self {
         self.request_retry_guard = guard;
+        self
+    }
+
+    pub fn with_request_retry_notifier(
+        mut self,
+        notifier: Option<RealtimeRetryNotifier>,
+    ) -> Self {
+        self.request_retry_notifier = notifier;
         self
     }
 
@@ -629,6 +651,67 @@ impl RealtimeWebsocketClient {
         }
     }
 
+    async fn connect_with_retry<F, Fut>(
+        &self,
+        transport_label: &'static str,
+        mut connect_once: F,
+    ) -> Result<RealtimeWebsocketConnection, ApiError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<RealtimeWebsocketConnection, ApiError>>,
+    {
+        let max_attempts = self.provider.retry.max_attempts;
+        let mut retry_number = 0_u64;
+        let mut recovery_generation = 0_u64;
+
+        loop {
+            if !self.can_continue_request_retry() {
+                return Err(self.request_retry_interrupted());
+            }
+
+            match connect_once().await {
+                Ok(connection) => return Ok(connection),
+                Err(err)
+                    if retry_number < max_attempts
+                        && should_retry_realtime_connect_error(&err) =>
+                {
+                    retry_number = retry_number.saturating_add(1);
+                    if retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0 {
+                        recovery_generation = recovery_generation.saturating_add(1);
+                        debug!(
+                            retry_number,
+                            recovery_generation,
+                            transport = transport_label,
+                            "realtime websocket retry route recovery activated"
+                        );
+                    }
+                    if let Some(notifier) = self.request_retry_notifier.as_ref() {
+                        notifier(RealtimeRetryEvent {
+                            retry_number,
+                            max_attempts,
+                            recovery_generation,
+                            details: realtime_retry_details(
+                                transport_label,
+                                recovery_generation,
+                            ),
+                        });
+                    }
+                    let delay = backoff(self.provider.retry.base_delay, retry_number);
+                    debug!(
+                        retry_number,
+                        max_attempts,
+                        recovery_generation,
+                        delay_ms = delay.as_millis(),
+                        transport = transport_label,
+                        "realtime websocket connect failed; retrying"
+                    );
+                    self.sleep_retry_delay(delay).await?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     pub async fn connect(
         &self,
         config: RealtimeSessionConfig,
@@ -642,7 +725,14 @@ impl RealtimeWebsocketClient {
             config.event_parser,
             config.session_mode,
         )?;
-        self.connect_realtime_websocket_url(ws_url, config, extra_headers, default_headers)
+        self.connect_with_retry("websocket", || {
+            self.connect_realtime_websocket_url(
+                ws_url.clone(),
+                config.clone(),
+                extra_headers.clone(),
+                default_headers.clone(),
+            )
+        })
             .await
     }
 
@@ -656,40 +746,15 @@ impl RealtimeWebsocketClient {
         // The WebRTC call already exists; this loop only retries joining its sideband control
         // socket. Once joined, the returned connection is the same reader/writer state that the
         // ordinary websocket start path uses.
-        for attempt in 0..=self.provider.retry.max_attempts {
-            if !self.can_continue_request_retry() {
-                return Err(self.request_retry_interrupted());
-            }
-            let result = self
-                .connect_webrtc_sideband_once(
-                    config.clone(),
-                    call_id,
-                    extra_headers.clone(),
-                    default_headers.clone(),
-                )
-                .await;
-            match result {
-                Ok(connection) => return Ok(connection),
-                Err(err) if attempt < self.provider.retry.max_attempts => {
-                    if !self.can_continue_request_retry() {
-                        return Err(self.request_retry_interrupted());
-                    }
-                    let delay = backoff(self.provider.retry.base_delay, attempt + 1);
-                    debug!(
-                        attempt = attempt + 1,
-                        call_id,
-                        delay_ms = delay.as_millis(),
-                        "realtime sideband websocket connect failed; retrying: {err}"
-                    );
-                    self.sleep_retry_delay(delay).await?;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        Err(ApiError::Stream(
-            "realtime sideband websocket retry loop exhausted".to_string(),
-        ))
+        self.connect_with_retry("WebRTC sideband websocket", || {
+            self.connect_webrtc_sideband_once(
+                config.clone(),
+                call_id,
+                extra_headers.clone(),
+                default_headers.clone(),
+            )
+        })
+        .await
     }
 
     async fn connect_webrtc_sideband_once(
@@ -781,6 +846,30 @@ impl RealtimeWebsocketClient {
             )
             .await?;
         Ok(connection)
+    }
+}
+
+fn should_retry_realtime_connect_error(error: &ApiError) -> bool {
+    match error {
+        ApiError::Stream(message) => {
+            message.starts_with("failed to connect realtime websocket")
+                || message.starts_with("failed to send realtime request")
+                || message == "realtime websocket connection is closed"
+        }
+        ApiError::Transport(TransportError::Timeout | TransportError::Network(_))
+        | ApiError::Retryable { .. }
+        | ApiError::ServerOverloaded => true,
+        _ => false,
+    }
+}
+
+fn realtime_retry_details(transport_label: &str, recovery_generation: u64) -> String {
+    if recovery_generation == 0 {
+        format!("Realtime {transport_label} connection failed; retrying.")
+    } else {
+        format!(
+            "Realtime {transport_label} connection failed; retrying after route recovery generation {recovery_generation}."
+        )
     }
 }
 

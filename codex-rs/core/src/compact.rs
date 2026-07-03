@@ -699,7 +699,7 @@ async fn drain_to_completed(
 }
 
 fn local_compaction_stream_retry_budget(provider: &ModelProviderInfo) -> Option<u64> {
-    Some(provider.stream_max_retries())
+    provider.stream_retry_budget()
 }
 
 #[cfg(test)]

@@ -2148,6 +2148,15 @@ impl Session {
         .await;
     }
 
+    /// Send a live-only status event for operations that are not tied to a turn context.
+    pub(crate) async fn send_transient_event_for_sub_id(&self, sub_id: &str, msg: EventMsg) {
+        self.deliver_event_raw(Event {
+            id: sub_id.to_string(),
+            msg,
+        })
+        .await;
+    }
+
     async fn deliver_event_raw(&self, event: Event) {
         // Record the last known agent status.
         if let Some(status) = agent_status_from_event(&event.msg) {
