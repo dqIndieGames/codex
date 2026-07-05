@@ -669,12 +669,11 @@ impl RealtimeWebsocketClient {
 
             match connect_once().await {
                 Ok(connection) => return Ok(connection),
-                Err(err) if retry_number < max_attempts && should_retry_realtime_connect_error(&err) =>
+                Err(err)
+                    if retry_number < max_attempts && should_retry_realtime_connect_error(&err) =>
                 {
                     retry_number = retry_number.saturating_add(1);
-                    if route_recovery_allowed
-                        && retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0
-                    {
+                    if route_recovery_allowed && retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0 {
                         recovery_generation = recovery_generation.saturating_add(1);
                         debug!(
                             retry_number,
