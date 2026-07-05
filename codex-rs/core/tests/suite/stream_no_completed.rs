@@ -191,3 +191,71 @@ async fn rotates_prompt_cache_key_after_three_early_closes() {
 
     server.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clears_turn_state_after_route_recovery_from_three_early_closes() {
+    skip_if_no_network!();
+
+    let server = responses::start_mock_server().await;
+    let incomplete_sse = sse_incomplete();
+    let completed_sse = responses::sse_completed("resp_ok");
+    let request_log = responses::mount_response_sequence(
+        &server,
+        vec![
+            responses::sse_response(incomplete_sse.clone())
+                .insert_header("x-codex-turn-state", "ts-stream"),
+            responses::sse_response(incomplete_sse.clone()),
+            responses::sse_response(incomplete_sse),
+            responses::sse_response(completed_sse),
+        ],
+    )
+    .await;
+
+    let model_provider = streaming_sse_model_provider(&server.uri(), /*stream_max_retries*/ 3);
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+        })
+        .build(&server)
+        .await
+        .unwrap();
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "expected three incomplete attempts followed by a recovered request"
+    );
+    assert_eq!(requests[0].header("x-codex-turn-state"), None);
+    assert_eq!(
+        requests[1].header("x-codex-turn-state"),
+        Some("ts-stream".to_string())
+    );
+    assert_eq!(
+        requests[2].header("x-codex-turn-state"),
+        Some("ts-stream".to_string())
+    );
+    assert_eq!(
+        requests[3].header("x-codex-turn-state"),
+        None,
+        "stream route recovery should clear stale turn-state on the recovered request"
+    );
+}

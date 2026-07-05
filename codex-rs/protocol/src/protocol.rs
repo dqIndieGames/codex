@@ -1365,7 +1365,7 @@ pub enum EventMsg {
     DeprecationNotice(DeprecationNoticeEvent),
 
     /// Notification that a model stream experienced an error or disconnect
-    /// and the system is handling it (e.g., retrying with backoff).
+    /// and the system is handling it (e.g., retrying the stream).
     StreamError(StreamErrorEvent),
 
     /// Notification that the agent is about to apply a code patch. Mirrors

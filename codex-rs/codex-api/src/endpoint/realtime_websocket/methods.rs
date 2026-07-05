@@ -16,7 +16,7 @@ use crate::endpoint::realtime_websocket::protocol::parse_realtime_event;
 use crate::error::ApiError;
 use crate::provider::Provider;
 use codex_client::TransportError;
-use codex_client::backoff;
+use codex_client::fixed_retry_delay;
 use codex_client::maybe_build_rustls_client_config_with_custom_ca;
 use codex_protocol::protocol::ConversationTextRole;
 use codex_protocol::protocol::RealtimeTranscriptDelta;
@@ -663,6 +663,7 @@ impl RealtimeWebsocketClient {
         let max_attempts = self.provider.retry.max_attempts;
         let mut retry_number = 0_u64;
         let mut recovery_generation = 0_u64;
+        let route_recovery_allowed = !is_chatgpt_codex_base_url(&self.provider.base_url);
 
         loop {
             if !self.can_continue_request_retry() {
@@ -676,7 +677,9 @@ impl RealtimeWebsocketClient {
                         && should_retry_realtime_connect_error(&err) =>
                 {
                     retry_number = retry_number.saturating_add(1);
-                    if retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0 {
+                    if route_recovery_allowed
+                        && retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0
+                    {
                         recovery_generation = recovery_generation.saturating_add(1);
                         debug!(
                             retry_number,
@@ -696,7 +699,7 @@ impl RealtimeWebsocketClient {
                             ),
                         });
                     }
-                    let delay = backoff(self.provider.retry.base_delay, retry_number);
+                    let delay = fixed_retry_delay();
                     debug!(
                         retry_number,
                         max_attempts,
@@ -871,6 +874,27 @@ fn realtime_retry_details(transport_label: &str, recovery_generation: u64) -> St
             "Realtime {transport_label} connection failed; retrying after route recovery generation {recovery_generation}."
         )
     }
+}
+
+fn is_chatgpt_codex_base_url(base_url: &str) -> bool {
+    let Some((scheme, rest)) = base_url.trim().split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("wss") {
+        return false;
+    }
+    let without_fragment = rest.split_once('#').map_or(rest, |(url, _)| url);
+    let without_query = without_fragment
+        .split_once('?')
+        .map_or(without_fragment, |(url, _)| url);
+    let (host, _) = without_query
+        .split_once('/')
+        .map_or((without_query, ""), |(host, path)| (host, path));
+    let host = host.split_once(':').map_or(host, |(host, _)| host);
+    host.eq_ignore_ascii_case("chatgpt.com")
+        || host
+            .to_ascii_lowercase()
+            .ends_with(".chatgpt.com")
 }
 
 fn merge_request_headers(
@@ -1575,6 +1599,30 @@ mod tests {
             url.as_str(),
             "ws://127.0.0.1:8011/v1/realtime?intent=quicksilver"
         );
+    }
+
+    #[test]
+    fn chatgpt_codex_base_url_detection_matches_realtime_route_recovery_gate() {
+        for url in [
+            "https://chatgpt.com/backend-api/codex",
+            "https://chatgpt.com/backend-api/codex/realtime",
+            "https://chatgpt.com/backend-api/codex-proxy",
+            "https://foo.chatgpt.com/backend-api/codex/realtime",
+            "https://chatgpt.com:8443/backend-api/codex/realtime",
+            "wss://chatgpt.com/backend-api/codex/realtime",
+        ] {
+            assert!(is_chatgpt_codex_base_url(url));
+        }
+
+        for url in [
+            "https://api.openai.com/v1",
+            "https://relay.example.com/backend-api/codex",
+            "https://chatgpt.com.evil.example/backend-api/codex",
+            "https://chatgpt.com.evil.example:443/backend-api/codex",
+            "http://chatgpt.com/backend-api/codex",
+        ] {
+            assert!(!is_chatgpt_codex_base_url(url));
+        }
     }
 
     #[test]

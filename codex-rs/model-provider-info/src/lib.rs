@@ -52,6 +52,32 @@ const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer su
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
+pub fn is_chatgpt_codex_base_url(base_url: &str) -> bool {
+    let Some((scheme, rest)) = split_url_scheme(base_url.trim()) else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("wss") {
+        return false;
+    }
+
+    let without_fragment = rest.split_once('#').map_or(rest, |(url, _)| url);
+    let without_query = without_fragment
+        .split_once('?')
+        .map_or(without_fragment, |(url, _)| url);
+    let (host, _) = without_query
+        .split_once('/')
+        .map_or((without_query, ""), |(host, path)| (host, path));
+    let host = host.split_once(':').map_or(host, |(host, _)| host);
+    host.eq_ignore_ascii_case("chatgpt.com")
+        || host
+            .to_ascii_lowercase()
+            .ends_with(".chatgpt.com")
+}
+
+fn split_url_scheme(url: &str) -> Option<(&str, &str)> {
+    url.split_once("://")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RetryMode {
     Bounded,

@@ -17,7 +17,7 @@ use codex_config::AbsolutePathBuf;
 use codex_config::CloudConfigBundle;
 use codex_config::CloudConfigBundleLoadError;
 use codex_config::CloudConfigBundleLoadErrorCode;
-use codex_core::util::backoff;
+use codex_core::util::fixed_retry_delay;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::RefreshTokenError;
@@ -355,7 +355,7 @@ where
                 max_attempts = CLOUD_CONFIG_BUNDLE_MAX_ATTEMPTS,
                 "Failed to fetch cloud config bundle; retrying"
             );
-            sleep(backoff(attempt as u64)).await;
+            sleep(fixed_retry_delay()).await;
             true
         } else {
             false
@@ -428,7 +428,7 @@ where
                             max_attempts = CLOUD_CONFIG_BUNDLE_MAX_ATTEMPTS,
                             "Failed to recover from unauthorized cloud config bundle request; retrying"
                         );
-                        sleep(backoff(attempt as u64)).await;
+                        sleep(fixed_retry_delay()).await;
                     }
                     return Ok(UnauthorizedRecoveryAction::RetryNextAttempt);
                 }

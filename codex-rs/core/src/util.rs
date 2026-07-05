@@ -2,12 +2,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use rand::Rng;
 use tracing::error;
 
-const INITIAL_DELAY_MS: u64 = 200;
-const BACKOFF_FACTOR: f64 = 2.0;
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
+pub const FIXED_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// Emit structured feedback metadata as key/value pairs.
 ///
@@ -83,15 +80,8 @@ pub(crate) fn emit_feedback_auth_recovery_tags(
     );
 }
 
-pub fn backoff(attempt: u64) -> Duration {
-    let exp = BACKOFF_FACTOR.powi(attempt.saturating_sub(1) as i32);
-    let base = (INITIAL_DELAY_MS as f64 * exp) as u64;
-    let jitter = rand::rng().random_range(0.9..1.1);
-    cap_retry_delay(Duration::from_millis((base as f64 * jitter) as u64))
-}
-
-pub(crate) fn cap_retry_delay(delay: Duration) -> Duration {
-    delay.min(MAX_RETRY_DELAY)
+pub fn fixed_retry_delay() -> Duration {
+    FIXED_RETRY_DELAY
 }
 
 pub(crate) fn error_or_panic(message: impl std::string::ToString) {

@@ -129,6 +129,7 @@ use codex_model_provider::create_model_provider;
 use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
+use codex_model_provider_info::is_chatgpt_codex_base_url;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_response_debug_context::extract_response_debug_context;
@@ -314,6 +315,7 @@ pub struct ModelClientSession {
     websocket_session: WebsocketSession,
     provider_runtime_generation: u64,
     route_recovery_generation: u64,
+    last_api_base_url: Option<String>,
     request_retry_notifier: Option<RequestRetryNotifier>,
     /// Turn state for sticky routing.
     ///
@@ -531,6 +533,7 @@ impl ModelClient {
             websocket_session: self.take_cached_websocket_session(),
             provider_runtime_generation: self.current_provider_runtime_generation(),
             route_recovery_generation: 0,
+            last_api_base_url: None,
             request_retry_notifier: None,
             turn_state: Arc::new(OnceLock::new()),
         }
@@ -662,7 +665,7 @@ impl ModelClient {
         &self,
         prompt: &Prompt,
         model_info: &ModelInfo,
-        turn_state: Option<Arc<OnceLock<String>>>,
+        mut turn_state: Option<Arc<OnceLock<String>>>,
         settings: CompactConversationRequestSettings,
         session_telemetry: &SessionTelemetry,
         compaction_trace: &CompactionTraceContext,
@@ -683,7 +686,8 @@ impl ModelClient {
                 .max_attempts
                 .saturating_sub(request_route_retry_count_consumed);
             let transport = ReqwestTransport::new(build_reqwest_client());
-            let request_route_recovery = RequestRouteRecovery::new(true);
+            let request_route_recovery =
+                RequestRouteRecovery::new(!is_chatgpt_codex_base_url(&api_provider.base_url));
             let request_telemetry = Self::build_request_telemetry(
                 session_telemetry,
                 AuthRequestTelemetryContext::new(
@@ -786,6 +790,7 @@ impl ModelClient {
                     request_route_retry_count_consumed = request_route_retry_count_consumed
                         .saturating_add(request_route_recovery.restart_retry_number());
                     route_recovery_generation = route_recovery_generation.saturating_add(1);
+                    turn_state = Some(Arc::new(OnceLock::new()));
                     self.store_cached_websocket_session(WebsocketSession::default());
                     continue;
                 }
@@ -1343,7 +1348,15 @@ impl ModelClientSession {
     }
 
     pub(crate) fn activate_retry_route_recovery(&mut self) {
+        if self
+            .last_api_base_url
+            .as_deref()
+            .is_some_and(is_chatgpt_codex_base_url)
+        {
+            return;
+        }
         self.route_recovery_generation = self.route_recovery_generation.saturating_add(1);
+        self.turn_state = Arc::new(OnceLock::new());
         self.reset_websocket_session();
     }
 
@@ -1354,6 +1367,7 @@ impl ModelClientSession {
 
         self.websocket_session = WebsocketSession::default();
         self.route_recovery_generation = 0;
+        self.last_api_base_url = None;
         self.turn_state = Arc::new(OnceLock::new());
         self.provider_runtime_generation = runtime_generation;
     }
@@ -1658,6 +1672,7 @@ impl ModelClientSession {
             let client_setup = self.client.current_client_setup().await?;
             self.sync_provider_runtime_generation(client_setup.provider_runtime_generation);
             let mut api_provider = client_setup.api_provider;
+            self.last_api_base_url = Some(api_provider.base_url.clone());
             api_provider.retry.max_attempts = api_provider
                 .retry
                 .max_attempts
@@ -1691,7 +1706,8 @@ impl ModelClientSession {
             let store = request.store;
             self.client
                 .prepare_response_items_for_request(&mut request.input, store);
-            let request_route_recovery = RequestRouteRecovery::new(true);
+            let request_route_recovery =
+                RequestRouteRecovery::new(!is_chatgpt_codex_base_url(&api_provider.base_url));
             let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
                 session_telemetry,
                 request_auth_context,
@@ -1819,6 +1835,7 @@ impl ModelClientSession {
         loop {
             let client_setup = self.client.current_client_setup().await?;
             self.sync_provider_runtime_generation(client_setup.provider_runtime_generation);
+            self.last_api_base_url = Some(client_setup.api_provider.base_url.clone());
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),

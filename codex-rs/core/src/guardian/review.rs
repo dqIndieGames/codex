@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::turn_timing::now_unix_timestamp_ms;
-use crate::util::backoff;
+use crate::util::fixed_retry_delay;
 
 use super::AUTO_REVIEW_DENIAL_WINDOW_SIZE;
 use super::GUARDIAN_REVIEW_TIMEOUT;
@@ -900,7 +900,7 @@ async fn wait_before_guardian_retry(
     deadline: Instant,
     external_cancel: Option<&CancellationToken>,
 ) -> Option<GuardianReviewError> {
-    let retry_delay = backoff(attempt_count as u64);
+    let retry_delay = fixed_retry_delay();
     let retry_at = (Instant::now() + retry_delay).min(deadline);
     tokio::select! {
         _ = sleep_until(retry_at) => {

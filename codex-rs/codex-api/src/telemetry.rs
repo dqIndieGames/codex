@@ -7,7 +7,7 @@ use codex_client::Response;
 use codex_client::RetryPolicy;
 use codex_client::StreamResponse;
 use codex_client::TransportError;
-use codex_client::backoff;
+use codex_client::fixed_retry_delay;
 use http::StatusCode;
 use std::future::Future;
 use std::sync::Arc;
@@ -151,11 +151,7 @@ where
                 if !can_continue_request_retry {
                     return Err(request_retry_interrupted_error(telemetry.as_ref()));
                 }
-                sleep_request_retry_delay(
-                    backoff(policy.base_delay, attempt + 1),
-                    telemetry.as_ref(),
-                )
-                .await?;
+                sleep_request_retry_delay(fixed_retry_delay(), telemetry.as_ref()).await?;
             }
             Err(err) => return Err(err),
         }

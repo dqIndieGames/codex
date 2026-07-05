@@ -5,8 +5,7 @@ use std::time::Duration;
 use crate::client::ModelClientSession;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
-use crate::util::backoff;
-use crate::util::cap_retry_delay;
+use crate::util::fixed_retry_delay;
 use codex_protocol::error::CodexErr;
 
 const STREAM_RETRY_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -69,12 +68,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
             client_session.activate_retry_route_recovery();
         }
         let display_max_retries = effective_retry_budget.unwrap_or(u64::MAX);
-        let delay = cap_retry_delay(match &err {
-            CodexErr::Stream(_, requested_delay) => {
-                requested_delay.unwrap_or_else(|| backoff(retry_count))
-            }
-            _ => backoff(retry_count),
-        });
+        let delay = response_stream_retry_delay(&err);
         // Surface every visible retry so the user-facing count remains continuous from 1.
         sess.notify_transient_stream_error(
             turn_context,
@@ -130,6 +124,10 @@ fn transport_retry_status_message(retries: u64, max_retries: u64) -> String {
     )
 }
 
+fn response_stream_retry_delay(_err: &CodexErr) -> Duration {
+    fixed_retry_delay()
+}
+
 fn next_display_retry_count(display_retries: &mut u64) -> u64 {
     *display_retries = (*display_retries).saturating_add(1);
     *display_retries
@@ -164,7 +162,10 @@ async fn sleep_stream_retry_delay(
 #[cfg(test)]
 mod tests {
     use super::next_display_retry_count;
+    use super::response_stream_retry_delay;
     use super::transport_retry_status_message;
+    use codex_protocol::error::CodexErr;
+    use std::time::Duration;
 
     #[test]
     fn visible_stream_retry_count_survives_internal_retry_reset() {
@@ -194,5 +195,27 @@ mod tests {
 
         assert_eq!(message, "Reconnecting... 6 (unbounded)");
         assert!(!message.contains(&u64::MAX.to_string()));
+    }
+
+    #[test]
+    fn stream_retry_delay_is_fixed_and_ignores_retry_after() {
+        let short_retry_after =
+            CodexErr::Stream("retry after short".to_string(), Some(Duration::from_millis(28)));
+        let long_retry_after =
+            CodexErr::Stream("retry after long".to_string(), Some(Duration::from_secs(35)));
+        let no_retry_after = CodexErr::Stream("no retry after".to_string(), None);
+
+        assert_eq!(
+            response_stream_retry_delay(&short_retry_after),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            response_stream_retry_delay(&long_retry_after),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            response_stream_retry_delay(&no_retry_after),
+            Duration::from_secs(5)
+        );
     }
 }

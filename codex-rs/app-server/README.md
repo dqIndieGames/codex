@@ -50,7 +50,7 @@ Backpressure behavior:
 
 - The server uses bounded queues between transport ingress, request processing, and outbound writes.
 - When request ingress is saturated, new requests are rejected with a JSON-RPC error code `-32001` and message `"Server overloaded; retry later."`.
-- Clients should treat this as retryable and use exponential backoff with jitter.
+- Clients should treat this as retryable and use the standard fixed 5 second retry cadence.
 
 ## Message Schema
 

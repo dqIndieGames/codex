@@ -1,11 +1,10 @@
 use crate::error::TransportError;
 use crate::request::Request;
-use rand::Rng;
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
 
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
+pub const FIXED_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -53,15 +52,8 @@ fn payment_required_body_is_usage_limit(body: Option<&str>) -> bool {
         || normalized.contains("daily spending limit reached")
 }
 
-pub fn backoff(base: Duration, attempt: u64) -> Duration {
-    if attempt == 0 {
-        return base.min(MAX_RETRY_DELAY);
-    }
-    let exp = 2u64.saturating_pow(attempt as u32 - 1);
-    let millis = base.as_millis() as u64;
-    let raw = millis.saturating_mul(exp);
-    let jitter: f64 = rand::rng().random_range(0.9..1.1);
-    Duration::from_millis((raw as f64 * jitter) as u64).min(MAX_RETRY_DELAY)
+pub fn fixed_retry_delay() -> Duration {
+    FIXED_RETRY_DELAY
 }
 
 pub async fn run_with_retry<T, F, Fut>(
@@ -82,7 +74,7 @@ where
                     .retry_on
                     .should_retry(&err, attempt, policy.max_attempts) =>
             {
-                sleep(backoff(policy.base_delay, attempt + 1)).await;
+                sleep(fixed_retry_delay()).await;
             }
             Err(err) => return Err(err),
         }
@@ -122,10 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn request_backoff_is_capped_to_five_seconds() {
-        assert_eq!(
-            backoff(Duration::from_millis(200), 32),
-            Duration::from_secs(5)
-        );
+    fn request_retry_delay_is_fixed_to_five_seconds() {
+        assert_eq!(fixed_retry_delay(), Duration::from_secs(5));
     }
 }

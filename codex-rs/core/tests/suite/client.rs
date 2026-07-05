@@ -369,7 +369,7 @@ async fn function_call_output_request_retry_keeps_tool_output_and_route_recovers
     let response_mock = mount_response_sequence(
         &server,
         vec![
-            sse_response_template(first_response),
+            sse_response_template(first_response).insert_header("x-codex-turn-state", "ts-retry"),
             ResponseTemplate::new(503),
             ResponseTemplate::new(502),
             ResponseTemplate::new(504),
@@ -410,6 +410,19 @@ async fn function_call_output_request_retry_keeps_tool_output_and_route_recovers
     assert!(
         tool_output_cache_keys[3].ends_with(":retry-recovery:1"),
         "function_call_output retries must preserve the tool output while still route recovering after three failures: {tool_output_cache_keys:?}"
+    );
+    assert_eq!(
+        tool_output_requests
+            .iter()
+            .map(|request| request.header("x-codex-turn-state"))
+            .collect::<Vec<_>>(),
+        vec![
+            Some("ts-retry".to_string()),
+            Some("ts-retry".to_string()),
+            Some("ts-retry".to_string()),
+            None,
+        ],
+        "relay sticky-break should clear the stale turn-state header on the recovered request"
     );
     assert!(
         tool_output_requests

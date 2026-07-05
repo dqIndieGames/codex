@@ -30,6 +30,7 @@ use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
+use codex_model_provider_info::is_chatgpt_codex_base_url;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
@@ -90,6 +91,52 @@ fn test_model_client(session_source: SessionSource) -> ModelClient {
         /*item_ids_enabled*/ false,
         /*attestation_provider*/ None,
     )
+}
+
+#[test]
+fn retry_route_recovery_skips_chatgpt_codex_backend() {
+    let client = test_model_client(SessionSource::Exec);
+    let mut session = client.new_session();
+    session.last_api_base_url = Some(CHATGPT_CODEX_BASE_URL.to_string());
+    session
+        .turn_state
+        .set("official-turn-state".to_string())
+        .expect("set turn state");
+
+    session.activate_retry_route_recovery();
+
+    assert_eq!(session.route_recovery_generation, 0);
+    assert_eq!(
+        session.turn_state.get().map(String::as_str),
+        Some("official-turn-state")
+    );
+}
+
+#[test]
+fn retry_route_recovery_for_relay_rotates_and_clears_turn_state() {
+    let client = test_model_client(SessionSource::Exec);
+    let mut session = client.new_session();
+    session.last_api_base_url = Some("https://relay.example.com/v1".to_string());
+    session
+        .turn_state
+        .set("relay-turn-state".to_string())
+        .expect("set turn state");
+
+    session.activate_retry_route_recovery();
+
+    assert_eq!(session.route_recovery_generation, 1);
+    assert_eq!(session.turn_state.get(), None);
+}
+
+#[test]
+fn request_route_recovery_gate_skips_chatgpt_domain_suffix() {
+    let route_recovery =
+        super::RequestRouteRecovery::new(!is_chatgpt_codex_base_url("https://foo.chatgpt.com/v1"));
+
+    route_recovery.request_restart(3);
+
+    assert!(!route_recovery.restart_requested());
+    assert_eq!(route_recovery.restart_retry_number(), 0);
 }
 
 fn test_responses_metadata_for_client(

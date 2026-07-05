@@ -149,6 +149,40 @@ fn test_personal_access_token_uses_chatgpt_codex_base_url() {
 }
 
 #[test]
+fn test_chatgpt_codex_base_url_detection_matches_chatgpt_domain_suffix() {
+    for url in [
+        "https://chatgpt.com/backend-api/codex",
+        "https://chatgpt.com/backend-api/codex/",
+        "https://chatgpt.com/backend-api/codex/responses",
+        "https://chatgpt.com/backend-api/codex-proxy",
+        "https://chatgpt.com/anything",
+        "https://foo.chatgpt.com/backend-api/codex",
+        "https://chatgpt.com:443/backend-api/codex/responses?foo=bar",
+        "https://chatgpt.com:8443/backend-api/codex/responses",
+        "wss://chatgpt.com/backend-api/codex/responses",
+    ] {
+        assert!(
+            is_chatgpt_codex_base_url(url),
+            "expected ChatGPT-owned URL: {url}"
+        );
+    }
+
+    for url in [
+        "https://api.openai.com/v1",
+        "https://relay.example.com/backend-api/codex",
+        "http://chatgpt.com/backend-api/codex",
+        "wss://evilchatgpt.com/backend-api/codex",
+        "https://chatgpt.com.evil.example/backend-api/codex",
+        "https://chatgpt.com.evil.example:443/backend-api/codex",
+    ] {
+        assert!(
+            !is_chatgpt_codex_base_url(url),
+            "expected non-ChatGPT relay URL: {url}"
+        );
+    }
+}
+
+#[test]
 fn test_supports_remote_compaction_for_azure_name() {
     let provider = ModelProviderInfo {
         name: "Azure".into(),
