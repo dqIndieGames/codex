@@ -432,7 +432,10 @@ async fn realtime_start_retry_status_is_transient_and_route_recovers() -> Result
             drop(stream);
         }
 
-        let (stream, _) = listener.accept().await.expect("accept successful handshake");
+        let (stream, _) = listener
+            .accept()
+            .await
+            .expect("accept successful handshake");
         let mut ws = accept_async(stream).await.expect("accept ws");
         let first = ws
             .next()

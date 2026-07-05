@@ -611,10 +611,7 @@ impl RealtimeWebsocketClient {
         self
     }
 
-    pub fn with_request_retry_notifier(
-        mut self,
-        notifier: Option<RealtimeRetryNotifier>,
-    ) -> Self {
+    pub fn with_request_retry_notifier(mut self, notifier: Option<RealtimeRetryNotifier>) -> Self {
         self.request_retry_notifier = notifier;
         self
     }
@@ -672,9 +669,7 @@ impl RealtimeWebsocketClient {
 
             match connect_once().await {
                 Ok(connection) => return Ok(connection),
-                Err(err)
-                    if retry_number < max_attempts
-                        && should_retry_realtime_connect_error(&err) =>
+                Err(err) if retry_number < max_attempts && should_retry_realtime_connect_error(&err) =>
                 {
                     retry_number = retry_number.saturating_add(1);
                     if route_recovery_allowed
@@ -693,10 +688,7 @@ impl RealtimeWebsocketClient {
                             retry_number,
                             max_attempts,
                             recovery_generation,
-                            details: realtime_retry_details(
-                                transport_label,
-                                recovery_generation,
-                            ),
+                            details: realtime_retry_details(transport_label, recovery_generation),
                         });
                     }
                     let delay = fixed_retry_delay();
@@ -736,7 +728,7 @@ impl RealtimeWebsocketClient {
                 default_headers.clone(),
             )
         })
-            .await
+        .await
     }
 
     pub async fn connect_webrtc_sideband(
@@ -891,10 +883,7 @@ fn is_chatgpt_codex_base_url(base_url: &str) -> bool {
         .split_once('/')
         .map_or((without_query, ""), |(host, path)| (host, path));
     let host = host.split_once(':').map_or(host, |(host, _)| host);
-    host.eq_ignore_ascii_case("chatgpt.com")
-        || host
-            .to_ascii_lowercase()
-            .ends_with(".chatgpt.com")
+    host.eq_ignore_ascii_case("chatgpt.com") || host.to_ascii_lowercase().ends_with(".chatgpt.com")
 }
 
 fn merge_request_headers(

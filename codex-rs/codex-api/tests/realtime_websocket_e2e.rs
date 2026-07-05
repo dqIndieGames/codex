@@ -355,7 +355,10 @@ async fn realtime_ws_connect_retries_and_route_recovers_after_three_failures() {
             drop(stream);
         }
 
-        let (stream, _) = listener.accept().await.expect("accept successful handshake");
+        let (stream, _) = listener
+            .accept()
+            .await
+            .expect("accept successful handshake");
         let mut ws = accept_async(stream).await.expect("accept ws");
         let first = ws
             .next()
@@ -390,8 +393,7 @@ async fn realtime_ws_connect_retries_and_route_recovers_after_three_failures() {
     provider.retry.max_attempts = 3;
     provider.retry.base_delay = Duration::from_millis(1);
 
-    let client =
-        RealtimeWebsocketClient::new(provider).with_request_retry_notifier(Some(notifier));
+    let client = RealtimeWebsocketClient::new(provider).with_request_retry_notifier(Some(notifier));
     let connection = client
         .connect(
             RealtimeSessionConfig {
@@ -452,7 +454,10 @@ async fn realtime_ws_sideband_retries_and_route_recovers_after_three_failures() 
             drop(stream);
         }
 
-        let (stream, _) = listener.accept().await.expect("accept successful handshake");
+        let (stream, _) = listener
+            .accept()
+            .await
+            .expect("accept successful handshake");
         let mut ws = accept_async(stream).await.expect("accept ws");
         let first = ws
             .next()
@@ -487,8 +492,7 @@ async fn realtime_ws_sideband_retries_and_route_recovers_after_three_failures() 
     provider.retry.max_attempts = 3;
     provider.retry.base_delay = Duration::from_millis(1);
 
-    let client =
-        RealtimeWebsocketClient::new(provider).with_request_retry_notifier(Some(notifier));
+    let client = RealtimeWebsocketClient::new(provider).with_request_retry_notifier(Some(notifier));
     let connection = client
         .connect_webrtc_sideband(
             RealtimeSessionConfig {

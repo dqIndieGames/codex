@@ -1597,7 +1597,9 @@ impl Session {
             {
                 warn!("failed to apply refreshed fast_mode feature state to session config: {err}");
             }
-            config.model_providers.insert(provider_id.clone(), provider.clone());
+            config
+                .model_providers
+                .insert(provider_id.clone(), provider.clone());
             state.session_configuration.original_config_do_not_use = Arc::new(config);
             let new_config = notify_config_contributors
                 .then(|| Self::build_effective_session_config(&state.session_configuration));

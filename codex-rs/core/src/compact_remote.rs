@@ -33,8 +33,8 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::StreamErrorEvent;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -345,11 +345,7 @@ fn compact_request_retry_notifier(
     })
 }
 
-fn compact_request_retry_message(
-    status_code: u16,
-    retry_number: u64,
-    max_attempts: u64,
-) -> String {
+fn compact_request_retry_message(status_code: u16, retry_number: u64, max_attempts: u64) -> String {
     if max_attempts == u64::MAX {
         format!("{status_code} retry {retry_number} (unbounded)")
     } else {

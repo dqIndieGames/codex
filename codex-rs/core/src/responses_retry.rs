@@ -199,10 +199,14 @@ mod tests {
 
     #[test]
     fn stream_retry_delay_is_fixed_and_ignores_retry_after() {
-        let short_retry_after =
-            CodexErr::Stream("retry after short".to_string(), Some(Duration::from_millis(28)));
-        let long_retry_after =
-            CodexErr::Stream("retry after long".to_string(), Some(Duration::from_secs(35)));
+        let short_retry_after = CodexErr::Stream(
+            "retry after short".to_string(),
+            Some(Duration::from_millis(28)),
+        );
+        let long_retry_after = CodexErr::Stream(
+            "retry after long".to_string(),
+            Some(Duration::from_secs(35)),
+        );
         let no_retry_after = CodexErr::Stream("no retry after".to_string(), None);
 
         assert_eq!(

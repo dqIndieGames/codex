@@ -820,7 +820,10 @@ stream_max_retries = 0
     let old_requests_before_write = old_server.received_requests().await.unwrap_or_default();
     let old_headers_before_write =
         response_request_authorization_headers(&old_requests_before_write);
-    assert_eq!(old_headers_before_write, vec![Some("Bearer old-token".to_string())]);
+    assert_eq!(
+        old_headers_before_write,
+        vec![Some("Bearer old-token".to_string())]
+    );
     assert!(
         new_server
             .received_requests()
@@ -860,16 +863,14 @@ stream_max_retries = 0
     run_text_turn(&mut mcp, &thread_id, "second request").await?;
 
     let old_requests_after_write = old_server.received_requests().await.unwrap_or_default();
-    let old_headers_after_write =
-        response_request_authorization_headers(&old_requests_after_write);
+    let old_headers_after_write = response_request_authorization_headers(&old_requests_after_write);
     assert_eq!(
         old_headers_after_write, old_headers_before_write,
         "loaded thread should stop sending requests to the old provider after model_provider changes"
     );
 
     let new_requests_after_write = new_server.received_requests().await.unwrap_or_default();
-    let new_headers_after_write =
-        response_request_authorization_headers(&new_requests_after_write);
+    let new_headers_after_write = response_request_authorization_headers(&new_requests_after_write);
     assert_eq!(
         new_headers_after_write,
         vec![Some("Bearer new-token".to_string())],
