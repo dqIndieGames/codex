@@ -68,10 +68,7 @@ pub fn is_chatgpt_codex_base_url(base_url: &str) -> bool {
         .split_once('/')
         .map_or((without_query, ""), |(host, path)| (host, path));
     let host = host.split_once(':').map_or(host, |(host, _)| host);
-    host.eq_ignore_ascii_case("chatgpt.com")
-        || host
-            .to_ascii_lowercase()
-            .ends_with(".chatgpt.com")
+    host.eq_ignore_ascii_case("chatgpt.com") || host.to_ascii_lowercase().ends_with(".chatgpt.com")
 }
 
 fn split_url_scheme(url: &str) -> Option<(&str, &str)> {
