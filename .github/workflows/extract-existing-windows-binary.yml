@@ -1,0 +1,71 @@
+name: extract-existing-windows-binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful rust-release-windows run id.
+        required: true
+        type: string
+      expected_source_head_sha:
+        description: Expected source run head SHA.
+        required: true
+        type: string
+      artifact_name:
+        description: Source artifact name.
+        required: true
+        default: x86_64-pc-windows-msvc
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Verify source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          EXPECTED_SOURCE_HEAD_SHA: ${{ inputs.expected_source_head_sha }}
+        run: |
+          set -euo pipefail
+          run_json="$(gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha,status,conclusion,workflowName)"
+          test "$(jq -r .headSha <<<"$run_json")" = "$EXPECTED_SOURCE_HEAD_SHA"
+          test "$(jq -r .status <<<"$run_json")" = completed
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+          test "$(jq -r .workflowName <<<"$run_json")" = rust-release-windows
+
+      - name: Download source artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          mkdir source
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT_NAME" --dir source
+
+      - name: Select test binaries
+        run: |
+          set -euo pipefail
+          mkdir extracted
+          find source -type f \( \
+            -name 'codex-x86_64-pc-windows-msvc.exe' -o \
+            -name 'codex-code-mode-host-x86_64-pc-windows-msvc.exe' \
+          \) -exec cp '{}' extracted/ \;
+          test -f extracted/codex-x86_64-pc-windows-msvc.exe
+          test -f extracted/codex-code-mode-host-x86_64-pc-windows-msvc.exe
+          sha256sum extracted/* | tee extracted/SHA256SUMS
+
+      - name: Upload lightweight test artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: codex-windows-test-binaries
+          path: extracted/*
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 7
