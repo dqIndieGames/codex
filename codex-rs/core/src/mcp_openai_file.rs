@@ -8,8 +8,8 @@
 //!   and rewrite only the declared arguments into the provided-file payload
 //!   shape expected by the downstream Apps tool.
 //!
-//! Model-visible schema masking is owned by `codex-mcp` alongside MCP tool
-//! inventory, so this module only handles the execution-time argument rewrite.
+//! The model-facing local-path schema is owned by `codex-mcp` alongside MCP tool inventory, so this
+//! module only handles uploading the files and rewriting the execution-time arguments.
 
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -173,8 +173,6 @@ async fn build_uploaded_argument_value(
         "file_id": uploaded.file_id,
         "mime_type": uploaded.mime_type,
         "file_name": uploaded.file_name,
-        "uri": uploaded.uri,
-        "file_size_bytes": uploaded.file_size_bytes,
     }))
 }
 
@@ -300,8 +298,6 @@ mod tests {
                 "file_id": "file_123",
                 "mime_type": "text/csv",
                 "file_name": "file_report.csv",
-                "uri": "sediment://file_123",
-                "file_size_bytes": 5,
             })
         );
     }
@@ -404,8 +400,6 @@ mod tests {
                 "file_id": "file_123",
                 "mime_type": "text/csv",
                 "file_name": "file_report.csv",
-                "uri": "sediment://file_123",
-                "file_size_bytes": 5,
             }))
         );
     }
@@ -519,16 +513,12 @@ mod tests {
                     "file_id": "file_1",
                     "mime_type": "text/csv",
                     "file_name": "one.csv",
-                    "uri": "sediment://file_1",
-                    "file_size_bytes": 3,
                 },
                 {
                     "download_url": format!("{}/download/file_2", server.uri()),
                     "file_id": "file_2",
                     "mime_type": "text/csv",
                     "file_name": "two.csv",
-                    "uri": "sediment://file_2",
-                    "file_size_bytes": 3,
                 }
             ]))
         );

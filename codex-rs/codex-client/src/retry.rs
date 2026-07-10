@@ -1,5 +1,5 @@
-use crate::error::TransportError;
-use crate::request::Request;
+use codex_http_client::Request;
+use codex_http_client::TransportError;
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -9,7 +9,6 @@ pub const FIXED_RETRY_DELAY: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
     pub max_attempts: u64,
-    pub base_delay: Duration,
     pub retry_on: RetryOn,
 }
 
@@ -27,29 +26,14 @@ impl RetryOn {
             return false;
         }
         match err {
-            TransportError::Http { status, body, .. } => {
-                (self.retry_402
-                    && status.as_u16() == 402
-                    && payment_required_body_is_usage_limit(body.as_deref()))
-                    || (self.retry_429 && status.as_u16() == 429)
-                    || (self.retry_5xx && status.is_server_error())
-            }
-            TransportError::Timeout | TransportError::Network(_) => self.retry_transport,
+            TransportError::Http { .. }
+            | TransportError::Timeout
+            | TransportError::Network(_) => true,
             TransportError::RetryLimit
             | TransportError::RetryInterrupted(_)
             | TransportError::Build(_) => false,
         }
     }
-}
-
-fn payment_required_body_is_usage_limit(body: Option<&str>) -> bool {
-    let Some(body) = body.map(str::trim).filter(|body| !body.is_empty()) else {
-        return false;
-    };
-    let normalized = body.to_ascii_lowercase();
-    normalized.contains("usage_limit_reached")
-        || normalized.contains("usage limit reached")
-        || normalized.contains("daily spending limit reached")
 }
 
 pub fn fixed_retry_delay() -> Duration {
@@ -88,7 +72,7 @@ mod tests {
     use http::StatusCode;
 
     #[test]
-    fn retry_402_requires_usage_limit_marker() {
+    fn all_remote_request_errors_share_the_retry_budget() {
         let retry_on = RetryOn {
             retry_402: true,
             retry_429: false,
@@ -110,7 +94,7 @@ mod tests {
             headers: None,
             body: Some(r#"{"error":{"type":"usage_not_included"}}"#.to_string()),
         };
-        assert!(!retry_on.should_retry(&non_usage_limit_err, 0, 1));
+        assert!(retry_on.should_retry(&non_usage_limit_err, 0, 1));
     }
 
     #[test]

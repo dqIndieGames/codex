@@ -8,7 +8,7 @@
 use codex_api::Provider as ApiProvider;
 use codex_api::RetryConfig as ApiRetryConfig;
 use codex_api::is_azure_responses_provider;
-use codex_app_server_protocol::AuthMode;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::EnvVarError;
@@ -35,6 +35,7 @@ const UNBOUNDED_RETRY_ATTEMPTS: u64 = u64::MAX;
 const INTERNAL_RETRY_MODE_ENV: &str = "CODEX_INTERNAL_RETRY_MODE";
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
+const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
@@ -53,26 +54,7 @@ pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
 pub fn is_chatgpt_codex_base_url(base_url: &str) -> bool {
-    let Some((scheme, rest)) = split_url_scheme(base_url.trim()) else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("wss") {
-        return false;
-    }
-
-    let without_fragment = rest.split_once('#').map_or(rest, |(url, _)| url);
-    let without_query = without_fragment
-        .split_once('?')
-        .map_or(without_fragment, |(url, _)| url);
-    let (host, _) = without_query
-        .split_once('/')
-        .map_or((without_query, ""), |(host, path)| (host, path));
-    let host = host.split_once(':').map_or(host, |(host, _)| host);
-    host.eq_ignore_ascii_case("chatgpt.com") || host.to_ascii_lowercase().ends_with(".chatgpt.com")
-}
-
-fn split_url_scheme(url: &str) -> Option<(&str, &str)> {
-    url.split_once("://")
+    codex_api::is_chatgpt_codex_route(base_url)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -320,6 +302,7 @@ impl ModelProviderInfo {
             Some(
                 AuthMode::Chatgpt
                     | AuthMode::ChatgptAuthTokens
+                    | AuthMode::Headers
                     | AuthMode::AgentIdentity
                     | AuthMode::PersonalAccessToken
             )
@@ -336,7 +319,6 @@ impl ModelProviderInfo {
         let headers = self.build_header_map()?;
         let retry = ApiRetryConfig {
             max_attempts: self.request_retry_attempts(),
-            base_delay: Duration::from_millis(200),
             retry_402: true,
             retry_429: true,
             retry_5xx: true,
@@ -502,6 +484,16 @@ impl ModelProviderInfo {
 
     pub fn is_openai(&self) -> bool {
         self.name == OPENAI_PROVIDER_NAME
+    }
+
+    pub fn uses_openai_actor_authorization(&self) -> bool {
+        !self.requires_openai_auth
+            && self.http_headers.as_ref().is_some_and(|headers| {
+                headers.iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case(OPENAI_ACTOR_AUTHORIZATION_HEADER)
+                        && !value.trim().is_empty()
+                })
+            })
     }
 
     pub fn is_amazon_bedrock(&self) -> bool {

@@ -23,13 +23,16 @@ use crate::tool::ImageGenerationTool;
 #[derive(Clone)]
 struct ImageGenerationExtension {
     auth_manager: Arc<AuthManager>,
+    resolve_save_root: Arc<SaveRootResolver>,
 }
+
+type SaveRootResolver = dyn Fn(&Config) -> Option<AbsolutePathBuf> + Send + Sync;
 
 #[derive(Clone)]
 pub(crate) struct ImageGenerationExtensionConfig {
     available: bool,
     pub(crate) provider: ModelProviderInfo,
-    pub(crate) codex_home: AbsolutePathBuf,
+    pub(crate) save_root: Option<AbsolutePathBuf>,
 }
 
 pub(crate) struct ImageGenerationExtensionRuntime {
@@ -78,20 +81,21 @@ pub(crate) struct ImageGenerationExtensionRuntimeSnapshot {
     pub(crate) auth_manager: Arc<AuthManager>,
 }
 
-impl From<&Config> for ImageGenerationExtensionConfig {
-    /// Resolves whether standalone image generation should be available for a thread.
-    fn from(config: &Config) -> Self {
+impl ImageGenerationExtensionConfig {
+    /// Resolves the image provider and save root for a thread.
+    fn from_config(config: &Config, resolve_save_root: &SaveRootResolver) -> Self {
         Self {
-            // Core selects this executor per turn using the feature flag or model metadata.
-            available: config.model_provider.is_openai(),
+            available: config.model_provider.is_openai()
+                || config.model_provider.requires_openai_auth
+                || config.model_provider.uses_openai_actor_authorization(),
             provider: config.model_provider.clone(),
-            codex_home: config.codex_home.clone(),
+            save_root: resolve_save_root(config),
         }
     }
 }
 
 impl ThreadLifecycleContributor<Config> for ImageGenerationExtension {
-    /// Seeds image-generation availability when a thread begins.
+    /// Seeds image-generation configuration when a thread begins.
     fn on_thread_start<'a>(
         &'a self,
         input: ThreadStartInput<'a, Config>,
@@ -101,14 +105,17 @@ impl ThreadLifecycleContributor<Config> for ImageGenerationExtension {
                 .thread_store
                 .insert(ImageGenerationExtensionRuntime::new(
                     self.auth_manager.clone(),
-                    ImageGenerationExtensionConfig::from(input.config),
+                    ImageGenerationExtensionConfig::from_config(
+                        input.config,
+                        self.resolve_save_root.as_ref(),
+                    ),
                 ));
         })
     }
 }
 
 impl ConfigContributor<Config> for ImageGenerationExtension {
-    /// Refreshes image-generation availability after thread configuration changes.
+    /// Refreshes image-generation configuration after thread configuration changes.
     fn on_config_changed(
         &self,
         _session_store: &ExtensionData,
@@ -120,10 +127,16 @@ impl ConfigContributor<Config> for ImageGenerationExtension {
             .get_or_init(|| {
                 ImageGenerationExtensionRuntime::new(
                     self.auth_manager.clone(),
-                    ImageGenerationExtensionConfig::from(new_config),
+                    ImageGenerationExtensionConfig::from_config(
+                        new_config,
+                        self.resolve_save_root.as_ref(),
+                    ),
                 )
             })
-            .update(ImageGenerationExtensionConfig::from(new_config));
+            .update(ImageGenerationExtensionConfig::from_config(
+                new_config,
+                self.resolve_save_root.as_ref(),
+            ));
     }
 }
 
@@ -139,21 +152,28 @@ impl ToolContributor for ImageGenerationExtension {
         };
         let snapshot = runtime.snapshot();
         let config = snapshot.config;
-        if !config.available || !self.auth_manager.current_auth_uses_codex_backend() {
+        if !config.available {
             return Vec::new();
         }
 
         vec![Arc::new(ImageGenerationTool::new(
             CodexImagesBackend::new(runtime),
-            config.codex_home.clone(),
+            config.save_root.clone(),
             thread_store.level_id().to_string(),
         ))]
     }
 }
 
 /// Installs the standalone image-generation extension contributors.
-pub fn install(registry: &mut ExtensionRegistryBuilder<Config>, auth_manager: Arc<AuthManager>) {
-    let extension = Arc::new(ImageGenerationExtension { auth_manager });
+pub fn install(
+    registry: &mut ExtensionRegistryBuilder<Config>,
+    auth_manager: Arc<AuthManager>,
+    resolve_save_root: impl Fn(&Config) -> Option<AbsolutePathBuf> + Send + Sync + 'static,
+) {
+    let extension = Arc::new(ImageGenerationExtension {
+        auth_manager,
+        resolve_save_root: Arc::new(resolve_save_root),
+    });
     registry.thread_lifecycle_contributor(extension.clone());
     registry.config_contributor(extension.clone());
     registry.tool_contributor(extension);

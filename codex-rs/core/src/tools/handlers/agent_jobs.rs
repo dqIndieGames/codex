@@ -207,7 +207,7 @@ async fn run_agent_job_loop(
                             turn.as_ref(),
                         )
                         .await?,
-                        items.into(),
+                        items,
                         Some(SessionSource::SubAgent(SubAgentSource::Other(format!(
                             "agent_job:{job_id}"
                         )))),

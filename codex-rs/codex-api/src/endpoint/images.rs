@@ -136,7 +136,6 @@ mod tests {
             headers: HeaderMap::new(),
             retry: RetryConfig {
                 max_attempts: 1,
-                base_delay: Duration::from_millis(1),
                 retry_402: false,
                 retry_429: false,
                 retry_5xx: true,

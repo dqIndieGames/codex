@@ -1,4 +1,5 @@
 use super::*;
+use codex_app_server_protocol::ImageGenerationItem;
 use codex_app_server_protocol::PluginAvailability;
 use pretty_assertions::assert_eq;
 
@@ -296,9 +297,7 @@ pub(crate) fn set_fast_mode_test_catalog(chat: &mut ChatWidget) {
                 "gpt-5.4", /*priority*/ 0, /*supports_fast_mode*/ true,
             ),
             test_model_info(
-                "gpt-5.3-codex",
-                /*priority*/ 1,
-                /*supports_fast_mode*/ false,
+                "gpt-5.2", /*priority*/ 1, /*supports_fast_mode*/ false,
             ),
         ],
     }
@@ -679,7 +678,7 @@ pub(super) fn handle_patch_apply_end(
 pub(super) fn handle_view_image_tool_call(
     chat: &mut ChatWidget,
     call_id: impl Into<String>,
-    path: AbsolutePathBuf,
+    path: impl Into<LegacyAppPathString>,
 ) {
     chat.handle_server_notification(
         ServerNotification::ItemCompleted(ItemCompletedNotification {
@@ -688,7 +687,7 @@ pub(super) fn handle_view_image_tool_call(
             completed_at_ms: 0,
             item: AppServerThreadItem::ImageView {
                 id: call_id.into(),
-                path,
+                path: path.into(),
             },
         }),
         /*replay_kind*/ None,
@@ -707,13 +706,13 @@ pub(super) fn handle_image_generation_end(
             thread_id: thread_id(chat),
             turn_id: "turn-1".to_string(),
             completed_at_ms: 0,
-            item: AppServerThreadItem::ImageGeneration {
+            item: AppServerThreadItem::ImageGeneration(ImageGenerationItem {
                 id: call_id.into(),
                 status: status.into(),
                 revised_prompt,
                 result: String::new(),
                 saved_path,
-            },
+            }),
         }),
         /*replay_kind*/ None,
     );
@@ -1331,6 +1330,7 @@ pub(super) fn plugins_test_summary(
     PluginSummary {
         id: id.to_string(),
         remote_plugin_id: None,
+        version: None,
         local_version: None,
         name: name.to_string(),
         share_context: None,
@@ -1340,6 +1340,7 @@ pub(super) fn plugins_test_summary(
         installed,
         enabled,
         install_policy,
+        install_policy_source: None,
         auth_policy: PluginAuthPolicy::OnInstall,
         availability: PluginAvailability::Available,
         interface: Some(plugins_test_interface(
@@ -1361,6 +1362,7 @@ pub(super) fn plugins_test_remote_summary(
     PluginSummary {
         id: remote_plugin_id.to_string(),
         remote_plugin_id: Some(remote_plugin_id.to_string()),
+        version: None,
         local_version: None,
         name: name.to_string(),
         share_context: None,
@@ -1368,6 +1370,7 @@ pub(super) fn plugins_test_remote_summary(
         installed,
         enabled: true,
         install_policy: PluginInstallPolicy::Available,
+        install_policy_source: None,
         auth_policy: PluginAuthPolicy::OnInstall,
         availability: PluginAvailability::Available,
         interface: Some(plugins_test_interface(

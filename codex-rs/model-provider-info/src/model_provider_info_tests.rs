@@ -149,13 +149,11 @@ fn test_personal_access_token_uses_chatgpt_codex_base_url() {
 }
 
 #[test]
-fn test_chatgpt_codex_base_url_detection_matches_chatgpt_domain_suffix() {
+fn test_chatgpt_codex_base_url_detection_requires_official_codex_path() {
     for url in [
         "https://chatgpt.com/backend-api/codex",
         "https://chatgpt.com/backend-api/codex/",
         "https://chatgpt.com/backend-api/codex/responses",
-        "https://chatgpt.com/backend-api/codex-proxy",
-        "https://chatgpt.com/anything",
         "https://foo.chatgpt.com/backend-api/codex",
         "https://chatgpt.com:443/backend-api/codex/responses?foo=bar",
         "https://chatgpt.com:8443/backend-api/codex/responses",
@@ -170,6 +168,8 @@ fn test_chatgpt_codex_base_url_detection_matches_chatgpt_domain_suffix() {
     for url in [
         "https://api.openai.com/v1",
         "https://relay.example.com/backend-api/codex",
+        "https://chatgpt.com/backend-api/codex-proxy",
+        "https://chatgpt.com/custom-relay",
         "http://chatgpt.com/backend-api/codex",
         "wss://evilchatgpt.com/backend-api/codex",
         "https://chatgpt.com.evil.example/backend-api/codex",
@@ -180,6 +180,15 @@ fn test_chatgpt_codex_base_url_detection_matches_chatgpt_domain_suffix() {
             "expected non-ChatGPT relay URL: {url}"
         );
     }
+}
+
+#[test]
+fn test_header_auth_uses_chatgpt_codex_base_url() {
+    let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        .to_api_provider(Some(AuthMode::Headers))
+        .expect("OpenAI provider should build API provider");
+
+    assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
 }
 
 #[test]
@@ -230,6 +239,31 @@ fn test_supports_remote_compaction_for_non_openai_non_azure_provider() {
     };
 
     assert!(!provider.supports_remote_compaction());
+}
+
+#[test]
+fn test_uses_openai_actor_authorization() {
+    let mut provider = ModelProviderInfo {
+        http_headers: Some(maplit::hashmap! {
+            "X-OpenAI-Actor-Authorization".to_string() => "actor-token".to_string(),
+        }),
+        ..ModelProviderInfo::default()
+    };
+    assert!(provider.uses_openai_actor_authorization());
+
+    provider.http_headers = None;
+    assert!(!provider.uses_openai_actor_authorization());
+
+    provider.http_headers = Some(maplit::hashmap! {
+        OPENAI_ACTOR_AUTHORIZATION_HEADER.to_string() => "  ".to_string(),
+    });
+    assert!(!provider.uses_openai_actor_authorization());
+
+    provider.http_headers = Some(maplit::hashmap! {
+        OPENAI_ACTOR_AUTHORIZATION_HEADER.to_string() => "actor-token".to_string(),
+    });
+    provider.requires_openai_auth = true;
+    assert!(!provider.uses_openai_actor_authorization());
 }
 
 #[test]

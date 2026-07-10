@@ -14,6 +14,24 @@ pub trait ProviderSource: Send + Sync {
     fn snapshot(&self) -> Provider;
 }
 
+pub fn is_chatgpt_codex_route(base_url: &str) -> bool {
+    let Ok(url) = Url::parse(base_url.trim()) else {
+        return false;
+    };
+    if url.scheme() != "https" && url.scheme() != "wss" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if !host.eq_ignore_ascii_case("chatgpt.com")
+        && !host.to_ascii_lowercase().ends_with(".chatgpt.com")
+    {
+        return false;
+    }
+    url.path() == "/backend-api/codex" || url.path().starts_with("/backend-api/codex/")
+}
+
 /// High-level retry configuration for a provider.
 ///
 /// This is converted into a `RetryPolicy` used by `codex-client` to drive
@@ -21,7 +39,6 @@ pub trait ProviderSource: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     pub max_attempts: u64,
-    pub base_delay: Duration,
     pub retry_402: bool,
     pub retry_429: bool,
     pub retry_5xx: bool,
@@ -32,7 +49,6 @@ impl RetryConfig {
     pub fn to_policy(&self) -> RetryPolicy {
         RetryPolicy {
             max_attempts: self.max_attempts,
-            base_delay: self.base_delay,
             retry_on: RetryOn {
                 retry_402: self.retry_402,
                 retry_429: self.retry_429,
@@ -251,7 +267,6 @@ mod tests {
     fn responses_requests_retry_non_401_http_statuses_without_whitelist() {
         let policy = RetryPolicy {
             max_attempts: 4,
-            base_delay: Duration::from_millis(200),
             retry_on: RetryOn {
                 retry_402: false,
                 retry_429: false,
@@ -278,7 +293,6 @@ mod tests {
     fn responses_requests_retry_401() {
         let policy = RetryPolicy {
             max_attempts: 4,
-            base_delay: Duration::from_millis(200),
             retry_on: RetryOn {
                 retry_402: true,
                 retry_429: true,
@@ -305,7 +319,6 @@ mod tests {
     fn responses_requests_retry_usage_limit_429() {
         let policy = RetryPolicy {
             max_attempts: 4,
-            base_delay: Duration::from_millis(200),
             retry_on: RetryOn {
                 retry_402: true,
                 retry_429: true,
@@ -335,7 +348,6 @@ mod tests {
     fn non_responses_requests_retry_all_http_statuses_without_whitelist() {
         let policy = RetryPolicy {
             max_attempts: 4,
-            base_delay: Duration::from_millis(200),
             retry_on: RetryOn {
                 retry_402: false,
                 retry_429: false,
@@ -374,7 +386,6 @@ mod tests {
     fn remote_timeout_and_network_errors_retry_without_transport_flag() {
         let policy = RetryPolicy {
             max_attempts: 4,
-            base_delay: Duration::from_millis(200),
             retry_on: RetryOn {
                 retry_402: false,
                 retry_429: false,

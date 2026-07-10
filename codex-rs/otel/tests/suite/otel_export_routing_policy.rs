@@ -1,3 +1,4 @@
+use codex_api::AgentIdentityTelemetry;
 use codex_otel::AuthEnvTelemetryMetadata;
 use codex_otel::MetricsClient;
 use codex_otel::MetricsConfig;
@@ -555,6 +556,10 @@ fn otel_export_routing_policy_routes_api_request_auth_observability() {
             SandboxPolicy::DangerFullAccess,
             Vec::new(),
         );
+        let agent_identity_telemetry = AgentIdentityTelemetry {
+            agent_id: "agent-runtime-otel".to_string(),
+            task_id: "task-run-otel".to_string(),
+        };
         manager.record_api_request(
             /*attempt*/ 1,
             Some(401),
@@ -571,6 +576,7 @@ fn otel_export_routing_policy_routes_api_request_auth_observability() {
             Some("ray-401"),
             Some("missing_authorization_header"),
             Some("token_expired"),
+            Some(&agent_identity_telemetry),
         );
     });
 
@@ -644,6 +650,14 @@ fn otel_export_routing_policy_routes_api_request_auth_observability() {
             .map(String::as_str),
         Some("true")
     );
+    assert_eq!(
+        request_log_attrs.get("auth.agent_id").map(String::as_str),
+        Some("agent-runtime-otel")
+    );
+    assert_eq!(
+        request_log_attrs.get("auth.task_id").map(String::as_str),
+        Some("task-run-otel")
+    );
 
     let spans = span_exporter.get_finished_spans().expect("span export");
     let conversation_trace_event =
@@ -685,6 +699,14 @@ fn otel_export_routing_policy_routes_api_request_auth_observability() {
             .get("auth.env_openai_api_key_present")
             .map(String::as_str),
         Some("true")
+    );
+    assert_eq!(
+        request_trace_attrs.get("auth.agent_id").map(String::as_str),
+        Some("agent-runtime-otel")
+    );
+    assert_eq!(
+        request_trace_attrs.get("auth.task_id").map(String::as_str),
+        Some("task-run-otel")
     );
 }
 
@@ -730,6 +752,10 @@ fn otel_export_routing_policy_routes_websocket_connect_auth_observability() {
         .with_auth_env(auth_env_metadata());
         let root_span = tracing::info_span!("root");
         let _root_guard = root_span.enter();
+        let agent_identity_telemetry = AgentIdentityTelemetry {
+            agent_id: "agent-runtime-ws".to_string(),
+            task_id: "task-run-ws".to_string(),
+        };
         manager.record_websocket_connect(
             std::time::Duration::from_millis(17),
             Some(401),
@@ -746,6 +772,7 @@ fn otel_export_routing_policy_routes_websocket_connect_auth_observability() {
             Some("ray-ws-401"),
             Some("missing_authorization_header"),
             Some("token_expired"),
+            Some(&agent_identity_telemetry),
         );
     });
 
@@ -787,6 +814,14 @@ fn otel_export_routing_policy_routes_websocket_connect_auth_observability() {
             .map(String::as_str),
         Some("configured")
     );
+    assert_eq!(
+        connect_log_attrs.get("auth.agent_id").map(String::as_str),
+        Some("agent-runtime-ws")
+    );
+    assert_eq!(
+        connect_log_attrs.get("auth.task_id").map(String::as_str),
+        Some("task-run-ws")
+    );
 
     let spans = span_exporter.get_finished_spans().expect("span export");
     let connect_trace_event =
@@ -803,6 +838,14 @@ fn otel_export_routing_policy_routes_websocket_connect_auth_observability() {
             .get("auth.env_refresh_token_url_override_present")
             .map(String::as_str),
         Some("true")
+    );
+    assert_eq!(
+        connect_trace_attrs.get("auth.agent_id").map(String::as_str),
+        Some("agent-runtime-ws")
+    );
+    assert_eq!(
+        connect_trace_attrs.get("auth.task_id").map(String::as_str),
+        Some("task-run-ws")
     );
 }
 
@@ -848,11 +891,15 @@ fn otel_export_routing_policy_routes_websocket_request_transport_observability()
         .with_auth_env(auth_env_metadata());
         let root_span = tracing::info_span!("root");
         let _root_guard = root_span.enter();
+        let agent_identity_telemetry = AgentIdentityTelemetry {
+            agent_id: "agent-runtime-ws-request".to_string(),
+            task_id: "task-run-ws-request".to_string(),
+        };
         manager.record_websocket_request(
             std::time::Duration::from_millis(23),
             Some("stream error"),
             /*connection_reused*/ true,
-            /*emit_log_trace*/ true,
+            Some(&agent_identity_telemetry),
         );
     });
 
@@ -878,6 +925,14 @@ fn otel_export_routing_policy_routes_websocket_request_transport_observability()
             .map(String::as_str),
         Some("true")
     );
+    assert_eq!(
+        request_log_attrs.get("auth.agent_id").map(String::as_str),
+        Some("agent-runtime-ws-request")
+    );
+    assert_eq!(
+        request_log_attrs.get("auth.task_id").map(String::as_str),
+        Some("task-run-ws-request")
+    );
 
     let spans = span_exporter.get_finished_spans().expect("span export");
     let request_trace_event =
@@ -894,6 +949,14 @@ fn otel_export_routing_policy_routes_websocket_request_transport_observability()
             .get("auth.env_provider_key_present")
             .map(String::as_str),
         Some("true")
+    );
+    assert_eq!(
+        request_trace_attrs.get("auth.agent_id").map(String::as_str),
+        Some("agent-runtime-ws-request")
+    );
+    assert_eq!(
+        request_trace_attrs.get("auth.task_id").map(String::as_str),
+        Some("task-run-ws-request")
     );
 }
 

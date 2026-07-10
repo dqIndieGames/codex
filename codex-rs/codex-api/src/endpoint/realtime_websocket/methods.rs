@@ -15,9 +15,10 @@ use crate::endpoint::realtime_websocket::protocol::RealtimeVoice;
 use crate::endpoint::realtime_websocket::protocol::parse_realtime_event;
 use crate::error::ApiError;
 use crate::provider::Provider;
+use crate::provider::is_chatgpt_codex_route;
 use codex_client::TransportError;
 use codex_client::fixed_retry_delay;
-use codex_client::maybe_build_rustls_client_config_with_custom_ca;
+use codex_http_client::maybe_build_rustls_client_config_with_custom_ca;
 use codex_protocol::protocol::ConversationTextRole;
 use codex_protocol::protocol::RealtimeTranscriptDelta;
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
@@ -406,6 +407,13 @@ impl RealtimeWebsocketWriter {
 }
 
 impl RealtimeWebsocketEvents {
+    pub async fn take_transcript_tail(&self) -> Vec<RealtimeTranscriptEntry> {
+        let mut active_transcript = self.active_transcript.lock().await;
+        let tail = active_transcript.entries[active_transcript.last_handoff_entry_count..].to_vec();
+        active_transcript.last_handoff_entry_count = active_transcript.entries.len();
+        tail
+    }
+
     pub async fn next_event(&self) -> Result<Option<RealtimeEvent>, ApiError> {
         if self.is_closed.load(Ordering::SeqCst) {
             return Ok(None);
@@ -660,7 +668,7 @@ impl RealtimeWebsocketClient {
         let max_attempts = self.provider.retry.max_attempts;
         let mut retry_number = 0_u64;
         let mut recovery_generation = 0_u64;
-        let route_recovery_allowed = !is_chatgpt_codex_base_url(&self.provider.base_url);
+        let route_recovery_allowed = !is_chatgpt_codex_route(&self.provider.base_url);
 
         loop {
             if !self.can_continue_request_retry() {
@@ -845,15 +853,23 @@ impl RealtimeWebsocketClient {
 
 fn should_retry_realtime_connect_error(error: &ApiError) -> bool {
     match error {
-        ApiError::Stream(message) => {
-            message.starts_with("failed to connect realtime websocket")
-                || message.starts_with("failed to send realtime request")
-                || message == "realtime websocket connection is closed"
-        }
-        ApiError::Transport(TransportError::Timeout | TransportError::Network(_))
+        ApiError::Transport(
+            TransportError::RetryLimit
+            | TransportError::RetryInterrupted(_)
+            | TransportError::Build(_),
+        )
+        | ApiError::InvalidRequest { .. } => false,
+        ApiError::Transport(TransportError::Http { .. })
+        | ApiError::Transport(TransportError::Timeout | TransportError::Network(_))
+        | ApiError::Api { .. }
+        | ApiError::Stream(_)
+        | ApiError::ContextWindowExceeded
+        | ApiError::QuotaExceeded
+        | ApiError::UsageNotIncluded
         | ApiError::Retryable { .. }
+        | ApiError::RateLimit(_)
+        | ApiError::CyberPolicy { .. }
         | ApiError::ServerOverloaded => true,
-        _ => false,
     }
 }
 
@@ -865,24 +881,6 @@ fn realtime_retry_details(transport_label: &str, recovery_generation: u64) -> St
             "Realtime {transport_label} connection failed; retrying after route recovery generation {recovery_generation}."
         )
     }
-}
-
-fn is_chatgpt_codex_base_url(base_url: &str) -> bool {
-    let Some((scheme, rest)) = base_url.trim().split_once("://") else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("wss") {
-        return false;
-    }
-    let without_fragment = rest.split_once('#').map_or(rest, |(url, _)| url);
-    let without_query = without_fragment
-        .split_once('?')
-        .map_or(without_fragment, |(url, _)| url);
-    let (host, _) = without_query
-        .split_once('/')
-        .map_or((without_query, ""), |(host, path)| (host, path));
-    let host = host.split_once(':').map_or(host, |(host, _)| host);
-    host.eq_ignore_ascii_case("chatgpt.com") || host.to_ascii_lowercase().ends_with(".chatgpt.com")
 }
 
 fn merge_request_headers(
@@ -1127,6 +1125,56 @@ mod tests {
                 active_transcript: Vec::new(),
             }))
         );
+    }
+
+    #[tokio::test]
+    async fn takes_only_transcript_after_last_handoff_once() {
+        let (_tx_message, rx_message) = async_channel::unbounded();
+        let events = RealtimeWebsocketEvents {
+            rx_message,
+            active_transcript: Arc::new(Mutex::new(ActiveTranscriptState::default())),
+            event_parser: RealtimeEventParser::V1,
+            is_closed: Arc::new(AtomicBool::new(false)),
+        };
+
+        assert_eq!(events.take_transcript_tail().await, vec![]);
+
+        let mut covered = RealtimeEvent::InputTranscriptDelta(RealtimeTranscriptDelta {
+            delta: "already handed off".to_string(),
+        });
+        events.update_active_transcript(&mut covered).await;
+        let mut handoff = RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
+            handoff_id: "handoff_1".to_string(),
+            item_id: "item_1".to_string(),
+            input_transcript: "already handed off".to_string(),
+            active_transcript: vec![],
+        });
+        events.update_active_transcript(&mut handoff).await;
+        assert_eq!(
+            handoff,
+            RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
+                handoff_id: "handoff_1".to_string(),
+                item_id: "item_1".to_string(),
+                input_transcript: "already handed off".to_string(),
+                active_transcript: vec![RealtimeTranscriptEntry {
+                    role: "user".to_string(),
+                    text: "already handed off".to_string(),
+                }],
+            })
+        );
+
+        let mut tail = RealtimeEvent::OutputTranscriptDelta(RealtimeTranscriptDelta {
+            delta: "tail".to_string(),
+        });
+        events.update_active_transcript(&mut tail).await;
+        assert_eq!(
+            events.take_transcript_tail().await,
+            vec![RealtimeTranscriptEntry {
+                role: "assistant".to_string(),
+                text: "tail".to_string(),
+            }]
+        );
+        assert_eq!(events.take_transcript_tail().await, vec![]);
     }
 
     #[test]
@@ -1594,22 +1642,23 @@ mod tests {
         for url in [
             "https://chatgpt.com/backend-api/codex",
             "https://chatgpt.com/backend-api/codex/realtime",
-            "https://chatgpt.com/backend-api/codex-proxy",
             "https://foo.chatgpt.com/backend-api/codex/realtime",
             "https://chatgpt.com:8443/backend-api/codex/realtime",
             "wss://chatgpt.com/backend-api/codex/realtime",
         ] {
-            assert!(is_chatgpt_codex_base_url(url));
+            assert!(is_chatgpt_codex_route(url));
         }
 
         for url in [
             "https://api.openai.com/v1",
             "https://relay.example.com/backend-api/codex",
+            "https://chatgpt.com/backend-api/codex-proxy",
+            "https://chatgpt.com/custom-relay",
             "https://chatgpt.com.evil.example/backend-api/codex",
             "https://chatgpt.com.evil.example:443/backend-api/codex",
             "http://chatgpt.com/backend-api/codex",
         ] {
-            assert!(!is_chatgpt_codex_base_url(url));
+            assert!(!is_chatgpt_codex_route(url));
         }
     }
 
@@ -1921,7 +1970,6 @@ mod tests {
             headers: HeaderMap::new(),
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
-                base_delay: Duration::from_millis(1),
                 retry_402: false,
                 retry_429: false,
                 retry_5xx: false,
@@ -2246,7 +2294,6 @@ mod tests {
             headers: HeaderMap::new(),
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
-                base_delay: Duration::from_millis(1),
                 retry_402: false,
                 retry_429: false,
                 retry_5xx: false,
@@ -2372,7 +2419,6 @@ mod tests {
             headers: HeaderMap::new(),
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
-                base_delay: Duration::from_millis(1),
                 retry_402: false,
                 retry_429: false,
                 retry_5xx: false,
@@ -2477,7 +2523,6 @@ mod tests {
             headers: HeaderMap::new(),
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
-                base_delay: Duration::from_millis(1),
                 retry_402: false,
                 retry_429: false,
                 retry_5xx: false,
@@ -2568,7 +2613,6 @@ mod tests {
             headers: HeaderMap::new(),
             retry: crate::provider::RetryConfig {
                 max_attempts: 1,
-                base_delay: Duration::from_millis(1),
                 retry_402: false,
                 retry_429: false,
                 retry_5xx: false,

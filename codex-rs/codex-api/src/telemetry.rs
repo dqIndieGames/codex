@@ -253,7 +253,6 @@ mod tests {
     async fn request_retry_guard_interrupts_before_next_attempt() {
         let policy = RetryPolicy {
             max_attempts: 5,
-            base_delay: Duration::from_secs(30),
             retry_on: RetryOn {
                 retry_402: true,
                 retry_429: true,

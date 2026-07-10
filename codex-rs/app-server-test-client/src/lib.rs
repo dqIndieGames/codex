@@ -1222,6 +1222,7 @@ async fn thread_list(endpoint: &Endpoint, config_overrides: &[String], limit: u3
             source_kinds: None,
             archived: None,
             parent_thread_id: None,
+            ancestor_thread_id: None,
             cwd: None,
             use_state_db_only: false,
             search_term: None,
@@ -1721,7 +1722,9 @@ impl CodexClient {
         let request = ClientRequest::LoginAccount {
             request_id: request_id.clone(),
             params: codex_app_server_protocol::LoginAccountParams::Chatgpt {
+                app_brand: None,
                 codex_streamlined_login: false,
+                use_hosted_login_success_page: false,
             },
         };
 

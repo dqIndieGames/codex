@@ -15,6 +15,7 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::is_persisted_rollout_item;
 use codex_thread_store::AppendThreadItemsParams;
@@ -31,6 +32,7 @@ use crate::config::external_agent_config::record_import_error;
 use crate::config_manager::ConfigManager;
 
 const SESSION_IMPORT_CONCURRENCY: usize = 5;
+const CODEX_DISPLAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local3");
 
 #[derive(Clone)]
 pub(super) struct ExternalAgentSessionImporter {
@@ -184,7 +186,12 @@ impl ExternalAgentSessionImporter {
             .map_err(|err| format!("failed to load imported session config: {err}"))?;
         let models_manager = self.thread_manager.get_models_manager();
         let model = models_manager
-            .get_default_model(&config.model, RefreshStrategy::Offline)
+            .get_default_model(
+                &config.model,
+                /*allow_provider_model_fallback*/ false,
+                RefreshStrategy::Offline,
+                config.http_client_factory(),
+            )
             .await;
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
@@ -207,6 +214,7 @@ impl ExternalAgentSessionImporter {
             parent_thread_id: None,
             source: source.clone(),
             thread_source: None,
+            originator: codex_login::default_client::originator().value,
             base_instructions: BaseInstructions {
                 text: config
                     .base_instructions
@@ -214,14 +222,17 @@ impl ExternalAgentSessionImporter {
                     .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
             },
             dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
             multi_agent_version: Some(MultiAgentVersion::V1),
+            history_mode: ThreadHistoryMode::Legacy,
+            initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(cwd.clone()),
                 model_provider: model_provider.clone(),
                 memory_mode,
             },
         };
-        rollout_items.retain(is_persisted_rollout_item);
+        rollout_items.retain(|item| is_persisted_rollout_item(item, ThreadHistoryMode::Legacy));
         let title = title
             .as_deref()
             .and_then(codex_core::util::normalize_thread_name);
@@ -237,7 +248,7 @@ impl ExternalAgentSessionImporter {
             agent_role: Some(source.get_agent_role()),
             agent_path: Some(source.get_agent_path().map(Into::into)),
             cwd: Some(cwd),
-            cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            cli_version: Some(CODEX_DISPLAY_VERSION.to_string()),
             first_user_message,
             memory_mode: Some(memory_mode),
             ..Default::default()

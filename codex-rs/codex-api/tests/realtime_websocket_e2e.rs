@@ -69,7 +69,6 @@ fn test_provider(base_url: String) -> Provider {
         headers: HeaderMap::new(),
         retry: RetryConfig {
             max_attempts: 1,
-            base_delay: Duration::from_millis(1),
             retry_402: false,
             retry_429: false,
             retry_5xx: false,
@@ -284,7 +283,6 @@ async fn try_realtime_ws_connect_webrtc_sideband_retry() -> Result<(), String> {
 
     let mut provider = test_provider(format!("http://{addr}"));
     provider.retry.max_attempts = 1;
-    provider.retry.base_delay = Duration::from_millis(150);
 
     let client = RealtimeWebsocketClient::new(provider);
     let connection = match client
@@ -391,7 +389,6 @@ async fn realtime_ws_connect_retries_and_route_recovers_after_three_failures() {
     };
     let mut provider = test_provider(format!("http://{addr}"));
     provider.retry.max_attempts = 3;
-    provider.retry.base_delay = Duration::from_millis(1);
 
     let client = RealtimeWebsocketClient::new(provider).with_request_retry_notifier(Some(notifier));
     let connection = client
@@ -490,7 +487,6 @@ async fn realtime_ws_sideband_retries_and_route_recovers_after_three_failures() 
     };
     let mut provider = test_provider(format!("http://{addr}"));
     provider.retry.max_attempts = 3;
-    provider.retry.base_delay = Duration::from_millis(1);
 
     let client = RealtimeWebsocketClient::new(provider).with_request_retry_notifier(Some(notifier));
     let connection = client
