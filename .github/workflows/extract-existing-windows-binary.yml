@@ -56,11 +56,17 @@ jobs:
           find source -type f \( \
             -name 'codex-x86_64-pc-windows-msvc.exe' -o \
             -name 'codex-code-mode-host-x86_64-pc-windows-msvc.exe' -o \
-            -name 'codex-responses-api-proxy-x86_64-pc-windows-msvc.exe' \
+            -name 'codex-responses-api-proxy-x86_64-pc-windows-msvc.exe' -o \
+            -name 'codex-command-runner-x86_64-pc-windows-msvc.exe' -o \
+            -name 'codex-windows-sandbox-setup-x86_64-pc-windows-msvc.exe' -o \
+            -name 'codex-app-server-x86_64-pc-windows-msvc.exe' \
           \) -exec cp '{}' extracted/ \;
           test -f extracted/codex-x86_64-pc-windows-msvc.exe
           test -f extracted/codex-code-mode-host-x86_64-pc-windows-msvc.exe
           test -f extracted/codex-responses-api-proxy-x86_64-pc-windows-msvc.exe
+          test -f extracted/codex-command-runner-x86_64-pc-windows-msvc.exe
+          test -f extracted/codex-windows-sandbox-setup-x86_64-pc-windows-msvc.exe
+          test -f extracted/codex-app-server-x86_64-pc-windows-msvc.exe
           sha256sum extracted/* | tee extracted/SHA256SUMS
 
       - name: Upload lightweight test artifact
