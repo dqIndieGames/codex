@@ -168,6 +168,7 @@ const RESPONSES_ENDPOINT: &str = "/responses";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
 const REQUEST_RETRY_ROUTE_RECOVERY_INTERRUPTED: &str = "retry route recovery requested";
+const ROUTE_RECOVERY_REFRESH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.
 const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
@@ -607,6 +608,23 @@ impl ModelClient {
         Arc::new(move || client.current_provider_runtime_generation() == runtime_generation)
     }
 
+    async fn wait_for_route_recovery_delay(&self, runtime_generation: u64) -> bool {
+        let delay = crate::util::fixed_retry_delay();
+        let start = Instant::now();
+        loop {
+            if self.current_provider_runtime_generation() != runtime_generation {
+                return false;
+            }
+
+            let elapsed = start.elapsed();
+            if elapsed >= delay {
+                return true;
+            }
+
+            tokio::time::sleep((delay - elapsed).min(ROUTE_RECOVERY_REFRESH_POLL_INTERVAL)).await;
+        }
+    }
+
     pub(crate) async fn current_realtime_websocket_runtime_setup(
         &self,
         realtime_ws_base_url: Option<String>,
@@ -746,9 +764,18 @@ impl ModelClient {
         }
         let mut route_recovery_generation = 0;
         let mut request_route_retry_count_consumed = 0;
+        let mut provider_runtime_generation = None;
         loop {
             let client_setup = self.current_client_setup().await?;
             let runtime_generation = client_setup.provider_runtime_generation;
+            if provider_runtime_generation.is_some_and(|generation| generation != runtime_generation)
+            {
+                request_route_retry_count_consumed = 0;
+                route_recovery_generation = 0;
+                turn_state = Some(Arc::new(OnceLock::new()));
+                self.store_cached_websocket_session(WebsocketSession::default());
+            }
+            provider_runtime_generation = Some(runtime_generation);
             let mut api_provider = client_setup.api_provider;
             api_provider.retry.max_attempts = api_provider
                 .retry
@@ -861,6 +888,11 @@ impl ModelClient {
                     if request_route_recovery.restart_requested() =>
                 {
                     trace_attempt.record_failed(&reason);
+                    if !self.wait_for_route_recovery_delay(runtime_generation).await {
+                        request_route_retry_count_consumed = 0;
+                        route_recovery_generation = 0;
+                        continue;
+                    }
                     request_route_retry_count_consumed = request_route_retry_count_consumed
                         .saturating_add(request_route_recovery.restart_retry_number());
                     route_recovery_generation = route_recovery_generation.saturating_add(1);
@@ -1812,6 +1844,10 @@ impl ModelClientSession {
         let mut request_route_retry_count_consumed = 0;
         loop {
             let client_setup = self.client.current_client_setup().await?;
+            if self.provider_runtime_generation != client_setup.provider_runtime_generation {
+                pending_retry = PendingUnauthorizedRetry::default();
+                request_route_retry_count_consumed = 0;
+            }
             self.sync_provider_runtime_generation(client_setup.provider_runtime_generation);
             let mut api_provider = client_setup.api_provider;
             self.last_api_base_url = Some(api_provider.base_url.clone());
@@ -1924,6 +1960,15 @@ impl ModelClientSession {
                         /*upstream_request_id*/ None,
                         &[],
                     );
+                    if !self
+                        .client
+                        .wait_for_route_recovery_delay(client_setup.provider_runtime_generation)
+                        .await
+                    {
+                        pending_retry = PendingUnauthorizedRetry::default();
+                        request_route_retry_count_consumed = 0;
+                        continue;
+                    }
                     request_route_retry_count_consumed = request_route_retry_count_consumed
                         .saturating_add(request_route_recovery.restart_retry_number());
                     self.activate_retry_route_recovery();
