@@ -26,9 +26,9 @@ impl RetryOn {
             return false;
         }
         match err {
-            TransportError::Http { .. }
-            | TransportError::Timeout
-            | TransportError::Network(_) => true,
+            TransportError::Http { .. } | TransportError::Timeout | TransportError::Network(_) => {
+                true
+            }
             TransportError::RetryLimit
             | TransportError::RetryInterrupted(_)
             | TransportError::Build(_) => false,

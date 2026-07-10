@@ -768,7 +768,8 @@ impl ModelClient {
         loop {
             let client_setup = self.current_client_setup().await?;
             let runtime_generation = client_setup.provider_runtime_generation;
-            if provider_runtime_generation.is_some_and(|generation| generation != runtime_generation)
+            if provider_runtime_generation
+                .is_some_and(|generation| generation != runtime_generation)
             {
                 request_route_retry_count_consumed = 0;
                 route_recovery_generation = 0;
@@ -781,10 +782,8 @@ impl ModelClient {
                 .retry
                 .max_attempts
                 .saturating_sub(request_route_retry_count_consumed);
-            let transport = self.build_responses_transport(
-                &api_provider,
-                RESPONSES_COMPACT_ENDPOINT,
-            )?;
+            let transport =
+                self.build_responses_transport(&api_provider, RESPONSES_COMPACT_ENDPOINT)?;
             let request_route_recovery =
                 RequestRouteRecovery::new(!is_chatgpt_codex_base_url(&api_provider.base_url));
             let request_telemetry = Self::build_request_telemetry(

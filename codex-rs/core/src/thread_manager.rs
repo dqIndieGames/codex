@@ -489,11 +489,7 @@ impl ModelsManager for RefreshableModelsManager {
         http_client_factory: codex_http_client::HttpClientFactory,
     ) -> ModelsManagerFuture<'_, ()> {
         let manager = self.current();
-        Box::pin(async move {
-            manager
-                .refresh_if_new_etag(etag, http_client_factory)
-                .await
-        })
+        Box::pin(async move { manager.refresh_if_new_etag(etag, http_client_factory).await })
     }
 }
 

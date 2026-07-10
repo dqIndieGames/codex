@@ -679,11 +679,9 @@ impl Session {
             .and_then(|environment| environment.cwd.to_abs_path().ok())
             .map(|cwd| cwd.to_path_buf())
             .unwrap_or_else(|| session_configuration.cwd().to_path_buf());
-        let mcp_runtime_context = McpRuntimeContext::new(
-            Arc::clone(&environment_manager),
-            mcp_runtime_cwd,
-        )
-        .with_codex_self_exe(config.codex_self_exe.clone());
+        let mcp_runtime_context =
+            McpRuntimeContext::new(Arc::clone(&environment_manager), mcp_runtime_cwd)
+                .with_codex_self_exe(config.codex_self_exe.clone());
         let mcp_runtime_context_for_auth = mcp_runtime_context.clone();
         let auth_and_mcp_fut = async move {
             let auth = auth_manager_clone.auth().await;
