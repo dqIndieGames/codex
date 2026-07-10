@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::app_info::app_info_to_api;
 use crate::config_manager::ConfigManager;
 use crate::config_manager_service::ConfigManagerError;
 use crate::error_code::internal_error;
@@ -282,7 +283,10 @@ impl ConfigRequestProcessor {
                     /*all_connectors_loaded*/ true,
                 ),
                 &config,
-            );
+            )
+            .into_iter()
+            .map(app_info_to_api)
+            .collect();
             outgoing
                 .send_server_notification(ServerNotification::AppListUpdated(
                     AppListUpdatedNotification { data },
