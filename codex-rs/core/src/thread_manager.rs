@@ -406,17 +406,27 @@ impl ModelsManager for RefreshableModelsManager {
     fn list_models(
         &self,
         refresh_strategy: RefreshStrategy,
+        http_client_factory: codex_http_client::HttpClientFactory,
     ) -> ModelsManagerFuture<'_, Vec<ModelPreset>> {
         let manager = self.current();
-        Box::pin(async move { manager.list_models(refresh_strategy).await })
+        Box::pin(async move {
+            manager
+                .list_models(refresh_strategy, http_client_factory)
+                .await
+        })
     }
 
     fn raw_model_catalog(
         &self,
         refresh_strategy: RefreshStrategy,
+        http_client_factory: codex_http_client::HttpClientFactory,
     ) -> ModelsManagerFuture<'_, ModelsResponse> {
         let manager = self.current();
-        Box::pin(async move { manager.raw_model_catalog(refresh_strategy).await })
+        Box::pin(async move {
+            manager
+                .raw_model_catalog(refresh_strategy, http_client_factory)
+                .await
+        })
     }
 
     fn get_remote_models(&self) -> ModelsManagerFuture<'_, Vec<ModelInfo>> {
@@ -447,10 +457,21 @@ impl ModelsManager for RefreshableModelsManager {
     fn get_default_model<'a>(
         &'a self,
         model: &'a Option<String>,
+        allow_provider_model_fallback: bool,
         refresh_strategy: RefreshStrategy,
+        http_client_factory: codex_http_client::HttpClientFactory,
     ) -> ModelsManagerFuture<'a, String> {
         let manager = self.current();
-        Box::pin(async move { manager.get_default_model(model, refresh_strategy).await })
+        Box::pin(async move {
+            manager
+                .get_default_model(
+                    model,
+                    allow_provider_model_fallback,
+                    refresh_strategy,
+                    http_client_factory,
+                )
+                .await
+        })
     }
 
     fn get_model_info<'a>(
@@ -462,9 +483,17 @@ impl ModelsManager for RefreshableModelsManager {
         Box::pin(async move { manager.get_model_info(model, config).await })
     }
 
-    fn refresh_if_new_etag(&self, etag: String) -> ModelsManagerFuture<'_, ()> {
+    fn refresh_if_new_etag(
+        &self,
+        etag: String,
+        http_client_factory: codex_http_client::HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
         let manager = self.current();
-        Box::pin(async move { manager.refresh_if_new_etag(etag).await })
+        Box::pin(async move {
+            manager
+                .refresh_if_new_etag(etag, http_client_factory)
+                .await
+        })
     }
 }
 
@@ -749,7 +778,9 @@ impl ThreadManager {
 
     pub async fn refresh_models_manager_from_config(&self, config: &Config) {
         let models_manager = build_models_manager(config, self.state.auth_manager.clone());
-        models_manager.list_models(RefreshStrategy::Online).await;
+        models_manager
+            .list_models(RefreshStrategy::Online, config.http_client_factory())
+            .await;
         self.state.models_manager.replace(models_manager);
     }
 

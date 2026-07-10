@@ -97,6 +97,7 @@ enum RealtimeConversationEnd {
 
 enum RealtimeFanoutTaskStop {
     Await,
+    Abort,
     Detach,
 }
 
@@ -724,6 +725,10 @@ async fn stop_conversation_state(
     if let Some(fanout_task) = state.fanout_task.take() {
         match fanout_task_stop {
             RealtimeFanoutTaskStop::Await => {
+                let _ = fanout_task.await;
+            }
+            RealtimeFanoutTaskStop::Abort => {
+                fanout_task.abort();
                 let _ = fanout_task.await;
             }
             RealtimeFanoutTaskStop::Detach => {}
