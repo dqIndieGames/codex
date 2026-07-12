@@ -53,6 +53,7 @@ const REALTIME_WIRE_LOG_TARGET: &str = "codex_api::realtime_websocket::wire";
 const REALTIME_RETRY_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
 pub type RequestRetryGuard = Arc<dyn Fn() -> bool + Send + Sync>;
+pub type RequestRetryTimeout = Arc<dyn Fn() -> Option<Duration> + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct RealtimeRetryEvent {
@@ -599,6 +600,7 @@ fn contains_transcript_entry(entries: &[RealtimeTranscriptEntry], role: &str, te
 pub struct RealtimeWebsocketClient {
     provider: Provider,
     request_retry_guard: Option<RequestRetryGuard>,
+    request_retry_timeout: Option<RequestRetryTimeout>,
     request_retry_notifier: Option<RealtimeRetryNotifier>,
 }
 
@@ -607,6 +609,7 @@ impl RealtimeWebsocketClient {
         Self {
             provider,
             request_retry_guard: None,
+            request_retry_timeout: None,
             request_retry_notifier: None,
         }
     }
@@ -616,6 +619,14 @@ impl RealtimeWebsocketClient {
         guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ) -> Self {
         self.request_retry_guard = guard;
+        self
+    }
+
+    pub fn with_request_retry_timeout(
+        mut self,
+        timeout: Option<RequestRetryTimeout>,
+    ) -> Self {
+        self.request_retry_timeout = timeout;
         self
     }
 
@@ -634,6 +645,12 @@ impl RealtimeWebsocketClient {
         self.request_retry_guard
             .as_ref()
             .is_none_or(|guard| guard())
+    }
+
+    fn request_retry_timeout(&self) -> Option<Duration> {
+        self.request_retry_timeout
+            .as_ref()
+            .and_then(|timeout| timeout())
     }
 
     async fn sleep_retry_delay(&self, delay: Duration) -> Result<(), ApiError> {
@@ -675,7 +692,17 @@ impl RealtimeWebsocketClient {
                 return Err(self.request_retry_interrupted());
             }
 
-            match connect_once().await {
+            let connect_result = match self.request_retry_timeout() {
+                Some(retry_timeout) => {
+                    match tokio::time::timeout(retry_timeout, connect_once()).await {
+                        Ok(result) => result,
+                        Err(_) => return Err(self.request_retry_interrupted()),
+                    }
+                }
+                None => connect_once().await,
+            };
+
+            match connect_result {
                 Ok(connection) => return Ok(connection),
                 Err(err)
                     if retry_number < max_attempts && should_retry_realtime_connect_error(&err) =>

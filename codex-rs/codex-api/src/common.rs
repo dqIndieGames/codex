@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 pub const WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY: &str = "ws_request_header_traceparent";
 pub const WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY: &str = "ws_request_header_tracestate";
@@ -346,6 +347,9 @@ pub struct ResponseStream {
     pub rx_event: mpsc::Receiver<Result<ResponseEvent, ApiError>>,
     /// Server-assigned `x-request-id` response header, when present.
     pub upstream_request_id: Option<String>,
+    /// Cancels the background producer so a caller can actively drop an in-flight
+    /// HTTP or WebSocket response instead of only dropping its event receiver.
+    pub cancellation_token: CancellationToken,
 }
 
 impl Stream for ResponseStream {

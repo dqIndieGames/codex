@@ -23,14 +23,12 @@ pub(super) struct RemoteCompactV2Attempt {
     pub(super) prompt_input: Vec<ResponseItem>,
     pub(super) compaction_output: ResponseItem,
     pub(super) token_usage: Option<TokenUsage>,
-    /// Keeps a session created for standalone compaction alive through lifecycle completion.
-    pub(super) owned_client_session: Option<ModelClientSession>,
 }
 
 pub(super) async fn run_remote_compact_v2_attempt(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
-    client_session: Option<&mut ModelClientSession>,
+    client_session: &mut ModelClientSession,
     compaction_trace: &CompactionTraceContext,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -94,11 +92,6 @@ pub(super) async fn run_remote_compact_v2_attempt(
         "input": &prompt.input,
         "parallel_tool_calls": prompt.parallel_tool_calls,
     }));
-    let mut owned_client_session = None;
-    let client_session = match client_session {
-        Some(client_session) => client_session,
-        None => owned_client_session.insert(sess.services.model_client.new_session()),
-    };
     let compaction_output_result = run_remote_compaction_request_v2(
         sess,
         turn_context.as_ref(),
@@ -121,6 +114,5 @@ pub(super) async fn run_remote_compact_v2_attempt(
         prompt_input,
         compaction_output,
         token_usage,
-        owned_client_session,
     })
 }

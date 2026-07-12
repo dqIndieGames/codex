@@ -175,9 +175,71 @@ const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
 const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
 const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
 const WEBSOCKET_CONNECT_REFRESH_POLL_INTERVAL: Duration = Duration::from_millis(250);
+pub(crate) const RETRY_TIME_BUDGET: Duration = Duration::from_secs(10 * 60);
+pub(crate) const RETRY_TIME_BUDGET_EXHAUSTED_MESSAGE: &str =
+    "网络重连已持续 10 分钟，已自动停止。请手动重试。";
 #[cfg(test)]
 pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
     Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
+
+/// A turn-scoped wall-clock budget which starts only after the first automatic
+/// retry. It is deliberately independent from retry counters so provider
+/// refresh, fallback transport, and route recovery cannot reset it.
+#[derive(Clone, Debug)]
+pub(crate) struct RetryTimeBudget {
+    limit: Duration,
+    started_at: Arc<StdMutex<Option<Instant>>>,
+}
+
+impl RetryTimeBudget {
+    pub(crate) fn new() -> Self {
+        Self::with_limit(RETRY_TIME_BUDGET)
+    }
+
+    pub(crate) fn with_limit(limit: Duration) -> Self {
+        Self {
+            limit,
+            started_at: Arc::new(StdMutex::new(None)),
+        }
+    }
+
+    /// Starts the shared clock at the first retry and reports whether another
+    /// retry may still proceed.
+    pub(crate) fn begin_retry(&self) -> bool {
+        let mut started_at = self
+            .started_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if started_at.is_none() {
+            *started_at = Some(Instant::now());
+        }
+        drop(started_at);
+        self.can_continue()
+    }
+
+    pub(crate) fn can_continue(&self) -> bool {
+        self.remaining().is_none_or(|remaining| !remaining.is_zero())
+    }
+
+    /// Returns `None` until the first retry starts the budget.
+    pub(crate) fn remaining(&self) -> Option<Duration> {
+        let started_at = *self
+            .started_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        started_at.map(|started_at| self.limit.saturating_sub(started_at.elapsed()))
+    }
+
+    pub(crate) fn exhausted_error(&self) -> Option<CodexErr> {
+        (!self.can_continue()).then(|| {
+            CodexErr::RetryTimeBudgetExceeded(RETRY_TIME_BUDGET_EXHAUSTED_MESSAGE.to_string())
+        })
+    }
+
+    pub(crate) fn terminal_or(&self, error: CodexErr) -> CodexErr {
+        self.exhausted_error().unwrap_or(error)
+    }
+}
 
 pub(crate) struct CompactConversationRequestSettings {
     pub(crate) effort: Option<ReasoningEffortConfig>,
@@ -346,6 +408,7 @@ pub struct ModelClientSession {
     route_recovery_generation: u64,
     last_api_base_url: Option<String>,
     request_retry_notifier: Option<RequestRetryNotifier>,
+    retry_time_budget: RetryTimeBudget,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -581,8 +644,21 @@ impl ModelClient {
             route_recovery_generation: 0,
             last_api_base_url: None,
             request_retry_notifier: None,
+            retry_time_budget: RetryTimeBudget::new(),
             turn_state: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Creates an isolated request session that shares an existing retry time
+    /// budget. Compaction uses this to avoid inheriting a sampling request's
+    /// sticky state while still preserving the user's one retry deadline.
+    pub(crate) fn new_session_with_retry_time_budget(
+        &self,
+        retry_time_budget: RetryTimeBudget,
+    ) -> ModelClientSession {
+        let mut session = self.new_session();
+        session.retry_time_budget = retry_time_budget;
+        session
     }
 
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
@@ -603,22 +679,36 @@ impl ModelClient {
             .load(Ordering::Acquire)
     }
 
-    pub(crate) fn request_retry_guard(&self, runtime_generation: u64) -> RequestRetryGuard {
+    pub(crate) fn request_retry_guard(
+        &self,
+        runtime_generation: u64,
+        retry_time_budget: RetryTimeBudget,
+    ) -> RequestRetryGuard {
         let client = self.clone();
-        Arc::new(move || client.current_provider_runtime_generation() == runtime_generation)
+        Arc::new(move || {
+            client.current_provider_runtime_generation() == runtime_generation
+                && retry_time_budget.can_continue()
+        })
     }
 
-    async fn wait_for_route_recovery_delay(&self, runtime_generation: u64) -> bool {
+    async fn wait_for_route_recovery_delay(
+        &self,
+        runtime_generation: u64,
+        retry_time_budget: &RetryTimeBudget,
+    ) -> Result<bool> {
         let delay = crate::util::fixed_retry_delay();
         let start = Instant::now();
         loop {
+            if let Some(error) = retry_time_budget.exhausted_error() {
+                return Err(error);
+            }
             if self.current_provider_runtime_generation() != runtime_generation {
-                return false;
+                return Ok(false);
             }
 
             let elapsed = start.elapsed();
             if elapsed >= delay {
-                return true;
+                return Ok(true);
             }
 
             tokio::time::sleep((delay - elapsed).min(ROUTE_RECOVERY_REFRESH_POLL_INTERVAL)).await;
@@ -743,6 +833,7 @@ impl ModelClient {
             compaction_trace,
             responses_metadata,
             None,
+            RetryTimeBudget::new(),
         )
         .await
     }
@@ -758,6 +849,7 @@ impl ModelClient {
         compaction_trace: &CompactionTraceContext,
         responses_metadata: &CodexResponsesMetadata,
         request_retry_notifier: Option<RequestRetryNotifier>,
+        retry_time_budget: RetryTimeBudget,
     ) -> Result<Vec<ResponseItem>> {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
@@ -766,6 +858,9 @@ impl ModelClient {
         let mut request_route_retry_count_consumed = 0;
         let mut provider_runtime_generation = None;
         loop {
+            if let Some(error) = retry_time_budget.exhausted_error() {
+                return Err(error);
+            }
             let client_setup = self.current_client_setup().await?;
             let runtime_generation = client_setup.provider_runtime_generation;
             if provider_runtime_generation
@@ -797,7 +892,8 @@ impl ModelClient {
                 RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
                 self.state.auth_env_telemetry.clone(),
                 request_retry_notifier.clone(),
-                Some(self.request_retry_guard(runtime_generation)),
+                Some(self.request_retry_guard(runtime_generation, retry_time_budget.clone())),
+                Some(retry_time_budget.clone()),
                 Some(request_route_recovery.clone()),
                 request_route_retry_count_consumed,
             );
@@ -887,7 +983,10 @@ impl ModelClient {
                     if request_route_recovery.restart_requested() =>
                 {
                     trace_attempt.record_failed(&reason);
-                    if !self.wait_for_route_recovery_delay(runtime_generation).await {
+                    if !self
+                        .wait_for_route_recovery_delay(runtime_generation, &retry_time_budget)
+                        .await?
+                    {
                         request_route_retry_count_consumed = 0;
                         route_recovery_generation = 0;
                         continue;
@@ -900,7 +999,7 @@ impl ModelClient {
                     continue;
                 }
                 Err(err) => {
-                    let mapped = map_responses_request_api_error(err);
+                    let mapped = retry_time_budget.terminal_or(map_responses_request_api_error(err));
                     trace_attempt.record_failed(&mapped);
                     return Err(mapped);
                 }
@@ -915,10 +1014,14 @@ impl ModelClient {
         extra_headers: ApiHeaderMap,
         api_provider_override: Option<ApiProvider>,
         session_telemetry: &SessionTelemetry,
+        retry_time_budget: RetryTimeBudget,
     ) -> Result<RealtimeWebrtcCallStart> {
         // Create the media call over HTTP first, then retain matching auth so realtime can attach
         // the server-side control WebSocket to the call id from that HTTP response.
         loop {
+            if let Some(error) = retry_time_budget.exhausted_error() {
+                return Err(error);
+            }
             let client_setup = self.current_client_setup().await?;
             let runtime_generation = client_setup.provider_runtime_generation;
             let mut request_headers = extra_headers.clone();
@@ -945,7 +1048,8 @@ impl ModelClient {
                 RequestRouteTelemetry::for_endpoint(REALTIME_CALLS_ENDPOINT),
                 self.state.auth_env_telemetry.clone(),
                 None,
-                Some(self.request_retry_guard(runtime_generation)),
+                Some(self.request_retry_guard(runtime_generation, retry_time_budget.clone())),
+                Some(retry_time_budget.clone()),
                 None,
                 0,
             );
@@ -973,7 +1077,7 @@ impl ModelClient {
                     debug!("restarting realtime call after provider runtime refresh: {reason}");
                     continue;
                 }
-                Err(err) => return Err(map_api_error(err)),
+                Err(err) => return Err(retry_time_budget.terminal_or(map_api_error(err))),
             }
         }
     }
@@ -995,7 +1099,11 @@ impl ModelClient {
             return Ok(Vec::new());
         }
 
+        let retry_time_budget = RetryTimeBudget::new();
         loop {
+            if let Some(error) = retry_time_budget.exhausted_error() {
+                return Err(error);
+            }
             let client_setup = self.current_client_setup().await?;
             let runtime_generation = client_setup.provider_runtime_generation;
             let transport = ReqwestTransport::new(build_reqwest_client());
@@ -1010,7 +1118,8 @@ impl ModelClient {
                 RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
                 self.state.auth_env_telemetry.clone(),
                 None,
-                Some(self.request_retry_guard(runtime_generation)),
+                Some(self.request_retry_guard(runtime_generation, retry_time_budget.clone())),
+                Some(retry_time_budget.clone()),
                 None,
                 0,
             );
@@ -1044,7 +1153,7 @@ impl ModelClient {
                     );
                     continue;
                 }
-                Err(err) => return Err(map_api_error(err)),
+                Err(err) => return Err(retry_time_budget.terminal_or(map_api_error(err))),
             }
         }
     }
@@ -1122,6 +1231,7 @@ impl ModelClient {
         auth_env_telemetry: AuthEnvTelemetry,
         request_retry_notifier: Option<RequestRetryNotifier>,
         request_retry_guard: Option<RequestRetryGuard>,
+        retry_time_budget: Option<RetryTimeBudget>,
         request_route_recovery: Option<RequestRouteRecovery>,
         request_retry_display_offset: u64,
     ) -> Arc<dyn RequestTelemetry> {
@@ -1132,6 +1242,7 @@ impl ModelClient {
             auth_env_telemetry,
             request_retry_notifier,
             request_retry_guard,
+            retry_time_budget,
             request_route_recovery,
             request_retry_display_offset,
         ));
@@ -1350,7 +1461,13 @@ impl ModelClient {
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
         runtime_generation: u64,
+        retry_time_budget: &RetryTimeBudget,
     ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
+        if !retry_time_budget.can_continue() {
+            return Err(ApiError::Transport(TransportError::RetryInterrupted(
+                RETRY_TIME_BUDGET_EXHAUSTED_MESSAGE.to_string(),
+            )));
+        }
         if self.current_provider_runtime_generation() != runtime_generation {
             return Err(ApiError::Transport(TransportError::RetryInterrupted(
                 "provider runtime changed during websocket connect".to_string(),
@@ -1391,6 +1508,11 @@ impl ModelClient {
                     };
                 }
                 _ = tokio::time::sleep(WEBSOCKET_CONNECT_REFRESH_POLL_INTERVAL) => {
+                    if !retry_time_budget.can_continue() {
+                        break Err(ApiError::Transport(TransportError::RetryInterrupted(
+                            RETRY_TIME_BUDGET_EXHAUSTED_MESSAGE.to_string(),
+                        )));
+                    }
                     if self.current_provider_runtime_generation() != runtime_generation {
                         break Err(ApiError::Transport(TransportError::RetryInterrupted(
                             "provider runtime changed during websocket connect".to_string(),
@@ -1504,7 +1626,30 @@ impl ModelClientSession {
 
     fn request_retry_guard(&self, runtime_generation: u64) -> RequestRetryGuard {
         let client = self.client.clone();
-        Arc::new(move || client.current_provider_runtime_generation() == runtime_generation)
+        let retry_time_budget = self.retry_time_budget.clone();
+        Arc::new(move || {
+            client.current_provider_runtime_generation() == runtime_generation
+                && retry_time_budget.can_continue()
+        })
+    }
+
+    pub(crate) fn retry_time_budget(&self) -> RetryTimeBudget {
+        self.retry_time_budget.clone()
+    }
+
+    pub(crate) fn begin_retry_time_budget(&self) -> Result<()> {
+        if self.retry_time_budget.begin_retry() {
+            Ok(())
+        } else {
+            Err(self
+                .retry_time_budget
+                .exhausted_error()
+                .expect("a failed retry budget must have a terminal error"))
+        }
+    }
+
+    pub(crate) fn retry_time_budget_terminal_or(&self, error: CodexErr) -> CodexErr {
+        self.retry_time_budget.terminal_or(error)
     }
 
     pub(crate) fn provider_runtime_changed(&self) -> bool {
@@ -1718,6 +1863,7 @@ impl ModelClientSession {
                 auth_context,
                 RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
                 client_setup.provider_runtime_generation,
+                &self.retry_time_budget,
             )
             .await?;
         self.websocket_session.connection = Some(connection);
@@ -1769,6 +1915,7 @@ impl ModelClientSession {
                     auth_context,
                     request_route_telemetry,
                     self.provider_runtime_generation,
+                    &self.retry_time_budget,
                 )
                 .await
             {
@@ -1842,6 +1989,9 @@ impl ModelClientSession {
         let mut pending_retry = PendingUnauthorizedRetry::default();
         let mut request_route_retry_count_consumed = 0;
         loop {
+            if let Some(error) = self.retry_time_budget.exhausted_error() {
+                return Err(error);
+            }
             let client_setup = self.client.current_client_setup().await?;
             if self.provider_runtime_generation != client_setup.provider_runtime_generation {
                 pending_retry = PendingUnauthorizedRetry::default();
@@ -1897,6 +2047,7 @@ impl ModelClientSession {
                 self.client.state.auth_env_telemetry.clone(),
                 self.request_retry_notifier.clone(),
                 Some(self.request_retry_guard(client_setup.provider_runtime_generation)),
+                Some(self.retry_time_budget()),
                 Some(request_route_recovery.clone()),
                 request_route_retry_count_consumed,
             );
@@ -1914,6 +2065,7 @@ impl ModelClientSession {
                         request_session_telemetry,
                         inference_trace_attempt,
                         self.request_retry_guard(client_setup.provider_runtime_generation),
+                        self.retry_time_budget(),
                     );
                     return Ok(stream);
                 }
@@ -1961,8 +2113,11 @@ impl ModelClientSession {
                     );
                     if !self
                         .client
-                        .wait_for_route_recovery_delay(client_setup.provider_runtime_generation)
-                        .await
+                        .wait_for_route_recovery_delay(
+                            client_setup.provider_runtime_generation,
+                            &self.retry_time_budget,
+                        )
+                        .await?
                     {
                         pending_retry = PendingUnauthorizedRetry::default();
                         request_route_retry_count_consumed = 0;
@@ -1977,7 +2132,8 @@ impl ModelClientSession {
                 Err(err) => {
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
-                    let err = map_responses_request_api_error(err);
+                    let err = self
+                        .retry_time_budget_terminal_or(map_responses_request_api_error(err));
                     inference_trace_attempt.record_failed(
                         &err,
                         response_debug_context.request_id.as_deref(),
@@ -2024,6 +2180,9 @@ impl ModelClientSession {
             .map(AuthManager::unauthorized_recovery);
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
+            if let Some(error) = self.retry_time_budget.exhausted_error() {
+                return Err(error);
+            }
             let client_setup = self.client.current_client_setup().await?;
             self.sync_provider_runtime_generation(client_setup.provider_runtime_generation);
             self.last_api_base_url = Some(client_setup.api_provider.base_url.clone());
@@ -2111,7 +2270,10 @@ impl ModelClientSession {
                             );
                             continue;
                         }
-                        err => return Err(map_responses_stream_api_error(err)),
+                        err => {
+                            return Err(self
+                                .retry_time_budget_terminal_or(map_responses_stream_api_error(err)));
+                        }
                     }
                 }
             }
@@ -2161,7 +2323,8 @@ impl ModelClientSession {
                 .map_err(|err| {
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
-                    let err = map_responses_stream_api_error(err);
+                    let err = self
+                        .retry_time_budget_terminal_or(map_responses_stream_api_error(err));
                     inference_trace_attempt.record_failed(
                         &err,
                         response_debug_context.request_id.as_deref(),
@@ -2174,6 +2337,7 @@ impl ModelClientSession {
                 request_session_telemetry,
                 inference_trace_attempt,
                 self.request_retry_guard(client_setup.provider_runtime_generation),
+                self.retry_time_budget(),
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
@@ -2188,6 +2352,7 @@ impl ModelClientSession {
         auth_env_telemetry: AuthEnvTelemetry,
         request_retry_notifier: Option<RequestRetryNotifier>,
         request_retry_guard: Option<RequestRetryGuard>,
+        retry_time_budget: Option<RetryTimeBudget>,
         request_route_recovery: Option<RequestRouteRecovery>,
         request_retry_display_offset: u64,
     ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
@@ -2198,6 +2363,7 @@ impl ModelClientSession {
             auth_env_telemetry,
             request_retry_notifier,
             request_retry_guard,
+            retry_time_budget,
             request_route_recovery,
             request_retry_display_offset,
         ));
@@ -2218,6 +2384,7 @@ impl ModelClientSession {
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+            None,
             None,
             None,
             None,
@@ -2435,14 +2602,36 @@ fn map_response_stream(
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
     runtime_guard: RequestRetryGuard,
+    retry_time_budget: RetryTimeBudget,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let codex_api::ResponseStream {
         rx_event,
         upstream_request_id,
+        cancellation_token,
     } = api_stream;
+    let upstream_cancellation = cancellation_token.clone();
+    let cancellation_for_watchdog = cancellation_token.clone();
+    let retry_time_budget_for_watchdog = retry_time_budget.clone();
+    tokio::spawn(async move {
+        loop {
+            let delay = retry_time_budget_for_watchdog
+                .remaining()
+                .unwrap_or(Duration::from_millis(250));
+            tokio::select! {
+                _ = cancellation_for_watchdog.cancelled() => return,
+                _ = tokio::time::sleep(delay) => {
+                    if !retry_time_budget_for_watchdog.can_continue() {
+                        cancellation_for_watchdog.cancel();
+                        return;
+                    }
+                }
+            }
+        }
+    });
     let api_stream = codex_api::ResponseStream {
         rx_event,
         upstream_request_id: None,
+        cancellation_token,
     };
     map_response_events(
         upstream_request_id,
@@ -2450,7 +2639,15 @@ fn map_response_stream(
         session_telemetry,
         inference_trace_attempt,
         runtime_guard,
+        retry_time_budget,
+        Some(upstream_cancellation),
     )
+}
+
+fn cancel_upstream_response_stream(cancellation_token: Option<&CancellationToken>) {
+    if let Some(cancellation_token) = cancellation_token {
+        cancellation_token.cancel();
+    }
 }
 
 fn map_response_events<S>(
@@ -2459,6 +2656,8 @@ fn map_response_events<S>(
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
     runtime_guard: RequestRetryGuard,
+    retry_time_budget: RetryTimeBudget,
+    upstream_cancellation: Option<CancellationToken>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>)
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
@@ -2479,12 +2678,25 @@ where
         let (request_start, mut ttft_ms) = (Instant::now(), None);
         let mut api_stream = api_stream;
         let upstream_request_id = upstream_request_id.as_deref();
+        let mut retry_budget_poll = tokio::time::interval(Duration::from_millis(250));
+        retry_budget_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         if let Some(upstream_request_id) = upstream_request_id {
             feedback_tags!(last_model_request_id = upstream_request_id);
         }
         loop {
+            if let Some(mapped) = retry_time_budget.exhausted_error() {
+                cancel_upstream_response_stream(upstream_cancellation.as_ref());
+                inference_trace_attempt.record_cancelled(
+                    RETRY_TIME_BUDGET_EXHAUSTED_MESSAGE,
+                    upstream_request_id,
+                    &items_added,
+                );
+                let _ = tx_event.send(Err(mapped)).await;
+                return;
+            }
             let event = tokio::select! {
                 _ = consumer_dropped.cancelled() => {
+                    cancel_upstream_response_stream(upstream_cancellation.as_ref());
                     inference_trace_attempt.record_cancelled(
                         STREAM_DROPPED_REASON,
                         upstream_request_id,
@@ -2492,8 +2704,19 @@ where
                     );
                     return;
                 }
-                _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                _ = retry_budget_poll.tick() => {
+                    if let Some(mapped) = retry_time_budget.exhausted_error() {
+                        cancel_upstream_response_stream(upstream_cancellation.as_ref());
+                        inference_trace_attempt.record_cancelled(
+                            RETRY_TIME_BUDGET_EXHAUSTED_MESSAGE,
+                            upstream_request_id,
+                            &items_added,
+                        );
+                        let _ = tx_event.send(Err(mapped)).await;
+                        return;
+                    }
                     if !runtime_guard() {
+                        cancel_upstream_response_stream(upstream_cancellation.as_ref());
                         let mapped = CodexErr::Stream(
                             "provider runtime changed during response stream".to_string(),
                             None,
@@ -2511,6 +2734,16 @@ where
                 event = api_stream.next() => event,
             };
             let Some(event) = event else {
+                if let Some(mapped) = retry_time_budget.exhausted_error() {
+                    cancel_upstream_response_stream(upstream_cancellation.as_ref());
+                    inference_trace_attempt.record_cancelled(
+                        RETRY_TIME_BUDGET_EXHAUSTED_MESSAGE,
+                        upstream_request_id,
+                        &items_added,
+                    );
+                    let _ = tx_event.send(Err(mapped)).await;
+                    return;
+                }
                 break;
             };
             match event {
@@ -2521,6 +2754,7 @@ where
                         .await
                         .is_err()
                     {
+                        cancel_upstream_response_stream(upstream_cancellation.as_ref());
                         inference_trace_attempt.record_cancelled(
                             STREAM_DROPPED_REASON,
                             upstream_request_id,
@@ -2566,6 +2800,7 @@ where
                         .await
                         .is_err()
                     {
+                        cancel_upstream_response_stream(upstream_cancellation.as_ref());
                         return;
                     }
                 }
@@ -2576,6 +2811,7 @@ where
                         );
                     }
                     if tx_event.send(Ok(event)).await.is_err() {
+                        cancel_upstream_response_stream(upstream_cancellation.as_ref());
                         inference_trace_attempt.record_cancelled(
                             STREAM_DROPPED_REASON,
                             upstream_request_id,
@@ -2592,7 +2828,12 @@ where
                     if let Some(upstream_request_id) = upstream_request_id {
                         feedback_tags!(last_model_request_id = upstream_request_id);
                     }
-                    let mapped = map_responses_stream_api_error(err);
+                    let retry_time_budget_exhausted =
+                        retry_time_budget.exhausted_error().is_some();
+                    let mapped = retry_time_budget.terminal_or(map_responses_stream_api_error(err));
+                    if retry_time_budget_exhausted {
+                        cancel_upstream_response_stream(upstream_cancellation.as_ref());
+                    }
                     inference_trace_attempt.record_failed(
                         &mapped,
                         upstream_request_id,
@@ -2603,11 +2844,16 @@ where
                         logged_error = true;
                     }
                     if tx_event.send(Err(mapped)).await.is_err() {
+                        cancel_upstream_response_stream(upstream_cancellation.as_ref());
+                        return;
+                    }
+                    if retry_time_budget_exhausted {
                         return;
                     }
                 }
             }
         }
+        cancel_upstream_response_stream(upstream_cancellation.as_ref());
         inference_trace_attempt.record_failed(
             "stream closed before response.completed",
             upstream_request_id,
@@ -2833,6 +3079,7 @@ struct ApiTelemetry {
     auth_env_telemetry: AuthEnvTelemetry,
     request_retry_notifier: Option<RequestRetryNotifier>,
     request_retry_guard: Option<RequestRetryGuard>,
+    retry_time_budget: Option<RetryTimeBudget>,
     request_route_recovery: Option<RequestRouteRecovery>,
     request_retry_display_offset: u64,
 }
@@ -2845,6 +3092,7 @@ impl ApiTelemetry {
         auth_env_telemetry: AuthEnvTelemetry,
         request_retry_notifier: Option<RequestRetryNotifier>,
         request_retry_guard: Option<RequestRetryGuard>,
+        retry_time_budget: Option<RetryTimeBudget>,
         request_route_recovery: Option<RequestRouteRecovery>,
         request_retry_display_offset: u64,
     ) -> Self {
@@ -2855,6 +3103,7 @@ impl ApiTelemetry {
             auth_env_telemetry,
             request_retry_notifier,
             request_retry_guard,
+            retry_time_budget,
             request_route_recovery,
             request_retry_display_offset,
         }
@@ -2928,6 +3177,10 @@ impl RequestTelemetry for ApiTelemetry {
         status: Option<HttpStatusCode>,
         error: &TransportError,
     ) {
+        if let Some(retry_time_budget) = self.retry_time_budget.as_ref() {
+            retry_time_budget.begin_retry();
+        }
+
         if matches!(
             self.request_route_telemetry.endpoint,
             RESPONSES_ENDPOINT | RESPONSES_COMPACT_ENDPOINT
@@ -2957,21 +3210,37 @@ impl RequestTelemetry for ApiTelemetry {
     }
 
     fn can_continue_request_retry(&self) -> bool {
-        !self
-            .request_route_recovery
+        self
+            .retry_time_budget
             .as_ref()
-            .is_some_and(RequestRouteRecovery::restart_requested)
+            .is_none_or(RetryTimeBudget::can_continue)
+            && self
+                .request_route_recovery
+                .as_ref()
+                .is_none_or(|route_recovery| !route_recovery.restart_requested())
             && self
                 .request_retry_guard
                 .as_ref()
                 .is_none_or(|guard| guard())
     }
 
+    fn request_retry_timeout(&self) -> Option<Duration> {
+        self.retry_time_budget
+            .as_ref()
+            .and_then(RetryTimeBudget::remaining)
+    }
+
     fn request_retry_interruption_reason(&self) -> Option<String> {
-        self.request_route_recovery
+        self.retry_time_budget
+            .as_ref()
+            .and_then(RetryTimeBudget::exhausted_error)
+            .map(|error| error.to_string())
+            .or_else(|| {
+                self.request_route_recovery
             .as_ref()
             .filter(|route_recovery| route_recovery.restart_requested())
             .map(|_| REQUEST_RETRY_ROUTE_RECOVERY_INTERRUPTED.to_string())
+            })
     }
 }
 

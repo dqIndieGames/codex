@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use crate::Prompt;
 use crate::client::ModelClientSession;
+use crate::client::RetryTimeBudget;
 use crate::client_common::ResponseEvent;
 use crate::context::world_state::WorldState;
 use crate::hook_runtime::PostCompactHookOutcome;
@@ -92,6 +93,7 @@ pub(crate) fn should_use_remote_compact_task(provider: &ModelProviderInfo) -> bo
 pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
+    retry_time_budget: RetryTimeBudget,
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
@@ -111,6 +113,7 @@ pub(crate) async fn run_inline_auto_compact_task(
     run_compact_task_inner(
         sess,
         turn_context,
+        retry_time_budget,
         input,
         initial_context_injection,
         CompactionTrigger::Auto,
@@ -137,6 +140,7 @@ pub(crate) async fn run_compact_task(
     run_compact_task_inner(
         sess.clone(),
         turn_context,
+        RetryTimeBudget::new(),
         input,
         InitialContextInjection::DoNotInject,
         CompactionTrigger::Manual,
@@ -150,6 +154,7 @@ pub(crate) async fn run_compact_task(
 async fn run_compact_task_inner(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
+    retry_time_budget: RetryTimeBudget,
     input: Vec<UserInput>,
     initial_context_injection: InitialContextInjection,
     trigger: CompactionTrigger,
@@ -186,6 +191,7 @@ async fn run_compact_task_inner(
     let result = run_compact_task_inner_impl(
         Arc::clone(&sess),
         Arc::clone(&turn_context),
+        retry_time_budget,
         input,
         initial_context_injection,
         compaction_metadata,
@@ -221,6 +227,7 @@ async fn run_compact_task_inner(
 async fn run_compact_task_inner_impl(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
+    retry_time_budget: RetryTimeBudget,
     input: Vec<UserInput>,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
@@ -243,10 +250,12 @@ async fn run_compact_task_inner_impl(
     let retry_budget = local_compaction_stream_retry_budget(turn_context.provider.info());
     let mut retries = 0;
     let mut display_retries = 0;
-    let mut client_session = sess.services.model_client.new_session();
-    // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
-    // request tracking)
-    // survives retries within this compact turn.
+    // Keep compaction's request state isolated, while sharing the enclosing turn's
+    // retry clock so this boundary cannot reset the ten-minute deadline.
+    let mut client_session = sess
+        .services
+        .model_client
+        .new_session_with_retry_time_budget(retry_time_budget);
     let window_id = sess.current_window_id().await;
     let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
         sess.installation_id.clone(),

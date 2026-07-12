@@ -1013,6 +1013,7 @@ async fn run_auto_compact(
             step_context,
             fallback_step_context,
             client_session.turn_state(),
+            client_session.retry_time_budget(),
             initial_context_injection,
             reason,
             phase,
@@ -1027,6 +1028,7 @@ async fn run_auto_compact(
         run_inline_auto_compact_task(
             Arc::clone(sess),
             Arc::clone(turn_context),
+            client_session.retry_time_budget(),
             initial_context_injection,
             reason,
             phase,
@@ -1570,7 +1572,7 @@ fn request_retry_message_for_status(
 
 fn retry_status_message(status_code: u16, retry_number: u64, max_attempts: u64) -> String {
     if max_attempts == u64::MAX {
-        format!("{status_code} retry {retry_number} (unbounded)")
+        format!("{status_code} retry {retry_number} (10 min limit)")
     } else {
         format!("{status_code} retry {retry_number}/{max_attempts}")
     }
@@ -1578,7 +1580,7 @@ fn retry_status_message(status_code: u16, retry_number: u64, max_attempts: u64) 
 
 fn transport_retry_status_message(retry_number: u64, max_attempts: u64) -> String {
     if max_attempts == u64::MAX {
-        format!("Reconnecting... {retry_number} (unbounded)")
+        format!("Reconnecting... {retry_number} (10 min limit)")
     } else {
         format!("Reconnecting... {retry_number}/{max_attempts}")
     }
@@ -1770,20 +1772,21 @@ mod retry_status_message_tests {
     use super::transport_retry_status_message;
 
     #[test]
-    fn retry_status_message_does_not_expose_unbounded_retry_sentinel() {
+    fn retry_status_message_marks_the_ten_minute_limit() {
         let message = retry_status_message(429, 4, u64::MAX);
 
-        assert_eq!(message, "429 retry 4 (unbounded)");
+        assert!(message.starts_with("429 retry 4"));
+        assert!(message.contains("10 min limit"));
+        assert!(!message.contains("unbounded"));
         assert!(!message.contains(&u64::MAX.to_string()));
     }
 
     #[test]
     fn retry_status_message_keeps_bounded_retry_count() {
         assert_eq!(retry_status_message(503, 1, 4), "503 retry 1/4");
-        assert_eq!(
-            transport_retry_status_message(2, u64::MAX),
-            "Reconnecting... 2 (unbounded)"
-        );
+        let message = transport_retry_status_message(2, u64::MAX);
+        assert!(message.starts_with("Reconnecting... 2"));
+        assert!(message.contains("10 min limit"));
     }
 }
 

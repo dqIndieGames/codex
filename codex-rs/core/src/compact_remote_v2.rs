@@ -54,8 +54,9 @@ use attempt::run_remote_compact_v2_attempt;
 const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 // Compact attempts can run much longer than normal turns. When the provider is
 // in bounded retry mode, keep the ordinary per-transport retry budget smaller
-// than the general Responses stream loop. In unbounded retry mode, preserve the
-// unbounded budget so every third failure can still trigger route recovery.
+// than the general Responses stream loop. When retry count has no configured
+// cap, preserve that count behavior so every third failure can still trigger
+// route recovery; the shared ten-minute time budget still remains authoritative.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
 const REMOTE_COMPACTION_V2_FALLBACK_RETRY_THRESHOLD: u64 = 3;
 
@@ -188,9 +189,11 @@ async fn run_remote_compact_task_inner(
         Err(err @ CodexErr::TurnAborted) => Err(err),
         Err(err) => {
             sess.track_turn_codex_error(turn_context, &err);
-            let event = EventMsg::Error(
-                err.to_error_event(Some("Error running remote compact task".to_string())),
-            );
+            let event = EventMsg::Error(if err.is_retry_time_budget_exhausted() {
+                err.to_error_event(None)
+            } else {
+                err.to_error_event(Some("Error running remote compact task".to_string()))
+            });
             sess.send_event(turn_context, event).await;
             Err(err)
         }
@@ -201,7 +204,7 @@ async fn run_remote_compact_task_inner_impl(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
-    mut client_session: Option<&mut ModelClientSession>,
+    client_session: Option<&mut ModelClientSession>,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -218,11 +221,18 @@ async fn run_remote_compact_task_inner_impl(
     let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
     sess.emit_turn_item_started(turn_context, &compaction_item)
         .await;
+    // Standalone compaction needs the same session for both the preferred model
+    // and fallback attempt so a retry budget cannot restart at the fallback boundary.
+    let mut owned_client_session = None;
+    let client_session = match client_session {
+        Some(client_session) => client_session,
+        None => owned_client_session.insert(sess.services.model_client.new_session()),
+    };
 
     let attempt = run_remote_compact_v2_attempt(
         sess,
         step_context,
-        client_session.as_deref_mut(),
+        &mut *client_session,
         &compaction_trace,
         compaction_metadata,
         analytics_details,
@@ -248,7 +258,7 @@ async fn run_remote_compact_task_inner_impl(
             let fallback_result = run_remote_compact_v2_attempt(
                 sess,
                 fallback_step_context,
-                client_session,
+                &mut *client_session,
                 &fallback_compaction_trace,
                 compaction_metadata,
                 analytics_details,
@@ -264,7 +274,7 @@ async fn run_remote_compact_task_inner_impl(
             );
             match fallback_result {
                 Ok(attempt) => (attempt, fallback_turn_context),
-                Err(_) => return Err(error),
+                Err(fallback_error) => return Err(fallback_error),
             }
         }
     };
@@ -273,7 +283,6 @@ async fn run_remote_compact_task_inner_impl(
         prompt_input,
         compaction_output,
         token_usage,
-        owned_client_session: _owned_client_session,
     } = attempt;
     if let Some(token_usage) = token_usage {
         sess.record_rollout_budget_usage(&token_usage)?;

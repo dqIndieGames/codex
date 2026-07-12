@@ -32,6 +32,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
     _request: ResponsesStreamRequest,
     allow_route_recovery: bool,
 ) -> Result<(), CodexErr> {
+    client_session.begin_retry_time_budget()?;
+
     if client_session.provider_runtime_changed() {
         *retries = 0;
         client_session.sync_latest_provider_runtime_generation();
@@ -76,7 +78,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
             err,
         )
         .await;
-        sleep_stream_retry_delay(delay, retries, client_session).await;
+        sleep_stream_retry_delay(delay, retries, client_session).await?;
         return Ok(());
     }
 
@@ -111,7 +113,7 @@ fn requires_persistent_route_recovery(err: &CodexErr) -> bool {
 
 fn retry_status_suffix(retries: u64, max_retries: u64) -> String {
     if max_retries == u64::MAX {
-        format!("{retries} (unbounded)")
+        format!("{retries} (10 min limit)")
     } else {
         format!("{retries}/{max_retries}")
     }
@@ -137,22 +139,25 @@ async fn sleep_stream_retry_delay(
     delay: Duration,
     retries: &mut u64,
     client_session: &mut ModelClientSession,
-) {
+) -> Result<(), CodexErr> {
     if delay.is_zero() {
-        return;
+        return Ok(());
     }
 
     let start = tokio::time::Instant::now();
     loop {
+        if let Some(error) = client_session.retry_time_budget().exhausted_error() {
+            return Err(error);
+        }
         if client_session.provider_runtime_changed() {
             *retries = 0;
             client_session.sync_latest_provider_runtime_generation();
-            return;
+            return Ok(());
         }
 
         let elapsed = start.elapsed();
         if elapsed >= delay {
-            return;
+            return Ok(());
         }
 
         tokio::time::sleep((delay - elapsed).min(STREAM_RETRY_INTERRUPT_POLL_INTERVAL)).await;
@@ -190,10 +195,12 @@ mod tests {
     }
 
     #[test]
-    fn visible_stream_retry_message_keeps_unbounded_sentinel_hidden() {
+    fn visible_stream_retry_message_marks_the_ten_minute_limit() {
         let message = transport_retry_status_message(6, u64::MAX);
 
-        assert_eq!(message, "Reconnecting... 6 (unbounded)");
+        assert!(message.starts_with("Reconnecting... 6"));
+        assert!(message.contains("10 min limit"));
+        assert!(!message.contains("unbounded"));
         assert!(!message.contains(&u64::MAX.to_string()));
     }
 

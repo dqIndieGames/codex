@@ -30,6 +30,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -155,6 +156,7 @@ const X_REASONING_INCLUDED_HEADER: &str = "x-reasoning-included";
 const OPENAI_MODEL_HEADER: &str = "openai-model";
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE: &str = "websocket_connection_limit_reached";
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_MESSAGE: &str = "Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue.";
+const RESPONSE_STREAM_CANCELLED_MESSAGE: &str = "response stream cancelled";
 
 pub struct ResponsesWebsocketConnection {
     stream: Arc<Mutex<Option<WsStream>>>,
@@ -217,12 +219,15 @@ impl ResponsesWebsocketConnection {
         let (tx_event, rx_event) =
             mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
         let stream = Arc::clone(&self.stream);
+        let stream_for_request = Arc::clone(&stream);
         let idle_timeout = self.idle_timeout;
         let server_reasoning_included = self.server_reasoning_included;
         let models_etag = self.models_etag.clone();
         let server_model = self.server_model.clone();
         let telemetry = self.telemetry.clone();
         let request_text = serialize_websocket_request(&request)?;
+        let cancellation_token = CancellationToken::new();
+        let cancellation_for_task = cancellation_token.clone();
 
         let current_span = Span::current();
         tokio::spawn(
@@ -231,45 +236,60 @@ impl ResponsesWebsocketConnection {
                 reason = "the guard serializes exclusive use of the websocket stream for the lifetime of the response stream"
             )]
             async move {
-                if let Some(model) = server_model {
-                    let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
-                }
-                if let Some(etag) = models_etag {
-                    let _ = tx_event.send(Ok(ResponseEvent::ModelsEtag(etag))).await;
-                }
-                if server_reasoning_included {
-                    let _ = tx_event
-                        .send(Ok(ResponseEvent::ServerReasoningIncluded(true)))
-                        .await;
-                }
-                let mut guard = stream.lock().await;
-                let result = {
-                    let Some(ws_stream) = guard.as_mut() else {
-                        let _ = tx_event
-                            .send(Err(ApiError::Stream(
+                let tx_event_for_request = tx_event.clone();
+                let result = tokio::select! {
+                    _ = cancellation_for_task.cancelled() => {
+                        Err(ApiError::Stream(RESPONSE_STREAM_CANCELLED_MESSAGE.to_string()))
+                    }
+                    result = async {
+                        if let Some(model) = server_model
+                            && tx_event_for_request
+                                .send(Ok(ResponseEvent::ServerModel(model)))
+                                .await
+                                .is_err()
+                        {
+                            return Err(ApiError::Stream(RESPONSE_STREAM_CANCELLED_MESSAGE.to_string()));
+                        }
+                        if let Some(etag) = models_etag
+                            && tx_event_for_request
+                                .send(Ok(ResponseEvent::ModelsEtag(etag)))
+                                .await
+                                .is_err()
+                        {
+                            return Err(ApiError::Stream(RESPONSE_STREAM_CANCELLED_MESSAGE.to_string()));
+                        }
+                        if server_reasoning_included
+                            && tx_event_for_request
+                                .send(Ok(ResponseEvent::ServerReasoningIncluded(true)))
+                                .await
+                                .is_err()
+                        {
+                            return Err(ApiError::Stream(RESPONSE_STREAM_CANCELLED_MESSAGE.to_string()));
+                        }
+                        let mut guard = stream_for_request.lock().await;
+                        let Some(ws_stream) = guard.as_mut() else {
+                            return Err(ApiError::Stream(
                                 "websocket connection is closed".to_string(),
-                            )))
-                            .await;
-                        return;
-                    };
+                            ));
+                        };
 
-                    run_websocket_response_stream(
-                        ws_stream,
-                        tx_event.clone(),
-                        request_text,
-                        idle_timeout,
-                        telemetry,
-                        connection_reused,
-                        turn_state.as_deref(),
-                    )
-                    .await
+                        run_websocket_response_stream(
+                            ws_stream,
+                            tx_event_for_request,
+                            request_text,
+                            idle_timeout,
+                            telemetry,
+                            connection_reused,
+                            turn_state.as_deref(),
+                        )
+                        .await
+                    } => result,
                 };
 
                 if let Err(err) = result {
                     // A terminal stream error should reach the caller immediately. Waiting for a
                     // graceful close handshake here can stall indefinitely and mask the error.
-                    let failed_stream = guard.take();
-                    drop(guard);
+                    let failed_stream = stream.lock().await.take();
                     drop(failed_stream);
                     let _ = tx_event.send(Err(err)).await;
                 }
@@ -280,6 +300,7 @@ impl ResponsesWebsocketConnection {
         Ok(ResponseStream {
             rx_event,
             upstream_request_id: None,
+            cancellation_token,
         })
     }
 }
@@ -637,9 +658,14 @@ async fn run_websocket_response_stream(
 
     loop {
         let poll_start = Instant::now();
-        let response = tokio::time::timeout(idle_timeout, ws_stream.next())
-            .await
-            .map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()));
+        let response = tokio::select! {
+            _ = tx_event.closed() => {
+                return Err(ApiError::Stream(RESPONSE_STREAM_CANCELLED_MESSAGE.to_string()));
+            }
+            response = tokio::time::timeout(idle_timeout, ws_stream.next()) => {
+                response.map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()))
+            }
+        };
         if let Some(t) = telemetry.as_ref() {
             t.on_ws_event(&response, poll_start.elapsed());
         }

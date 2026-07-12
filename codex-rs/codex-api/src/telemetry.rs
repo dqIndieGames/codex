@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
+use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -106,14 +107,21 @@ where
             .as_ref()
             .is_some_and(|telemetry| !telemetry.can_continue_request_retry())
         {
-            return Err(TransportError::RetryInterrupted(
-                REQUEST_RETRY_INTERRUPTED.to_string(),
-            ));
+            return Err(request_retry_interrupted_error(telemetry.as_ref()));
         }
         let req = make_request();
         let retry_route = RequestRetryRoute::from_endpoint(endpoint);
         let start = Instant::now();
-        let result = send.clone()(req).await;
+        let result = match telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.request_retry_timeout())
+        {
+            Some(retry_timeout) => match timeout(retry_timeout, send.clone()(req)).await {
+                Ok(result) => result,
+                Err(_) => return Err(request_retry_interrupted_error(telemetry.as_ref())),
+            },
+            None => send.clone()(req).await,
+        };
         let should_retry = match &result {
             Ok(_) => false,
             Err(err) => should_retry_request_error(&policy, retry_route, err, attempt),
@@ -232,6 +240,28 @@ mod tests {
         }
     }
 
+    struct ExpiringRetryTelemetry;
+
+    impl RequestTelemetry for ExpiringRetryTelemetry {
+        fn on_request(
+            &self,
+            _attempt: u64,
+            _status: Option<StatusCode>,
+            _error: Option<&codex_client::TransportError>,
+            _duration: Duration,
+            _emit_log_trace: bool,
+        ) {
+        }
+
+        fn request_retry_timeout(&self) -> Option<Duration> {
+            Some(Duration::ZERO)
+        }
+
+        fn request_retry_interruption_reason(&self) -> Option<String> {
+            Some("retry time budget exhausted".to_string())
+        }
+    }
+
     #[test]
     fn primary_responses_endpoint_accepts_relative_path() {
         assert!(RequestRetryRoute::from_endpoint("responses").is_responses());
@@ -298,5 +328,31 @@ mod tests {
             telemetry_handle.retry_notifications.load(Ordering::Acquire),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn retry_timeout_cancels_an_in_flight_request() {
+        let telemetry: Arc<dyn RequestTelemetry> = Arc::new(ExpiringRetryTelemetry);
+        let result: Result<Response, codex_client::TransportError> = run_with_request_telemetry(
+            RetryPolicy {
+                max_attempts: 0,
+                retry_on: RetryOn {
+                    retry_402: true,
+                    retry_429: true,
+                    retry_5xx: true,
+                    retry_transport: true,
+                },
+            },
+            "responses",
+            Some(telemetry),
+            || Request::new(Method::POST, "https://example.test/v1/responses".to_string()),
+            |_req| std::future::pending(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(codex_client::TransportError::RetryInterrupted(_))
+        ));
     }
 }

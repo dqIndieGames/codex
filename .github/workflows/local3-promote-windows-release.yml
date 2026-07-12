@@ -1,0 +1,124 @@
+name: local3-promote-windows-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful local3-minimal-windows-build run containing the verified artifact.
+        required: true
+        type: string
+      tag:
+        description: Release tag to create or update at the verified build commit.
+        required: true
+        type: string
+      release_name:
+        description: Optional release display name.
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  promote:
+    name: Promote verified Windows codex.exe artifact
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Verify source build run
+        id: build_run
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $run = gh run view "$env:BUILD_RUN_ID" --repo "$env:GITHUB_REPOSITORY" --json headSha,status,conclusion,workflowName | ConvertFrom-Json
+          if ($run.workflowName -ne 'local3-minimal-windows-build') {
+            throw "Build run $env:BUILD_RUN_ID is workflow $($run.workflowName), expected local3-minimal-windows-build"
+          }
+          if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') {
+            throw "Build run $env:BUILD_RUN_ID is $($run.status)/$($run.conclusion), expected completed/success"
+          }
+          if ([string]::IsNullOrWhiteSpace($run.headSha)) {
+            throw "Build run $env:BUILD_RUN_ID did not report a head SHA"
+          }
+          "head_sha=$($run.headSha)" >> $env:GITHUB_OUTPUT
+
+      - name: Download verified Windows artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: local3-windows-codex-exe
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: dist
+
+      - name: Verify packaged codex.exe
+        id: archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archives = @(Get-ChildItem -Path dist -Recurse -File -Filter '*.zip')
+          if ($archives.Count -ne 1) {
+            throw "Expected exactly one downloaded ZIP artifact, found $($archives.Count)"
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($archives[0].FullName)
+          try {
+            $entries = @($archive.Entries | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Name) })
+            if ($entries.Count -ne 1 -or $entries[0].Name -ne 'codex.exe') {
+              $names = $entries | ForEach-Object { $_.FullName }
+              throw "Release archive must contain only codex.exe; found: $($names -join ', ')"
+            }
+          } finally {
+            $archive.Dispose()
+          }
+          "zip_path=$($archives[0].FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Verify existing release tag target
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          TARGET_COMMITISH: ${{ steps.build_run.outputs.head_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tagRefPath = "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG"
+          $tagRefOutput = & gh api $tagRefPath 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $message = $tagRefOutput -join "`n"
+            if ($message -match 'Not Found') {
+              Write-Host "No existing tag $env:RELEASE_TAG; release will create it at $env:TARGET_COMMITISH"
+              exit 0
+            }
+            throw $message
+          }
+
+          $tagRef = $tagRefOutput | ConvertFrom-Json
+          $existingTarget = $tagRef.object.sha
+          $objectType = $tagRef.object.type
+          if ($objectType -eq 'tag') {
+            $tagObject = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$existingTarget" | ConvertFrom-Json
+            $existingTarget = $tagObject.object.sha
+            $objectType = $tagObject.object.type
+          }
+          if ($objectType -ne 'commit' -or $existingTarget -ne $env:TARGET_COMMITISH) {
+            throw "Existing tag $env:RELEASE_TAG does not point at verified build commit $env:TARGET_COMMITISH"
+          }
+
+      - name: Create GitHub Release from verified artifact
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          target_commitish: ${{ steps.build_run.outputs.head_sha }}
+          name: ${{ inputs.release_name || inputs.tag }}
+          body: |
+            Minimal local3 Windows package generated and promoted by GitHub Actions after artifact verification.
+
+            Contents:
+            - codex.exe
+          files: ${{ steps.archive.outputs.zip_path }}
+          fail_on_unmatched_files: true
+          prerelease: true

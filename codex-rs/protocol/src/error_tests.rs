@@ -176,6 +176,16 @@ fn local_lifecycle_errors_remain_non_retryable() {
 }
 
 #[test]
+fn retry_time_budget_error_keeps_its_user_message_verbatim() {
+    let message = "网络重连已持续 10 分钟，已自动停止。请手动重试。";
+    let err = CodexErr::RetryTimeBudgetExceeded(message.to_string());
+
+    assert_eq!(err.to_string(), message);
+    assert!(!err.is_retryable());
+    assert_eq!(err.to_error_event(None).message, message);
+}
+
+#[test]
 fn sandbox_denied_uses_aggregated_output_when_stderr_empty() {
     let output = ExecToolCallOutput {
         exit_code: 77,

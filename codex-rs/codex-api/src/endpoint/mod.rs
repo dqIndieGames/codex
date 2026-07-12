@@ -19,6 +19,7 @@ pub use realtime_websocket::RealtimeEventParser;
 pub use realtime_websocket::RealtimeOutputModality;
 pub use realtime_websocket::RealtimeRetryEvent;
 pub use realtime_websocket::RealtimeRetryNotifier;
+pub use realtime_websocket::RequestRetryTimeout;
 pub use realtime_websocket::RealtimeSessionConfig;
 pub use realtime_websocket::RealtimeSessionMode;
 pub use realtime_websocket::RealtimeWebsocketClient;

@@ -5,6 +5,7 @@ use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
 use crate::client::RequestRetryEvent;
 use crate::client::RequestRetryNotifier;
+use crate::client::RetryTimeBudget;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::InitialContextInjection;
@@ -59,6 +60,7 @@ async fn run_remote_compact_attempt(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     turn_state: Option<Arc<OnceLock<String>>>,
+    retry_time_budget: RetryTimeBudget,
     compaction_trace: &CompactionTraceContext,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -132,6 +134,7 @@ async fn run_remote_compact_attempt(
             compaction_trace,
             &responses_metadata,
             Some(compact_request_retry_notifier(sess, turn_context)),
+            retry_time_budget,
         )
         .await?;
     Ok(RemoteCompactAttempt {
@@ -145,6 +148,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     step_context: Arc<StepContext>,
     fallback_step_context: Option<Arc<StepContext>>,
     turn_state: Arc<OnceLock<String>>,
+    retry_time_budget: RetryTimeBudget,
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
@@ -160,6 +164,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         &step_context,
         fallback_step_context.as_ref(),
         Some(turn_state),
+        retry_time_budget,
         initial_context_injection,
         compaction_metadata,
     )
@@ -193,6 +198,7 @@ pub(crate) async fn run_remote_compact_task(
         &step_context,
         /*fallback_step_context*/ None,
         /*turn_state*/ None,
+        RetryTimeBudget::new(),
         InitialContextInjection::DoNotInject,
         compaction_metadata,
     )
@@ -205,6 +211,7 @@ async fn run_remote_compact_task_inner(
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
     turn_state: Option<Arc<OnceLock<String>>>,
+    retry_time_budget: RetryTimeBudget,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<()> {
@@ -247,6 +254,7 @@ async fn run_remote_compact_task_inner(
         step_context,
         fallback_step_context,
         turn_state,
+        retry_time_budget,
         initial_context_injection,
         compaction_metadata,
         &mut analytics_details,
@@ -268,9 +276,11 @@ async fn run_remote_compact_task_inner(
         .await;
     if let Err(err) = result {
         sess.track_turn_codex_error(turn_context, &err);
-        let event = EventMsg::Error(
-            err.to_error_event(Some("Error running remote compact task".to_string())),
-        );
+        let event = EventMsg::Error(if err.is_retry_time_budget_exhausted() {
+            err.to_error_event(None)
+        } else {
+            err.to_error_event(Some("Error running remote compact task".to_string()))
+        });
         sess.send_event(turn_context, event).await;
         return Err(err);
     }
@@ -282,6 +292,7 @@ async fn run_remote_compact_task_inner_impl(
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
     turn_state: Option<Arc<OnceLock<String>>>,
+    retry_time_budget: RetryTimeBudget,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -304,6 +315,7 @@ async fn run_remote_compact_task_inner_impl(
         sess,
         step_context,
         turn_state.clone(),
+        retry_time_budget.clone(),
         &compaction_trace,
         compaction_metadata,
         analytics_details,
@@ -330,6 +342,7 @@ async fn run_remote_compact_task_inner_impl(
                 sess,
                 fallback_step_context,
                 turn_state,
+                retry_time_budget,
                 &fallback_compaction_trace,
                 compaction_metadata,
                 analytics_details,
@@ -345,7 +358,7 @@ async fn run_remote_compact_task_inner_impl(
             );
             match fallback_result {
                 Ok(attempt) => (attempt, fallback_turn_context),
-                Err(_) => return Err(error),
+                Err(fallback_error) => return Err(fallback_error),
             }
         }
     };
@@ -440,7 +453,7 @@ fn compact_request_retry_notifier(
 
 fn compact_request_retry_message(status_code: u16, retry_number: u64, max_attempts: u64) -> String {
     if max_attempts == u64::MAX {
-        format!("{status_code} retry {retry_number} (unbounded)")
+        format!("{status_code} retry {retry_number} (10 min limit)")
     } else {
         format!("{status_code} retry {retry_number}/{max_attempts}")
     }
@@ -448,7 +461,7 @@ fn compact_request_retry_message(status_code: u16, retry_number: u64, max_attemp
 
 fn compact_transport_retry_message(retry_number: u64, max_attempts: u64) -> String {
     if max_attempts == u64::MAX {
-        format!("Reconnecting... {retry_number} (unbounded)")
+        format!("Reconnecting... {retry_number} (10 min limit)")
     } else {
         format!("Reconnecting... {retry_number}/{max_attempts}")
     }

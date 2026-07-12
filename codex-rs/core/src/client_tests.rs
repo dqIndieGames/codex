@@ -6,6 +6,7 @@ use super::PendingUnauthorizedRetry;
 use super::Prompt;
 use super::RequestRetryEvent;
 use super::RequestRouteTelemetry;
+use super::RetryTimeBudget;
 use super::UnauthorizedRecoveryExecution;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
@@ -646,6 +647,8 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         test_session_telemetry(),
         attempt,
         Arc::new(|| true),
+        RetryTimeBudget::new(),
+        /*upstream_cancellation*/ None,
     );
 
     let observed = stream
@@ -696,6 +699,8 @@ async fn response_stream_records_last_model_feedback_ids() {
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
         Arc::new(|| true),
+        RetryTimeBudget::new(),
+        /*upstream_cancellation*/ None,
     );
 
     while stream.next().await.is_some() {}
@@ -771,6 +776,8 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         test_session_telemetry(),
         attempt,
         Arc::new(|| true),
+        RetryTimeBudget::new(),
+        /*upstream_cancellation*/ None,
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
@@ -817,6 +824,7 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
 #[test]
 fn api_telemetry_notifies_streaming_request_retry() {
     let retry_events = Arc::new(Mutex::new(Vec::<RequestRetryEvent>::new()));
+    let retry_time_budget = RetryTimeBudget::with_limit(Duration::ZERO);
     let notifier = {
         let retry_events = Arc::clone(&retry_events);
         Arc::new(move |event| {
@@ -835,6 +843,7 @@ fn api_telemetry_notifies_streaming_request_retry() {
         AuthEnvTelemetry::default(),
         Some(notifier),
         None,
+        Some(retry_time_budget),
         None,
         0,
     );
@@ -849,6 +858,8 @@ fn api_telemetry_notifies_streaming_request_retry() {
 
     telemetry.on_request_retry(1, 3, Some(http::StatusCode::SERVICE_UNAVAILABLE), &error);
 
+    assert!(!telemetry.can_continue_request_retry());
+    assert!(telemetry.request_retry_interruption_reason().is_some());
     let retry_events = retry_events.lock().unwrap();
     assert_eq!(retry_events.len(), 1);
     assert_eq!(retry_events[0].retry_number, 1);
@@ -892,6 +903,7 @@ fn api_telemetry_offsets_visible_retry_count_after_route_recovery_restart() {
         RequestRouteTelemetry::for_endpoint("/responses"),
         AuthEnvTelemetry::default(),
         Some(notifier),
+        None,
         None,
         None,
         3,

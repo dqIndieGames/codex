@@ -145,6 +145,10 @@ pub enum CodexErr {
     UnsupportedOperation(String),
     #[error("{0}")]
     RefreshTokenFailed(RefreshTokenFailedError),
+    /// A retry deadline expired. This is intentionally displayed verbatim so
+    /// callers can present a precise user-facing recovery instruction.
+    #[error("{0}")]
+    RetryTimeBudgetExceeded(String),
     #[error("Fatal error: {0}")]
     Fatal(String),
     // -----------------------------------------------------------------
@@ -179,6 +183,7 @@ impl CodexErr {
             | CodexErr::SessionBudgetExceeded
             | CodexErr::Interrupted
             | CodexErr::EnvVar(_)
+            | CodexErr::RetryTimeBudgetExceeded(_)
             | CodexErr::Fatal(_)
             | CodexErr::InvalidImageRequest()
             | CodexErr::InvalidRequest(_)
@@ -218,6 +223,10 @@ impl CodexErr {
     /// `anyhow::Error::downcast_ref` but works directly on our concrete enum.
     pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
         (self as &dyn std::any::Any).downcast_ref::<T>()
+    }
+
+    pub fn is_retry_time_budget_exhausted(&self) -> bool {
+        matches!(self, CodexErr::RetryTimeBudgetExceeded(_))
     }
 
     /// Translate core error to client-facing protocol error.

@@ -1,5 +1,6 @@
 use crate::client::ModelClient;
 use crate::client::add_originator_header;
+use crate::client::RetryTimeBudget;
 use crate::realtime_context::build_realtime_startup_context;
 use crate::realtime_context::truncate_realtime_text_to_token_budget;
 use crate::realtime_prompt::prepare_realtime_backend_prompt;
@@ -18,6 +19,7 @@ use codex_api::RealtimeEvent;
 use codex_api::RealtimeEventParser;
 use codex_api::RealtimeRetryEvent;
 use codex_api::RealtimeRetryNotifier;
+use codex_api::RequestRetryTimeout;
 use codex_api::RealtimeSessionConfig;
 use codex_api::RealtimeSessionMode;
 use codex_api::RealtimeWebsocketClient;
@@ -269,6 +271,7 @@ struct RealtimeStart {
     session_telemetry: SessionTelemetry,
     websocket_client: RealtimeWebsocketClient,
     websocket_retry_notifier: Option<RealtimeRetryNotifier>,
+    retry_time_budget: RetryTimeBudget,
     sdp: Option<String>,
 }
 
@@ -330,6 +333,7 @@ impl RealtimeConversationManager {
             session_telemetry,
             websocket_client,
             websocket_retry_notifier,
+            retry_time_budget,
             sdp,
         } = start;
         let event_parser = session_config.event_parser;
@@ -372,12 +376,19 @@ impl RealtimeConversationManager {
                     extra_headers.unwrap_or_default(),
                     realtime_call_api_provider,
                     &session_telemetry,
+                    retry_time_budget.clone(),
                 )
                 .await?;
             let client = RealtimeWebsocketClient::new(call.sideband_api_provider)
                 .with_request_retry_guard(Some(
-                    model_client.request_retry_guard(call.provider_runtime_generation),
+                    model_client.request_retry_guard(
+                        call.provider_runtime_generation,
+                        retry_time_budget.clone(),
+                    ),
                 ))
+                .with_request_retry_timeout(Some(realtime_retry_timeout(
+                    retry_time_budget.clone(),
+                )))
                 .with_request_retry_notifier(websocket_retry_notifier.clone());
             let task = spawn_webrtc_sideband_input_task(RealtimeWebrtcSidebandInputTask {
                 client,
@@ -390,6 +401,7 @@ impl RealtimeConversationManager {
                 session_kind,
                 event_parser,
                 realtime_active: Arc::clone(&realtime_active),
+                retry_time_budget: retry_time_budget.clone(),
                 flush_transcript_tail_on_session_end,
                 transcript_tail_tx,
                 stop_token: stop_token.clone(),
@@ -979,10 +991,15 @@ fn validate_realtime_voice(version: RealtimeWsVersion, voice: RealtimeVoice) -> 
     )))
 }
 
-fn realtime_retry_notifier(sess: &Arc<Session>, sub_id: &str) -> RealtimeRetryNotifier {
+fn realtime_retry_notifier(
+    sess: &Arc<Session>,
+    sub_id: &str,
+    retry_time_budget: RetryTimeBudget,
+) -> RealtimeRetryNotifier {
     let sess = Arc::clone(sess);
     let sub_id = sub_id.to_string();
     Arc::new(move |event: RealtimeRetryEvent| {
+        let _ = retry_time_budget.begin_retry();
         let sess = Arc::clone(&sess);
         let sub_id = sub_id.clone();
         tokio::spawn(async move {
@@ -1005,13 +1022,17 @@ fn realtime_retry_notifier(sess: &Arc<Session>, sub_id: &str) -> RealtimeRetryNo
     })
 }
 
+fn realtime_retry_timeout(retry_time_budget: RetryTimeBudget) -> RequestRetryTimeout {
+    Arc::new(move || retry_time_budget.remaining())
+}
+
 fn realtime_retry_status_message(
     retry_number: u64,
     max_attempts: u64,
     recovery_generation: u64,
 ) -> String {
     let retry_status = if max_attempts == u64::MAX {
-        format!("{retry_number} (unbounded)")
+        format!("{retry_number} (10 min limit)")
     } else {
         format!("{retry_number}/{max_attempts}")
     };
@@ -1042,6 +1063,7 @@ async fn handle_start_inner(
     } = prepared_start;
     info!("starting realtime conversation");
     let originator = sess.originator().await;
+    let retry_time_budget = RetryTimeBudget::new();
     let start_output = loop {
         let runtime_setup = sess
             .services
@@ -1072,9 +1094,19 @@ async fn handle_start_inner(
             .with_request_retry_guard(Some(
                 sess.services
                     .model_client
-                    .request_retry_guard(runtime_setup.provider_runtime_generation),
+                    .request_retry_guard(
+                        runtime_setup.provider_runtime_generation,
+                        retry_time_budget.clone(),
+                    ),
             ))
-            .with_request_retry_notifier(Some(realtime_retry_notifier(sess, sub_id)));
+            .with_request_retry_timeout(Some(realtime_retry_timeout(
+                retry_time_budget.clone(),
+            )))
+            .with_request_retry_notifier(Some(realtime_retry_notifier(
+                sess,
+                sub_id,
+                retry_time_budget.clone(),
+            )));
         let realtime_call_api_provider = realtime_call_base_url.as_ref().map(|base_url| {
             let mut api_provider = runtime_setup.api_provider.clone();
             api_provider.base_url = base_url.clone();
@@ -1096,10 +1128,19 @@ async fn handle_start_inner(
             model_client: sess.services.model_client.clone(),
             session_telemetry: sess.services.session_telemetry.clone(),
             websocket_client,
-            websocket_retry_notifier: Some(realtime_retry_notifier(sess, sub_id)),
+            websocket_retry_notifier: Some(realtime_retry_notifier(
+                sess,
+                sub_id,
+                retry_time_budget.clone(),
+            )),
+            retry_time_budget: retry_time_budget.clone(),
             sdp,
         };
-        match sess.conversation.start(start).await {
+        let start_result = sess.conversation.start(start).await;
+        if let Some(error) = retry_time_budget.exhausted_error() {
+            return Err(error);
+        }
+        match start_result {
             Ok(start_output) => break start_output,
             Err(CodexErr::Stream(reason, _delay))
                 if sess
@@ -1379,6 +1420,7 @@ struct RealtimeWebrtcSidebandInputTask {
     session_kind: RealtimeSessionKind,
     event_parser: RealtimeEventParser,
     realtime_active: Arc<AtomicBool>,
+    retry_time_budget: RetryTimeBudget,
     flush_transcript_tail_on_session_end: bool,
     transcript_tail_tx: Sender<String>,
     stop_token: CancellationToken,
@@ -1396,6 +1438,7 @@ fn spawn_webrtc_sideband_input_task(input: RealtimeWebrtcSidebandInputTask) -> J
         session_kind,
         event_parser,
         realtime_active,
+        retry_time_budget,
         flush_transcript_tail_on_session_end,
         transcript_tail_tx,
         stop_token,
@@ -1418,7 +1461,7 @@ fn spawn_webrtc_sideband_input_task(input: RealtimeWebrtcSidebandInputTask) -> J
             Ok(connection) => connection,
             Err(err) => {
                 if realtime_active.load(Ordering::Relaxed) {
-                    let mapped_error = map_api_error(err);
+                    let mapped_error = retry_time_budget.terminal_or(map_api_error(err));
                     warn!("failed to connect realtime sideband: {mapped_error}");
                     let _ = events_tx
                         .send(RealtimeEvent::Error(mapped_error.to_string()))

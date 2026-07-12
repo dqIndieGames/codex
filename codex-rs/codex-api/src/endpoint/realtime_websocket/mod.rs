@@ -9,6 +9,7 @@ mod protocol_v2;
 
 pub use methods::RealtimeRetryEvent;
 pub use methods::RealtimeRetryNotifier;
+pub use methods::RequestRetryTimeout;
 pub use methods::RealtimeWebsocketClient;
 pub use methods::RealtimeWebsocketConnection;
 pub use methods::RealtimeWebsocketEvents;

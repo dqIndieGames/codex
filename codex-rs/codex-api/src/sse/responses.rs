@@ -22,6 +22,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::trace;
 
@@ -68,34 +69,43 @@ pub fn spawn_response_stream(
         let _ = turn_state.set(header_value.to_string());
     }
     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
+    let cancellation_token = CancellationToken::new();
+    let cancellation_for_task = cancellation_token.clone();
     tokio::spawn(async move {
-        if let Some(model) = server_model {
-            let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
+        let producer = async {
+            if let Some(model) = server_model {
+                let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
+            }
+            for snapshot in rate_limit_snapshots {
+                let _ = tx_event.send(Ok(ResponseEvent::RateLimits(snapshot))).await;
+            }
+            if let Some(etag) = models_etag {
+                let _ = tx_event.send(Ok(ResponseEvent::ModelsEtag(etag))).await;
+            }
+            if reasoning_included {
+                let _ = tx_event
+                    .send(Ok(ResponseEvent::ServerReasoningIncluded(true)))
+                    .await;
+            }
+            process_sse_with_treatment(
+                stream_response.bytes,
+                tx_event,
+                idle_timeout,
+                telemetry,
+                safety_buffering_treatment,
+            )
+            .await;
+        };
+        tokio::select! {
+            _ = cancellation_for_task.cancelled() => {}
+            _ = producer => {}
         }
-        for snapshot in rate_limit_snapshots {
-            let _ = tx_event.send(Ok(ResponseEvent::RateLimits(snapshot))).await;
-        }
-        if let Some(etag) = models_etag {
-            let _ = tx_event.send(Ok(ResponseEvent::ModelsEtag(etag))).await;
-        }
-        if reasoning_included {
-            let _ = tx_event
-                .send(Ok(ResponseEvent::ServerReasoningIncluded(true)))
-                .await;
-        }
-        process_sse_with_treatment(
-            stream_response.bytes,
-            tx_event,
-            idle_timeout,
-            telemetry,
-            safety_buffering_treatment,
-        )
-        .await;
     });
 
     ResponseStream {
         rx_event,
         upstream_request_id,
+        cancellation_token,
     }
 }
 
@@ -501,7 +511,10 @@ async fn process_sse_with_treatment(
 
     loop {
         let start = Instant::now();
-        let response = timeout(idle_timeout, stream.next()).await;
+        let response = tokio::select! {
+            _ = tx_event.closed() => return,
+            response = timeout(idle_timeout, stream.next()) => response,
+        };
         if let Some(t) = telemetry.as_ref() {
             t.on_sse_poll(&response, start.elapsed());
         }

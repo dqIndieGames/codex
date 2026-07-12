@@ -1,31 +1,10 @@
-name: local3-minimal-windows-release
+name: local3-minimal-windows-build
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag to create or update.
-        required: true
-        type: string
-      ci_run_id:
-        description: Optional rust-ci run id that passed for this commit. Leave empty for Windows-only release.
-        required: false
-        type: string
-      target:
-        description: Windows Rust target to build.
-        required: false
-        default: x86_64-pc-windows-msvc
-        type: choice
-        options:
-          - x86_64-pc-windows-msvc
-      release_name:
-        description: Optional release display name.
-        required: false
-        type: string
 
 permissions:
-  actions: read
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -41,17 +20,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          targets: ${{ inputs.target }}
+          targets: x86_64-pc-windows-msvc
 
       - name: Build codex.exe
         shell: bash
-        run: cargo build --target "${{ inputs.target }}" --release --bin codex
+        run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
 
       - name: Smoke test codex.exe
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $target = '${{ inputs.target }}'
+          $target = 'x86_64-pc-windows-msvc'
           $exe = Join-Path $env:GITHUB_WORKSPACE "codex-rs\target\$target\release\codex.exe"
           if (-not (Test-Path $exe)) {
             throw "Missing built binary: $exe"
@@ -83,7 +62,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $target = '${{ inputs.target }}'
+          $target = 'x86_64-pc-windows-msvc'
           $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
@@ -104,87 +83,10 @@ jobs:
           Compress-Archive -Path (Join-Path $stage 'codex.exe') -DestinationPath $zip -Force
           "zip_path=dist/$zipName" >> $env:GITHUB_OUTPUT
 
-      - name: Verify CI run
-        if: ${{ inputs.ci_run_id != '' }}
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ inputs.ci_run_id }}
-          TARGET_COMMITISH: ${{ github.sha }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ci = gh run view "$env:CI_RUN_ID" --repo "$env:GITHUB_REPOSITORY" --json headSha,status,conclusion,workflowName | ConvertFrom-Json
-          if ($ci.workflowName -ne 'rust-ci') {
-            throw "CI run $env:CI_RUN_ID is workflow $($ci.workflowName), expected rust-ci"
-          }
-          if ([string]::IsNullOrWhiteSpace($ci.headSha)) {
-            throw "Failed to read headSha for CI run $env:CI_RUN_ID"
-          }
-          if ($ci.status -ne 'completed' -or $ci.conclusion -ne 'success') {
-            throw "CI run $env:CI_RUN_ID is $($ci.status)/$($ci.conclusion), expected completed/success"
-          }
-          if ($ci.headSha -ne $env:TARGET_COMMITISH) {
-            throw "CI run headSha $($ci.headSha) does not match target commit $env:TARGET_COMMITISH"
-          }
-          Write-Host "Verified rust-ci run $env:CI_RUN_ID completed successfully from $env:TARGET_COMMITISH"
-
-      - name: Record Windows-only release scope
-        if: ${{ inputs.ci_run_id == '' }}
-        shell: pwsh
-        run: |
-          Write-Host "No rust-ci run id was provided."
-          Write-Host "Proceeding with Windows-only build, smoke test, package, and release."
-
-      - name: Verify existing release tag target
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
-          TARGET_COMMITISH: ${{ github.sha }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $tagRefPath = "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG"
-          $tagRefOutput = & gh api $tagRefPath 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            $message = $tagRefOutput -join "`n"
-            if ($message -match 'Not Found') {
-              Write-Host "No existing tag $env:RELEASE_TAG; release will create it at $env:TARGET_COMMITISH"
-              exit 0
-            }
-            throw $message
-          }
-
-          $tagRef = $tagRefOutput | ConvertFrom-Json
-          $existingTarget = $tagRef.object.sha
-          $objectType = $tagRef.object.type
-          if ($objectType -eq 'tag') {
-            $tagObject = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$existingTarget" | ConvertFrom-Json
-            $existingTarget = $tagObject.object.sha
-            $objectType = $tagObject.object.type
-          }
-
-          if ([string]::IsNullOrWhiteSpace($existingTarget)) {
-            throw "Failed to resolve existing tag $env:RELEASE_TAG"
-          }
-          if ($objectType -ne 'commit') {
-            throw "Existing tag $env:RELEASE_TAG resolves to $objectType, expected commit"
-          }
-          if ($existingTarget -ne $env:TARGET_COMMITISH) {
-            throw "Existing tag $env:RELEASE_TAG points at $existingTarget, not $env:TARGET_COMMITISH"
-          }
-          Write-Host "Verified existing tag $env:RELEASE_TAG already points at $env:TARGET_COMMITISH"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+      - name: Upload Windows codex.exe artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          tag_name: ${{ inputs.tag }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ inputs.release_name || inputs.tag }}
-          body: |
-            Minimal local3 Windows package generated by GitHub Actions.
-
-            Contents:
-            - codex.exe
-          files: ${{ steps.package.outputs.zip_path }}
-          fail_on_unmatched_files: true
-          prerelease: true
+          name: local3-windows-codex-exe
+          path: ${{ steps.package.outputs.zip_path }}
+          if-no-files-found: error
+          retention-days: 7
