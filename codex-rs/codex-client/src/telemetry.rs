@@ -40,9 +40,9 @@ pub trait RequestTelemetry: Send + Sync {
         true
     }
 
-    /// When a retry watchdog window is active, returns the remaining time for
-    /// the in-flight retry request. The request layer drops an overdue request
-    /// future so the caller can continue the same automatic retry chain.
+    /// Returns the full timeout for the next independent request attempt.
+    /// The request layer queries this before every attempt, including the first,
+    /// and converts an overdue future into a normal retryable timeout.
     fn request_retry_timeout(&self) -> Option<Duration> {
         None
     }

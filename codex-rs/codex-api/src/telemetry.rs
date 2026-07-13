@@ -118,7 +118,7 @@ where
         {
             Some(retry_timeout) => match timeout(retry_timeout, send.clone()(req)).await {
                 Ok(result) => result,
-                Err(_) => return Err(request_retry_interrupted_error(telemetry.as_ref())),
+                Err(_) => Err(TransportError::Timeout),
             },
             None => send.clone()(req).await,
         };
@@ -240,9 +240,9 @@ mod tests {
         }
     }
 
-    struct ExpiringRetryTelemetry;
+    struct PerAttemptTimeoutTelemetry;
 
-    impl RequestTelemetry for ExpiringRetryTelemetry {
+    impl RequestTelemetry for PerAttemptTimeoutTelemetry {
         fn on_request(
             &self,
             _attempt: u64,
@@ -255,10 +255,6 @@ mod tests {
 
         fn request_retry_timeout(&self) -> Option<Duration> {
             Some(Duration::ZERO)
-        }
-
-        fn request_retry_interruption_reason(&self) -> Option<String> {
-            Some("retry time budget exhausted".to_string())
         }
     }
 
@@ -331,8 +327,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_timeout_cancels_an_in_flight_request() {
-        let telemetry: Arc<dyn RequestTelemetry> = Arc::new(ExpiringRetryTelemetry);
+    async fn request_timeout_cancels_the_first_in_flight_attempt() {
+        let telemetry: Arc<dyn RequestTelemetry> = Arc::new(PerAttemptTimeoutTelemetry);
         let result: Result<Response, codex_client::TransportError> = run_with_request_telemetry(
             RetryPolicy {
                 max_attempts: 0,
@@ -345,14 +341,16 @@ mod tests {
             },
             "responses",
             Some(telemetry),
-            || Request::new(Method::POST, "https://example.test/v1/responses".to_string()),
+            || {
+                Request::new(
+                    Method::POST,
+                    "https://example.test/v1/responses".to_string(),
+                )
+            },
             |_req| std::future::pending(),
         )
         .await;
 
-        assert!(matches!(
-            result,
-            Err(codex_client::TransportError::RetryInterrupted(_))
-        ));
+        assert!(matches!(result, Err(codex_client::TransportError::Timeout)));
     }
 }

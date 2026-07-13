@@ -647,7 +647,6 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         test_session_telemetry(),
         attempt,
         Arc::new(|| true),
-        RetryTimeBudget::new(),
         /*upstream_cancellation*/ None,
     );
 
@@ -699,7 +698,6 @@ async fn response_stream_records_last_model_feedback_ids() {
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
         Arc::new(|| true),
-        RetryTimeBudget::new(),
         /*upstream_cancellation*/ None,
     );
 
@@ -776,7 +774,6 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         test_session_telemetry(),
         attempt,
         Arc::new(|| true),
-        RetryTimeBudget::new(),
         /*upstream_cancellation*/ None,
     );
 
@@ -822,22 +819,20 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
 }
 
 #[test]
-fn expired_retry_window_produces_a_retryable_interruption() {
-    let retry_time_budget = RetryTimeBudget::with_limit(Duration::ZERO);
+fn every_request_attempt_receives_the_full_timeout() {
+    let limit = Duration::from_secs(10 * 60);
+    let retry_time_budget = RetryTimeBudget::with_limit(limit);
+
+    assert_eq!(retry_time_budget.remaining(), Some(limit));
     retry_time_budget.begin_retry();
-
-    let interruption = retry_time_budget
-        .interruption_error()
-        .expect("zero-length retry window should interrupt the current attempt");
-
-    assert!(interruption.is_retry_time_budget_interrupted());
-    assert!(interruption.is_retryable());
+    assert_eq!(retry_time_budget.remaining(), Some(limit));
+    assert!(retry_time_budget.interruption_error().is_none());
 }
 
 #[test]
 fn api_telemetry_notifies_streaming_request_retry() {
     let retry_events = Arc::new(Mutex::new(Vec::<RequestRetryEvent>::new()));
-    let retry_time_budget = RetryTimeBudget::with_limit(Duration::ZERO);
+    let retry_time_budget = RetryTimeBudget::with_limit(Duration::from_secs(10 * 60));
     let notifier = {
         let retry_events = Arc::clone(&retry_events);
         Arc::new(move |event| {
@@ -871,8 +866,8 @@ fn api_telemetry_notifies_streaming_request_retry() {
 
     telemetry.on_request_retry(1, 3, Some(http::StatusCode::SERVICE_UNAVAILABLE), &error);
 
-    assert!(!telemetry.can_continue_request_retry());
-    assert!(telemetry.request_retry_interruption_reason().is_some());
+    assert!(telemetry.can_continue_request_retry());
+    assert!(telemetry.request_retry_interruption_reason().is_none());
     let retry_events = retry_events.lock().unwrap();
     assert_eq!(retry_events.len(), 1);
     assert_eq!(retry_events[0].retry_number, 1);

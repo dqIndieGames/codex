@@ -622,10 +622,7 @@ impl RealtimeWebsocketClient {
         self
     }
 
-    pub fn with_request_retry_timeout(
-        mut self,
-        timeout: Option<RequestRetryTimeout>,
-    ) -> Self {
+    pub fn with_request_retry_timeout(mut self, timeout: Option<RequestRetryTimeout>) -> Self {
         self.request_retry_timeout = timeout;
         self
     }
@@ -696,7 +693,7 @@ impl RealtimeWebsocketClient {
                 Some(retry_timeout) => {
                     match tokio::time::timeout(retry_timeout, connect_once()).await {
                         Ok(result) => result,
-                        Err(_) => return Err(self.request_retry_interrupted()),
+                        Err(_) => Err(ApiError::Transport(TransportError::Timeout)),
                     }
                 }
                 None => connect_once().await,
