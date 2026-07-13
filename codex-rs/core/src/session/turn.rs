@@ -1572,7 +1572,7 @@ fn request_retry_message_for_status(
 
 fn retry_status_message(status_code: u16, retry_number: u64, max_attempts: u64) -> String {
     if max_attempts == u64::MAX {
-        format!("{status_code} retry {retry_number} (10 min limit)")
+        format!("{status_code} retry {retry_number} (auto retry)")
     } else {
         format!("{status_code} retry {retry_number}/{max_attempts}")
     }
@@ -1580,7 +1580,7 @@ fn retry_status_message(status_code: u16, retry_number: u64, max_attempts: u64) 
 
 fn transport_retry_status_message(retry_number: u64, max_attempts: u64) -> String {
     if max_attempts == u64::MAX {
-        format!("Reconnecting... {retry_number} (10 min limit)")
+        format!("Reconnecting... {retry_number} (auto retry)")
     } else {
         format!("Reconnecting... {retry_number}/{max_attempts}")
     }
@@ -1646,7 +1646,19 @@ fn install_request_retry_notifier(
             let sess = Arc::clone(&sess);
             let turn_context = Arc::clone(&turn_context);
             tokio::spawn(async move {
-                if let Some(status) = event.status {
+                if let Some(message) = event.message_override {
+                    sess.send_transient_event(
+                        &turn_context,
+                        EventMsg::StreamError(StreamErrorEvent {
+                            message,
+                            codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
+                                http_status_code: None,
+                            }),
+                            additional_details: Some(event.details),
+                        }),
+                    )
+                    .await;
+                } else if let Some(status) = event.status {
                     emit_request_retry_status_event(
                         &sess,
                         &turn_context,
@@ -1772,11 +1784,11 @@ mod retry_status_message_tests {
     use super::transport_retry_status_message;
 
     #[test]
-    fn retry_status_message_marks_the_ten_minute_limit() {
+    fn retry_status_message_marks_automatic_retry() {
         let message = retry_status_message(429, 4, u64::MAX);
 
         assert!(message.starts_with("429 retry 4"));
-        assert!(message.contains("10 min limit"));
+        assert!(message.contains("auto retry"));
         assert!(!message.contains("unbounded"));
         assert!(!message.contains(&u64::MAX.to_string()));
     }
@@ -1786,7 +1798,7 @@ mod retry_status_message_tests {
         assert_eq!(retry_status_message(503, 1, 4), "503 retry 1/4");
         let message = transport_retry_status_message(2, u64::MAX);
         assert!(message.starts_with("Reconnecting... 2"));
-        assert!(message.contains("10 min limit"));
+        assert!(message.contains("auto retry"));
     }
 }
 

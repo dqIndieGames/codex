@@ -251,7 +251,7 @@ async fn run_compact_task_inner_impl(
     let mut retries = 0;
     let mut display_retries = 0;
     // Keep compaction's request state isolated, while sharing the enclosing turn's
-    // retry clock so this boundary cannot reset the ten-minute deadline.
+    // retry watchdog so this boundary cannot bypass the ten-minute interruption.
     let mut client_session = sess
         .services
         .model_client

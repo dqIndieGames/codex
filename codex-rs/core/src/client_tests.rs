@@ -822,6 +822,19 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
 }
 
 #[test]
+fn expired_retry_window_produces_a_retryable_interruption() {
+    let retry_time_budget = RetryTimeBudget::with_limit(Duration::ZERO);
+    retry_time_budget.begin_retry();
+
+    let interruption = retry_time_budget
+        .interruption_error()
+        .expect("zero-length retry window should interrupt the current attempt");
+
+    assert!(interruption.is_retry_time_budget_interrupted());
+    assert!(interruption.is_retryable());
+}
+
+#[test]
 fn api_telemetry_notifies_streaming_request_retry() {
     let retry_events = Arc::new(Mutex::new(Vec::<RequestRetryEvent>::new()));
     let retry_time_budget = RetryTimeBudget::with_limit(Duration::ZERO);

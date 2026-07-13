@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use crate::client::ModelClientSession;
+use crate::client::RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::util::fixed_retry_delay;
@@ -32,7 +33,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
     _request: ResponsesStreamRequest,
     allow_route_recovery: bool,
 ) -> Result<(), CodexErr> {
-    client_session.begin_retry_time_budget()?;
+    client_session.begin_retry_time_budget();
 
     if client_session.provider_runtime_changed() {
         *retries = 0;
@@ -52,9 +53,16 @@ pub(crate) async fn handle_retryable_response_stream_error(
             &turn_context.model_info,
         )
     {
+        let fallback_message = if err.is_retry_time_budget_interrupted() {
+            format!(
+                "{RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE} Falling back from WebSockets to HTTPS transport. {err:#}"
+            )
+        } else {
+            format!("Falling back from WebSockets to HTTPS transport. {err:#}")
+        };
         sess.notify_transient_stream_error(
             turn_context,
-            format!("Falling back from WebSockets to HTTPS transport. {err:#}"),
+            fallback_message,
             err,
         )
         .await;
@@ -72,13 +80,31 @@ pub(crate) async fn handle_retryable_response_stream_error(
         let display_max_retries = effective_retry_budget.unwrap_or(u64::MAX);
         let delay = response_stream_retry_delay(&err);
         // Surface every visible retry so the user-facing count remains continuous from 1.
+        let status_message = if err.is_retry_time_budget_interrupted() {
+            format!(
+                "{RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE} {}",
+                transport_retry_status_message(display_retry_count, display_max_retries)
+            )
+        } else {
+            transport_retry_status_message(display_retry_count, display_max_retries)
+        };
         sess.notify_transient_stream_error(
             turn_context,
-            transport_retry_status_message(display_retry_count, display_max_retries),
+            status_message,
             err,
         )
         .await;
-        sleep_stream_retry_delay(delay, retries, client_session).await?;
+        if sleep_stream_retry_delay(delay, retries, client_session).await {
+            let interruption = CodexErr::RetryTimeBudgetInterrupted(
+                RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string(),
+            );
+            sess.notify_transient_stream_error(
+                turn_context,
+                RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string(),
+                interruption,
+            )
+            .await;
+        }
         return Ok(());
     }
 
@@ -113,7 +139,7 @@ fn requires_persistent_route_recovery(err: &CodexErr) -> bool {
 
 fn retry_status_suffix(retries: u64, max_retries: u64) -> String {
     if max_retries == u64::MAX {
-        format!("{retries} (10 min limit)")
+        format!("{retries} (auto retry)")
     } else {
         format!("{retries}/{max_retries}")
     }
@@ -139,25 +165,29 @@ async fn sleep_stream_retry_delay(
     delay: Duration,
     retries: &mut u64,
     client_session: &mut ModelClientSession,
-) -> Result<(), CodexErr> {
+) -> bool {
     if delay.is_zero() {
-        return Ok(());
+        return false;
     }
 
     let start = tokio::time::Instant::now();
     loop {
-        if let Some(error) = client_session.retry_time_budget().exhausted_error() {
-            return Err(error);
+        if client_session
+            .retry_time_budget()
+            .interruption_error()
+            .is_some()
+        {
+            return true;
         }
         if client_session.provider_runtime_changed() {
             *retries = 0;
             client_session.sync_latest_provider_runtime_generation();
-            return Ok(());
+            return false;
         }
 
         let elapsed = start.elapsed();
         if elapsed >= delay {
-            return Ok(());
+            return false;
         }
 
         tokio::time::sleep((delay - elapsed).min(STREAM_RETRY_INTERRUPT_POLL_INTERVAL)).await;
@@ -195,11 +225,11 @@ mod tests {
     }
 
     #[test]
-    fn visible_stream_retry_message_marks_the_ten_minute_limit() {
+    fn visible_stream_retry_message_marks_automatic_retry() {
         let message = transport_retry_status_message(6, u64::MAX);
 
         assert!(message.starts_with("Reconnecting... 6"));
-        assert!(message.contains("10 min limit"));
+        assert!(message.contains("auto retry"));
         assert!(!message.contains("unbounded"));
         assert!(!message.contains(&u64::MAX.to_string()));
     }

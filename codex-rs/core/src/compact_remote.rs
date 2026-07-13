@@ -276,7 +276,7 @@ async fn run_remote_compact_task_inner(
         .await;
     if let Err(err) = result {
         sess.track_turn_codex_error(turn_context, &err);
-        let event = EventMsg::Error(if err.is_retry_time_budget_exhausted() {
+        let event = EventMsg::Error(if err.is_retry_time_budget_interrupted() {
             err.to_error_event(None)
         } else {
             err.to_error_event(Some("Error running remote compact task".to_string()))
@@ -430,14 +430,14 @@ fn compact_request_retry_notifier(
                     http_status_code: None,
                 },
             };
-            let message = match event.status {
+            let message = event.message_override.unwrap_or_else(|| match event.status {
                 Some(status) => compact_request_retry_message(
                     status.as_u16(),
                     event.retry_number,
                     event.max_attempts,
                 ),
                 None => compact_transport_retry_message(event.retry_number, event.max_attempts),
-            };
+            });
             sess.send_transient_event(
                 &turn_context,
                 EventMsg::StreamError(StreamErrorEvent {
@@ -453,7 +453,7 @@ fn compact_request_retry_notifier(
 
 fn compact_request_retry_message(status_code: u16, retry_number: u64, max_attempts: u64) -> String {
     if max_attempts == u64::MAX {
-        format!("{status_code} retry {retry_number} (10 min limit)")
+        format!("{status_code} retry {retry_number} (auto retry)")
     } else {
         format!("{status_code} retry {retry_number}/{max_attempts}")
     }
@@ -461,7 +461,7 @@ fn compact_request_retry_message(status_code: u16, retry_number: u64, max_attemp
 
 fn compact_transport_retry_message(retry_number: u64, max_attempts: u64) -> String {
     if max_attempts == u64::MAX {
-        format!("Reconnecting... {retry_number} (10 min limit)")
+        format!("Reconnecting... {retry_number} (auto retry)")
     } else {
         format!("Reconnecting... {retry_number}/{max_attempts}")
     }

@@ -145,10 +145,10 @@ pub enum CodexErr {
     UnsupportedOperation(String),
     #[error("{0}")]
     RefreshTokenFailed(RefreshTokenFailedError),
-    /// A retry deadline expired. This is intentionally displayed verbatim so
-    /// callers can present a precise user-facing recovery instruction.
+    /// A retry watchdog window elapsed. Callers retry this after interrupting
+    /// the overdue transport attempt, rather than terminating the turn.
     #[error("{0}")]
-    RetryTimeBudgetExceeded(String),
+    RetryTimeBudgetInterrupted(String),
     #[error("Fatal error: {0}")]
     Fatal(String),
     // -----------------------------------------------------------------
@@ -183,7 +183,6 @@ impl CodexErr {
             | CodexErr::SessionBudgetExceeded
             | CodexErr::Interrupted
             | CodexErr::EnvVar(_)
-            | CodexErr::RetryTimeBudgetExceeded(_)
             | CodexErr::Fatal(_)
             | CodexErr::InvalidImageRequest()
             | CodexErr::InvalidRequest(_)
@@ -196,7 +195,8 @@ impl CodexErr {
             | CodexErr::AgentLimitReached { .. }
             | CodexErr::Spawn
             | CodexErr::SessionConfiguredNotFirstEvent => false,
-            CodexErr::ContextWindowExceeded
+            CodexErr::RetryTimeBudgetInterrupted(_)
+            | CodexErr::ContextWindowExceeded
             | CodexErr::UsageLimitReached(_)
             | CodexErr::ServerOverloaded
             | CodexErr::CyberPolicy { .. }
@@ -225,8 +225,8 @@ impl CodexErr {
         (self as &dyn std::any::Any).downcast_ref::<T>()
     }
 
-    pub fn is_retry_time_budget_exhausted(&self) -> bool {
-        matches!(self, CodexErr::RetryTimeBudgetExceeded(_))
+    pub fn is_retry_time_budget_interrupted(&self) -> bool {
+        matches!(self, CodexErr::RetryTimeBudgetInterrupted(_))
     }
 
     /// Translate core error to client-facing protocol error.

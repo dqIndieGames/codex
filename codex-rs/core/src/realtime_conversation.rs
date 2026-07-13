@@ -1,6 +1,7 @@
 use crate::client::ModelClient;
 use crate::client::add_originator_header;
 use crate::client::RetryTimeBudget;
+use crate::client::RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE;
 use crate::realtime_context::build_realtime_startup_context;
 use crate::realtime_context::truncate_realtime_text_to_token_budget;
 use crate::realtime_prompt::prepare_realtime_backend_prompt;
@@ -62,6 +63,7 @@ use http::header::AUTHORIZATION;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -392,6 +394,8 @@ impl RealtimeConversationManager {
                 .with_request_retry_notifier(websocket_retry_notifier.clone());
             let task = spawn_webrtc_sideband_input_task(RealtimeWebrtcSidebandInputTask {
                 client,
+                sess: Arc::clone(&sess),
+                sub_id: sub_id.to_string(),
                 session_config,
                 call_id: call.call_id,
                 sideband_headers: call.sideband_headers,
@@ -995,11 +999,15 @@ fn realtime_retry_notifier(
     sess: &Arc<Session>,
     sub_id: &str,
     retry_time_budget: RetryTimeBudget,
+    display_retries: Arc<AtomicU64>,
 ) -> RealtimeRetryNotifier {
     let sess = Arc::clone(sess);
     let sub_id = sub_id.to_string();
     Arc::new(move |event: RealtimeRetryEvent| {
-        let _ = retry_time_budget.begin_retry();
+        retry_time_budget.begin_retry();
+        let display_retry_number = display_retries
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
         let sess = Arc::clone(&sess);
         let sub_id = sub_id.clone();
         tokio::spawn(async move {
@@ -1007,7 +1015,7 @@ fn realtime_retry_notifier(
                 &sub_id,
                 EventMsg::StreamError(StreamErrorEvent {
                     message: realtime_retry_status_message(
-                        event.retry_number,
+                        display_retry_number,
                         event.max_attempts,
                         event.recovery_generation,
                     ),
@@ -1032,7 +1040,7 @@ fn realtime_retry_status_message(
     recovery_generation: u64,
 ) -> String {
     let retry_status = if max_attempts == u64::MAX {
-        format!("{retry_number} (10 min limit)")
+        format!("{retry_number} (auto retry)")
     } else {
         format!("{retry_number}/{max_attempts}")
     };
@@ -1041,6 +1049,21 @@ fn realtime_retry_status_message(
     } else {
         format!("Reconnecting realtime... {retry_status}; route recovery {recovery_generation}")
     }
+}
+
+async fn notify_realtime_retry_interruption(sess: &Arc<Session>, sub_id: &str, error: CodexErr) {
+    let message = error.to_string();
+    sess.send_transient_event_for_sub_id(
+        sub_id,
+        EventMsg::StreamError(StreamErrorEvent {
+            message,
+            codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: None,
+            }),
+            additional_details: Some(RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string()),
+        }),
+    )
+    .await;
 }
 
 async fn handle_start_inner(
@@ -1064,6 +1087,7 @@ async fn handle_start_inner(
     info!("starting realtime conversation");
     let originator = sess.originator().await;
     let retry_time_budget = RetryTimeBudget::new();
+    let realtime_display_retries = Arc::new(AtomicU64::new(0));
     let start_output = loop {
         let runtime_setup = sess
             .services
@@ -1106,6 +1130,7 @@ async fn handle_start_inner(
                 sess,
                 sub_id,
                 retry_time_budget.clone(),
+                Arc::clone(&realtime_display_retries),
             )));
         let realtime_call_api_provider = realtime_call_base_url.as_ref().map(|base_url| {
             let mut api_provider = runtime_setup.api_provider.clone();
@@ -1132,13 +1157,15 @@ async fn handle_start_inner(
                 sess,
                 sub_id,
                 retry_time_budget.clone(),
+                Arc::clone(&realtime_display_retries),
             )),
             retry_time_budget: retry_time_budget.clone(),
             sdp,
         };
         let start_result = sess.conversation.start(start).await;
-        if let Some(error) = retry_time_budget.exhausted_error() {
-            return Err(error);
+        if let Some(error) = retry_time_budget.interruption_error() {
+            notify_realtime_retry_interruption(sess, sub_id, error).await;
+            continue;
         }
         match start_result {
             Ok(start_output) => break start_output,
@@ -1150,6 +1177,11 @@ async fn handle_start_inner(
                     != runtime_setup.provider_runtime_generation =>
             {
                 debug!("restarting realtime start after provider runtime refresh: {reason}");
+                continue;
+            }
+            Err(err) if err.is_retry_time_budget_interrupted() => {
+                notify_realtime_retry_interruption(sess, sub_id, err).await;
+                tokio::time::sleep(crate::util::fixed_retry_delay()).await;
                 continue;
             }
             Err(err) => return Err(err),
@@ -1411,6 +1443,8 @@ fn spawn_realtime_input_task(input: RealtimeInputTask) -> JoinHandle<()> {
 
 struct RealtimeWebrtcSidebandInputTask {
     client: RealtimeWebsocketClient,
+    sess: Arc<Session>,
+    sub_id: String,
     session_config: RealtimeSessionConfig,
     call_id: String,
     sideband_headers: HeaderMap,
@@ -1429,6 +1463,8 @@ struct RealtimeWebrtcSidebandInputTask {
 fn spawn_webrtc_sideband_input_task(input: RealtimeWebrtcSidebandInputTask) -> JoinHandle<()> {
     let RealtimeWebrtcSidebandInputTask {
         client,
+        sess,
+        sub_id,
         session_config,
         call_id,
         sideband_headers,
@@ -1445,51 +1481,63 @@ fn spawn_webrtc_sideband_input_task(input: RealtimeWebrtcSidebandInputTask) -> J
     } = input;
 
     tokio::spawn(async move {
-        if !realtime_active.load(Ordering::Relaxed) {
-            return;
-        }
-
-        let connection = match tokio::select! {
-            connection = client.connect_webrtc_sideband(
-                session_config,
-                &call_id,
-                sideband_headers,
-                default_headers(),
-            ) => connection,
-            _ = stop_token.cancelled() => return,
-        } {
-            Ok(connection) => connection,
-            Err(err) => {
-                if realtime_active.load(Ordering::Relaxed) {
-                    let mapped_error = retry_time_budget.terminal_or(map_api_error(err));
-                    warn!("failed to connect realtime sideband: {mapped_error}");
-                    let _ = events_tx
-                        .send(RealtimeEvent::Error(mapped_error.to_string()))
-                        .await;
-                }
+        loop {
+            if !realtime_active.load(Ordering::Relaxed) {
                 return;
             }
-        };
 
-        if !realtime_active.load(Ordering::Relaxed) {
+            let connection = match tokio::select! {
+                connection = client.connect_webrtc_sideband(
+                    session_config.clone(),
+                    &call_id,
+                    sideband_headers.clone(),
+                    default_headers(),
+                ) => connection,
+                _ = stop_token.cancelled() => return,
+            } {
+                Ok(connection) => connection,
+                Err(err) => {
+                    let mapped_error = retry_time_budget.interruption_or(map_api_error(err));
+                    if mapped_error.is_retry_time_budget_interrupted() {
+                        notify_realtime_retry_interruption(&sess, &sub_id, mapped_error).await;
+                        debug!("restarting realtime sideband after retry watchdog interruption");
+                        tokio::select! {
+                            _ = tokio::time::sleep(crate::util::fixed_retry_delay()) => {},
+                            _ = stop_token.cancelled() => return,
+                        }
+                        continue;
+                    }
+                    if realtime_active.load(Ordering::Relaxed) {
+                        warn!("failed to connect realtime sideband: {mapped_error}");
+                        let _ = events_tx
+                            .send(RealtimeEvent::Error(mapped_error.to_string()))
+                            .await;
+                    }
+                    return;
+                }
+            };
+
+            if !realtime_active.load(Ordering::Relaxed) {
+                return;
+            }
+
+            run_realtime_input_task(RealtimeInputTask {
+                writer: connection.writer(),
+                events: connection.events(),
+                text_rx: input_channels.text_rx,
+                handoff_output_rx: input_channels.handoff_output_rx,
+                audio_rx: input_channels.audio_rx,
+                events_tx,
+                handoff_state,
+                session_kind,
+                event_parser,
+                flush_transcript_tail_on_session_end,
+                transcript_tail_tx,
+                stop_token,
+            })
+            .await;
             return;
         }
-
-        run_realtime_input_task(RealtimeInputTask {
-            writer: connection.writer(),
-            events: connection.events(),
-            text_rx: input_channels.text_rx,
-            handoff_output_rx: input_channels.handoff_output_rx,
-            audio_rx: input_channels.audio_rx,
-            events_tx,
-            handoff_state,
-            session_kind,
-            event_parser,
-            flush_transcript_tail_on_session_end,
-            transcript_tail_tx,
-            stop_token,
-        })
-        .await;
     })
 }
 

@@ -56,7 +56,7 @@ const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 // in bounded retry mode, keep the ordinary per-transport retry budget smaller
 // than the general Responses stream loop. When retry count has no configured
 // cap, preserve that count behavior so every third failure can still trigger
-// route recovery; the shared ten-minute time budget still remains authoritative.
+// route recovery; the shared ten-minute retry watchdog still interrupts stuck attempts.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
 const REMOTE_COMPACTION_V2_FALLBACK_RETRY_THRESHOLD: u64 = 3;
 
@@ -189,7 +189,7 @@ async fn run_remote_compact_task_inner(
         Err(err @ CodexErr::TurnAborted) => Err(err),
         Err(err) => {
             sess.track_turn_codex_error(turn_context, &err);
-            let event = EventMsg::Error(if err.is_retry_time_budget_exhausted() {
+            let event = EventMsg::Error(if err.is_retry_time_budget_interrupted() {
                 err.to_error_event(None)
             } else {
                 err.to_error_event(Some("Error running remote compact task".to_string()))

@@ -164,6 +164,7 @@ pub enum CodexErrKind {
     UsageNotIncluded,
     InternalServerError,
     RetryLimit,
+    RetryTimeBudgetInterrupted,
     InternalAgentDied,
     Sandbox,
     LandlockSandboxExecutableNotProvided,
@@ -230,7 +231,7 @@ impl From<&CodexErr> for CodexErrKind {
             }
             CodexErr::UnsupportedOperation(_) => CodexErrKind::UnsupportedOperation,
             CodexErr::RefreshTokenFailed(_) => CodexErrKind::RefreshTokenFailed,
-            CodexErr::RetryTimeBudgetExceeded(_) => CodexErrKind::Fatal,
+            CodexErr::RetryTimeBudgetInterrupted(_) => CodexErrKind::RetryTimeBudgetInterrupted,
             CodexErr::Fatal(_) => CodexErrKind::Fatal,
             CodexErr::Io(_) => CodexErrKind::Io,
             CodexErr::Json(_) => CodexErrKind::Json,

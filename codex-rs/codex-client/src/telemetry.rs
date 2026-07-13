@@ -40,9 +40,9 @@ pub trait RequestTelemetry: Send + Sync {
         true
     }
 
-    /// When a retry time budget is active, returns the remaining time for the
-    /// in-flight retry request. The request layer drops the request future when
-    /// this timeout elapses, so a stuck retry cannot outlive its budget.
+    /// When a retry watchdog window is active, returns the remaining time for
+    /// the in-flight retry request. The request layer drops an overdue request
+    /// future so the caller can continue the same automatic retry chain.
     fn request_retry_timeout(&self) -> Option<Duration> {
         None
     }
