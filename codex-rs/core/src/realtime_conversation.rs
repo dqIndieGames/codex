@@ -260,6 +260,8 @@ struct ConversationState {
     stop_token: CancellationToken,
 }
 
+type RealtimeRetryWatchdogInterruptionNotifier = Arc<dyn Fn() + Send + Sync>;
+
 struct RealtimeStart {
     extra_headers: Option<HeaderMap>,
     client_managed_handoffs: bool,
@@ -273,6 +275,7 @@ struct RealtimeStart {
     session_telemetry: SessionTelemetry,
     websocket_client: RealtimeWebsocketClient,
     websocket_retry_notifier: Option<RealtimeRetryNotifier>,
+    retry_watchdog_interruption_notifier: RealtimeRetryWatchdogInterruptionNotifier,
     retry_time_budget: RetryTimeBudget,
     sdp: Option<String>,
 }
@@ -335,6 +338,7 @@ impl RealtimeConversationManager {
             session_telemetry,
             websocket_client,
             websocket_retry_notifier,
+            retry_watchdog_interruption_notifier,
             retry_time_budget,
             sdp,
         } = start;
@@ -394,8 +398,9 @@ impl RealtimeConversationManager {
                 .with_request_retry_notifier(websocket_retry_notifier.clone());
             let task = spawn_webrtc_sideband_input_task(RealtimeWebrtcSidebandInputTask {
                 client,
-                sess: Arc::clone(&sess),
-                sub_id: sub_id.to_string(),
+                retry_watchdog_interruption_notifier: Arc::clone(
+                    &retry_watchdog_interruption_notifier,
+                ),
                 session_config,
                 call_id: call.call_id,
                 sideband_headers: call.sideband_headers,
@@ -1034,6 +1039,28 @@ fn realtime_retry_timeout(retry_time_budget: RetryTimeBudget) -> RequestRetryTim
     Arc::new(move || retry_time_budget.remaining())
 }
 
+fn realtime_retry_watchdog_interruption_notifier(
+    sess: &Arc<Session>,
+    sub_id: &str,
+) -> RealtimeRetryWatchdogInterruptionNotifier {
+    let sess = Arc::clone(sess);
+    let sub_id = sub_id.to_string();
+    Arc::new(move || {
+        let sess = Arc::clone(&sess);
+        let sub_id = sub_id.clone();
+        tokio::spawn(async move {
+            notify_realtime_retry_interruption(
+                &sess,
+                &sub_id,
+                CodexErr::RetryTimeBudgetInterrupted(
+                    RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string(),
+                ),
+            )
+            .await;
+        });
+    })
+}
+
 fn realtime_retry_status_message(
     retry_number: u64,
     max_attempts: u64,
@@ -1159,6 +1186,8 @@ async fn handle_start_inner(
                 retry_time_budget.clone(),
                 Arc::clone(&realtime_display_retries),
             )),
+            retry_watchdog_interruption_notifier:
+                realtime_retry_watchdog_interruption_notifier(sess, sub_id),
             retry_time_budget: retry_time_budget.clone(),
             sdp,
         };
@@ -1443,8 +1472,7 @@ fn spawn_realtime_input_task(input: RealtimeInputTask) -> JoinHandle<()> {
 
 struct RealtimeWebrtcSidebandInputTask {
     client: RealtimeWebsocketClient,
-    sess: Arc<Session>,
-    sub_id: String,
+    retry_watchdog_interruption_notifier: RealtimeRetryWatchdogInterruptionNotifier,
     session_config: RealtimeSessionConfig,
     call_id: String,
     sideband_headers: HeaderMap,
@@ -1463,8 +1491,7 @@ struct RealtimeWebrtcSidebandInputTask {
 fn spawn_webrtc_sideband_input_task(input: RealtimeWebrtcSidebandInputTask) -> JoinHandle<()> {
     let RealtimeWebrtcSidebandInputTask {
         client,
-        sess,
-        sub_id,
+        retry_watchdog_interruption_notifier,
         session_config,
         call_id,
         sideband_headers,
@@ -1499,7 +1526,7 @@ fn spawn_webrtc_sideband_input_task(input: RealtimeWebrtcSidebandInputTask) -> J
                 Err(err) => {
                     let mapped_error = retry_time_budget.interruption_or(map_api_error(err));
                     if mapped_error.is_retry_time_budget_interrupted() {
-                        notify_realtime_retry_interruption(&sess, &sub_id, mapped_error).await;
+                        retry_watchdog_interruption_notifier();
                         debug!("restarting realtime sideband after retry watchdog interruption");
                         tokio::select! {
                             _ = tokio::time::sleep(crate::util::fixed_retry_delay()) => {},
