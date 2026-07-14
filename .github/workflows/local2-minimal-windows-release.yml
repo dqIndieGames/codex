@@ -26,6 +26,10 @@ jobs:
         shell: bash
         run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
 
+      - name: Run local3 first-turn checklist regression tests
+        shell: bash
+        run: cargo test -p codex-core --lib first_turn_checklist -- --nocapture
+
       - name: Smoke test codex.exe
         shell: pwsh
         run: |

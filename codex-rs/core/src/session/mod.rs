@@ -4310,7 +4310,7 @@ impl Session {
             [UserInput::Text {
                 text,
                 text_elements,
-            }] if text_elements.is_empty() && text.trim() == "你好"
+            }] if text_elements.is_empty() && text == "你好"
         )
     }
 

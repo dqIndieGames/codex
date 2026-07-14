@@ -192,6 +192,26 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
 
+#[test]
+fn local3_first_turn_checklist_requires_exact_plain_nihao_input() {
+    let plain_input = |text: &str| {
+        vec![UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }]
+    };
+
+    assert!(Session::first_turn_checklist_regular_input_matches_trigger(
+        &plain_input("你好")
+    ));
+    for text in [" 你好", "你好 ", "\n你好", "你好\n", "你好！"] {
+        assert!(
+            !Session::first_turn_checklist_regular_input_matches_trigger(&plain_input(text)),
+            "only the exact plain-text trigger may show the local3 checklist: {text:?}"
+        );
+    }
+}
+
 impl StepContext {
     pub(crate) fn for_test(turn: Arc<TurnContext>) -> Arc<Self> {
         let environments = turn.environments.clone();

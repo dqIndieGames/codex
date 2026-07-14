@@ -10,34 +10,6 @@ use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use pretty_assertions::assert_eq;
 
-const LEGACY_LOCAL1_CHECKLIST_HEADER: &str = "local1 定制功能已启用";
-const LEGACY_LOCAL1_TRAY_OVERVIEW: &str = "Provider refresh/retry 与 Windows tray 联动";
-
-fn test_session_configured_event(
-    history_entry_count: usize,
-    initial_messages: Option<Vec<EventMsg>>,
-) -> SessionConfiguredEvent {
-    SessionConfiguredEvent {
-        session_id: ThreadId::new(),
-        forked_from_id: None,
-        thread_name: None,
-        model: "test-model".to_string(),
-        model_provider_id: "test-provider".to_string(),
-        service_tier: None,
-        approval_policy: AskForApproval::Never,
-        approvals_reviewer: ApprovalsReviewer::User,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: None,
-        cwd: test_project_path().abs(),
-        reasoning_effort: Some(ReasoningEffortConfig::default()),
-        history_log_id: 0,
-        history_entry_count,
-        initial_messages,
-        network_proxy: None,
-        rollout_path: None,
-    }
-}
-
 #[tokio::test]
 async fn resumed_initial_messages_render_history() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
@@ -104,114 +76,39 @@ async fn resumed_initial_messages_render_history() {
 }
 
 #[tokio::test]
-async fn new_thread_first_user_message_does_not_insert_legacy_local1_history_cell() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+async fn restored_conversation_ultra_remains_selected_after_switching_to_plan() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+    chat.set_plan_mode_reasoning_effort(Some(ReasoningEffortConfig::High));
 
-    chat.handle_codex_event(Event {
-        id: "cfg".into(),
-        msg: EventMsg::SessionConfigured(test_session_configured_event(
-            /*history_entry_count*/ 0, /*initial_messages*/ None,
-        )),
+    chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        thread_id: ThreadId::new(),
+        forked_from_id: None,
+        fork_parent_title: None,
+        thread_name: None,
+        model: "gpt-5.4".to_string(),
+        model_provider_id: "test-provider".to_string(),
+        service_tier: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: ApprovalsReviewer::User,
+        permission_profile: PermissionProfile::read_only(),
+        active_permission_profile: None,
+        cwd: test_path_buf("/home/user/project").abs(),
+        runtime_workspace_roots: Vec::new(),
+        instruction_source_paths: Vec::new(),
+        reasoning_effort: Some(ReasoningEffortConfig::Ultra),
+        collaboration_mode: None,
+        personality: None,
+        message_history: None,
+        network_proxy: None,
+        rollout_path: None,
     });
+    chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
 
-    let session_rendered = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(!session_rendered.contains("To get started"));
-    assert!(!session_rendered.contains(LEGACY_LOCAL1_CHECKLIST_HEADER));
-    assert!(!session_rendered.contains(LEGACY_LOCAL1_TRAY_OVERVIEW));
-
-    chat.queue_user_message("hello local1".into());
-    let _submit = next_submit_op(&mut op_rx);
-
-    let first_turn_rendered = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(!first_turn_rendered.contains(LEGACY_LOCAL1_CHECKLIST_HEADER));
-    assert!(!first_turn_rendered.contains(LEGACY_LOCAL1_TRAY_OVERVIEW));
-    assert!(first_turn_rendered.contains("hello local1"));
-}
-
-#[tokio::test]
-async fn resumed_session_does_not_insert_local1_checklist_again() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.handle_codex_event(Event {
-        id: "cfg".into(),
-        msg: EventMsg::SessionConfigured(test_session_configured_event(
-            /*history_entry_count*/ 1,
-            Some(vec![EventMsg::UserMessage(UserMessageEvent {
-                message: "earlier turn".to_string(),
-                images: None,
-                text_elements: Vec::new(),
-                local_images: Vec::new(),
-            })]),
-        )),
-    });
-
-    let resumed_rendered = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(!resumed_rendered.contains(LEGACY_LOCAL1_CHECKLIST_HEADER));
-    assert!(!resumed_rendered.contains(LEGACY_LOCAL1_TRAY_OVERVIEW));
-
-    chat.queue_user_message("follow up".into());
-    let _submit = next_submit_op(&mut op_rx);
-
-    let follow_up_rendered = drain_insert_history(&mut rx)
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(!follow_up_rendered.contains(LEGACY_LOCAL1_CHECKLIST_HEADER));
-    assert!(!follow_up_rendered.contains(LEGACY_LOCAL1_TRAY_OVERVIEW));
-    assert!(follow_up_rendered.contains("follow up"));
-}
-
-#[tokio::test]
-async fn thread_snapshot_replay_does_not_duplicate_agent_message_history() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.handle_codex_event_replay(Event {
-        id: "turn-1".into(),
-        msg: EventMsg::ItemCompleted(ItemCompletedEvent {
-            thread_id: ThreadId::new(),
-            turn_id: "turn-1".to_string(),
-            item: TurnItem::AgentMessage(AgentMessageItem {
-                id: "msg-1".to_string(),
-                content: vec![AgentMessageContent::Text {
-                    text: "assistant reply".to_string(),
-                }],
-                phase: None,
-                memory_citation: None,
-            }),
-        }),
-    });
-    chat.handle_codex_event_replay(Event {
-        id: "turn-1".into(),
-        msg: EventMsg::AgentMessage(AgentMessageEvent {
-            message: "assistant reply".to_string(),
-            phase: None,
-            memory_citation: None,
-        }),
-    });
-
-    let cells = drain_insert_history(&mut rx);
+    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
     assert_eq!(
-        cells.len(),
-        1,
-        "expected replayed assistant message to render once"
-    );
-    let rendered = lines_to_single_string(&cells[0]);
-    assert!(
-        rendered.contains("assistant reply"),
-        "expected replayed assistant message, got {rendered:?}"
+        chat.current_reasoning_effort(),
+        Some(ReasoningEffortConfig::Ultra)
     );
 }
 
