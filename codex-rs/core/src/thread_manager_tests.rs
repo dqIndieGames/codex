@@ -1623,7 +1623,9 @@ async fn refresh_models_manager_updates_existing_shared_handles() {
     );
 
     let shared_handle = manager.get_models_manager();
-    let old_models = shared_handle.list_models(RefreshStrategy::Online).await;
+    let old_models = shared_handle
+        .list_models(RefreshStrategy::Online, config.http_client_factory())
+        .await;
     assert_eq!(old_models_mock.requests().len(), 1);
     assert_eq!(new_models_mock.requests().len(), 0);
     assert!(
@@ -1730,7 +1732,12 @@ async fn refreshable_models_manager_delegates_auth_filtering_to_current_inner() 
     assert!(models.iter().any(|model| model.model == "api-model"));
 
     let default_model = shared_handle
-        .get_default_model(&None, RefreshStrategy::Offline)
+        .get_default_model(
+            &None,
+            /*allow_provider_model_fallback*/ false,
+            RefreshStrategy::Offline,
+            config.http_client_factory(),
+        )
         .await;
     assert_eq!(default_model, "chatgpt-only-model");
 }

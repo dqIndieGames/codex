@@ -1,5 +1,4 @@
 use super::*;
-use crate::LoadedAgentsMd;
 use crate::ThreadManager;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
@@ -4570,7 +4569,7 @@ wire_api = "responses"
         .refresh_provider_runtime()
         .await
         .expect("refresh provider runtime");
-    turn.provider = create_model_provider(old_provider, turn.auth_manager.clone());
+    turn.provider = create_model_provider(old_provider.clone(), turn.auth_manager.clone());
 
     let config = build_latest_agent_spawn_config(
         &session,
@@ -4596,25 +4595,6 @@ wire_api = "responses"
     );
     assert!(!config.force_service_tier_priority);
     assert!(config.features.enabled(Feature::FastMode));
-}
-
-#[tokio::test]
-async fn build_agent_spawn_config_preserves_base_user_instructions() {
-    let (_session, mut turn) = make_session_and_context().await;
-    let mut base_config = (*turn.config).clone();
-    base_config.user_instructions = Some(LoadedAgentsMd::new_user(
-        "base-user".to_string(),
-        base_config.codex_home.join("AGENTS.md"),
-    ));
-    turn.user_instructions = Some("resolved-user".to_string());
-    turn.config = Arc::new(base_config.clone());
-    let base_instructions = BaseInstructions {
-        text: "base".to_string(),
-    };
-
-    let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
-
-    assert_eq!(config.user_instructions, base_config.user_instructions);
 }
 
 #[tokio::test]

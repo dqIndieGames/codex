@@ -2292,7 +2292,6 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     config.model_provider.supports_websockets = false;
     config.model_provider.request_max_retries = Some(0);
     config.model_provider.stream_max_retries = Some(0);
-    config.user_instructions = None;
     let config = Arc::new(config);
     let models_manager = test_support::models_manager_with_provider(
         config.codex_home.to_path_buf(),
