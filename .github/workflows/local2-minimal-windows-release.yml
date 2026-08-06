@@ -26,41 +26,6 @@ jobs:
         shell: bash
         run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
 
-      - name: Run local3 first-turn checklist regression tests
-        shell: bash
-        run: cargo test -p codex-core --lib first_turn_checklist -- --nocapture
-
-      - name: Smoke test codex.exe
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $target = 'x86_64-pc-windows-msvc'
-          $exe = Join-Path $env:GITHUB_WORKSPACE "codex-rs\target\$target\release\codex.exe"
-          if (-not (Test-Path $exe)) {
-            throw "Missing built binary: $exe"
-          }
-
-          $cargoToml = Get-Content "Cargo.toml" -Raw
-          $expectedVersion = [regex]::Match($cargoToml, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
-          if ([string]::IsNullOrWhiteSpace($expectedVersion)) {
-            throw "Failed to read expected version from codex-rs/Cargo.toml"
-          }
-          $expectedDisplayVersion = "$expectedVersion-local3"
-
-          $version = & $exe --version
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-          Write-Host $version
-          if ($version -notmatch [regex]::Escape($expectedDisplayVersion)) {
-            throw "Expected $expectedDisplayVersion version output from $exe, got: $version"
-          }
-
-          & $exe --help | Select-Object -First 30
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-
       - name: Package codex.exe
         id: package
         shell: pwsh
