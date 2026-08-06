@@ -136,6 +136,7 @@ use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
 #[cfg(test)]
 use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
+use codex_model_provider_info::MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::is_chatgpt_codex_base_url;
@@ -175,9 +176,10 @@ const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
 const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
 const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
 const WEBSOCKET_CONNECT_REFRESH_POLL_INTERVAL: Duration = Duration::from_millis(250);
-pub(crate) const RETRY_TIME_BUDGET: Duration = Duration::from_secs(10 * 60);
+pub(crate) const RETRY_TIME_BUDGET: Duration =
+    Duration::from_millis(MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS);
 pub(crate) const RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE: &str =
-    "本次网络请求连续 10 分钟无进展，已自动中断，正在自动重试。";
+    "本次网络请求连续 5 分钟无进展，已自动中断，正在自动重试。";
 #[cfg(test)]
 pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
     Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
@@ -960,7 +962,8 @@ impl ModelClient {
             add_responses_lite_header(&mut extra_headers, model_info.use_responses_lite);
             let compact_request_timeout = api_provider
                 .stream_idle_timeout
-                .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER);
+                .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER)
+                .min(RETRY_TIME_BUDGET);
             let client = ApiCompactClient::new(transport, api_provider, client_setup.api_auth)
                 .with_telemetry(Some(request_telemetry));
             let trace_attempt = compaction_trace.start_attempt(&payload);

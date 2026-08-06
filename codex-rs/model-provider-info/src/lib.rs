@@ -23,7 +23,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 600_000;
+/// Maximum consecutive no-progress time allowed for a model-network attempt.
+pub const MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
@@ -403,16 +405,20 @@ impl ModelProviderInfo {
 
     /// Effective idle timeout for streaming responses.
     pub fn stream_idle_timeout(&self) -> Duration {
-        self.stream_idle_timeout_ms
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
+        Duration::from_millis(
+            self.stream_idle_timeout_ms
+                .unwrap_or(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
+                .min(MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS),
+        )
     }
 
     /// Effective timeout for websocket connect attempts.
     pub fn websocket_connect_timeout(&self) -> Duration {
-        self.websocket_connect_timeout_ms
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS))
+        Duration::from_millis(
+            self.websocket_connect_timeout_ms
+                .unwrap_or(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS)
+                .min(MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS),
+        )
     }
 
     pub fn create_openai_provider(base_url: Option<String>) -> ModelProviderInfo {
