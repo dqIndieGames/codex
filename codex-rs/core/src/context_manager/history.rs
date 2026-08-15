@@ -148,6 +148,10 @@ impl ContextManager {
         &self.items
     }
 
+    pub(crate) fn raw_items_mut(&mut self) -> &mut Vec<ResponseItem> {
+        &mut self.items
+    }
+
     /// Returns raw items in the history and consumes the snapshot.
     pub(crate) fn into_raw_items(self) -> Vec<ResponseItem> {
         self.items

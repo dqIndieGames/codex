@@ -1152,6 +1152,7 @@ async fn run_sampling_request(
     let retry_budget = turn_context.provider.info().stream_retry_budget();
     let mut retries = 0;
     let mut display_retries = 0;
+    let mut image_ladder_tier: u8 = 0;
     let mut initial_input = Some(input);
     let mut original_input = None;
     loop {
@@ -1204,6 +1205,7 @@ async fn run_sampling_request(
             return Err(err);
         }
 
+        let is_context_window_exceeded = matches!(err, CodexErr::ContextWindowExceeded);
         handle_retryable_response_stream_error(
             &mut retries,
             &mut display_retries,
@@ -1217,6 +1219,19 @@ async fn run_sampling_request(
             true,
         )
         .await?;
+        if is_context_window_exceeded && retries > 0 && retries % 3 == 0 {
+            if let Some(report) = sess
+                .apply_context_overflow_image_ladder(&mut image_ladder_tier)
+                .await
+            {
+                sess.notify_transient_stream_error(
+                    &turn_context,
+                    report.message,
+                    CodexErr::ContextWindowExceeded,
+                )
+                .await;
+            }
+        }
         turn_context.turn_timing_state.record_sampling_retry();
     }
 }

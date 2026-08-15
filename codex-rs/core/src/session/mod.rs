@@ -3778,6 +3778,56 @@ impl Session {
         state.clone_history()
     }
 
+    /// Shrinks already-recorded images after repeated context-window overflows.
+    ///
+    /// Sticky-break / `previous_response_id` stay on the existing retry path.
+    /// In-memory history is mutated for the next `clone_history().for_prompt()`,
+    /// and the same snapshot is persisted as a `Compacted` replacement-history
+    /// checkpoint so resume/fork rebuilds the downgraded images instead of the
+    /// originals. This does not advance the compact window or emit a compact UI
+    /// event.
+    pub(crate) async fn apply_context_overflow_image_ladder(
+        &self,
+        applied_tier: &mut u8,
+    ) -> Option<crate::context_overflow_image_ladder::ImageLadderReport> {
+        let (report, compacted_item, turn_context_item) = {
+            let mut state = self.state.lock().await;
+            let report = {
+                let items = state.history.raw_items_mut();
+                let Some(report) =
+                    crate::context_overflow_image_ladder::apply_next_image_ladder_tier(
+                        items,
+                        applied_tier,
+                    )
+                else {
+                    return None;
+                };
+                crate::image_preparation::prepare_response_items(items);
+                report
+            };
+            let window_ids = state.auto_compact_window_ids();
+            let window_number = state.auto_compact_window_number();
+            let turn_context_item = state.reference_context_item();
+            let compacted_item = CompactedItem {
+                message: String::new(),
+                replacement_history: Some(state.history.raw_items().to_vec()),
+                window_number: Some(window_number),
+                first_window_id: Some(window_ids.first_window_id.to_string()),
+                previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
+                window_id: Some(window_ids.window_id.to_string()),
+            };
+            (report, compacted_item, turn_context_item)
+        };
+
+        let mut rollout_items = vec![RolloutItem::Compacted(compacted_item)];
+        if let Some(turn_context_item) = turn_context_item {
+            rollout_items.push(RolloutItem::TurnContext(turn_context_item));
+        }
+        self.persist_rollout_items(&rollout_items).await;
+        let _ = self.flush_rollout().await;
+        Some(report)
+    }
+
     pub(crate) async fn current_window_id(&self) -> String {
         let state = self.state.lock().await;
         let thread_id = self.thread_id;
