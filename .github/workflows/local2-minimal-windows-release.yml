@@ -31,10 +31,9 @@ jobs:
         continue-on-error: true
         run: cargo fmt --all -- --check
 
-      - name: Build codex.exe
-        shell: bash
-        run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
-
+      # Tests run before the release build on purpose: `cargo build --release`
+      # does not compile `#[cfg(test)]` code, so a break there would otherwise
+      # only surface after the hour-long release build.
       - name: Run local3 first-turn checklist regression tests
         shell: bash
         run: cargo test -p codex-core --lib first_turn_checklist -- --nocapture
@@ -51,6 +50,10 @@ jobs:
         run: |
           cargo test -p codex-protocol
           cargo test -p codex-rollout
+
+      - name: Build codex.exe
+        shell: bash
+        run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
 
       - name: Smoke test codex.exe
         shell: pwsh

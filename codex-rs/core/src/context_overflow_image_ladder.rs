@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn tier1_keeps_last_five_originals_and_downgrades_earlier() {
         let mut items = user_images(&["a", "b", "c", "d", "e", "f", "g"]);
-        let changed = apply_tier(&mut items, 1);
+        let changed = apply_image_ladder_tier(&mut items, 1);
         assert_eq!(changed, 2);
         assert_eq!(
             details(&items),
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn tier2_keeps_last_original_only() {
         let mut items = user_images(&["a", "b", "c"]);
-        let changed = apply_tier(&mut items, 2);
+        let changed = apply_image_ladder_tier(&mut items, 2);
         assert_eq!(changed, 2);
         assert_eq!(
             details(&items),
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn tier3_replaces_older_images_with_placeholder() {
         let mut items = user_images(&["a", "b", "c", "d", "e", "f"]);
-        let changed = apply_tier(&mut items, 3);
+        let changed = apply_image_ladder_tier(&mut items, 3);
         assert_eq!(changed, 1);
         let got = urls(&items);
         assert_eq!(got[0], tiny_png_data_url());
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn tier4_keeps_only_last_image() {
         let mut items = user_images(&["a", "b", "c"]);
-        let changed = apply_tier(&mut items, 4);
+        let changed = apply_image_ladder_tier(&mut items, 4);
         assert_eq!(changed, 2);
         let got = urls(&items);
         assert_eq!(got[0], tiny_png_data_url());
@@ -401,9 +401,9 @@ mod tests {
             },
             internal_chat_message_metadata_passthrough: None,
         }];
-        let changed = apply_tier(&mut items, 2);
+        let changed = apply_image_ladder_tier(&mut items, 2);
         assert_eq!(changed, 0);
-        let changed = apply_tier(&mut items, 4);
+        let changed = apply_image_ladder_tier(&mut items, 4);
         assert_eq!(changed, 0);
         items.push(ResponseItem::FunctionCallOutput {
             id: None,
@@ -419,7 +419,7 @@ mod tests {
             },
             internal_chat_message_metadata_passthrough: None,
         });
-        let changed = apply_tier(&mut items, 2);
+        let changed = apply_image_ladder_tier(&mut items, 2);
         assert_eq!(changed, 1);
         match &items[0] {
             ResponseItem::FunctionCallOutput { output, .. } => {
