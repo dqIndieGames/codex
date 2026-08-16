@@ -184,6 +184,7 @@ async fn resume_materializes_compressed_rollout_path() -> anyhow::Result<()> {
         cwd: home.path().to_path_buf(),
         model_provider_id: "test-provider".to_string(),
         generate_memories: true,
+        rollout_batch_flush_enabled: false,
     };
     let uuid = Uuid::from_u128(3);
     let thread_id = ThreadId::from_string(&uuid.to_string())?;
