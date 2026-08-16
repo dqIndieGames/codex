@@ -208,15 +208,18 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
     assert!(session.reference_context_item().await.is_none());
 }
 
-/// 1x1 PNG, the same placeholder the image ladder swaps in at tiers 3 and 4.
-const TEST_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+/// Distinct from the ladder's 1x1 placeholder URL on purpose: an image that
+/// already equals the placeholder is treated as shrunk and skipped.
+fn shot_url(index: usize) -> String {
+    format!("data:image/png;base64,shot{index}")
+}
 
-fn user_image_message(detail: ImageDetail) -> ResponseItem {
+fn user_image_message(image_url: &str, detail: ImageDetail) -> ResponseItem {
     ResponseItem::Message {
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputImage {
-            image_url: TEST_PNG_DATA_URL.to_string(),
+            image_url: image_url.to_string(),
             detail: Some(detail),
         }],
         phase: None,
@@ -232,7 +235,9 @@ async fn images_shrunk_replay_downgrades_older_images_and_keeps_rolled_back_hist
     rolled_back_context_item.turn_id = Some("rolled-back-turn".to_string());
 
     let mut first_turn_items: Vec<RolloutItem> = (0..7)
-        .map(|_| RolloutItem::ResponseItem(user_image_message(ImageDetail::Original)))
+        .map(|index| {
+            RolloutItem::ResponseItem(user_image_message(&shot_url(index), ImageDetail::Original))
+        })
         .collect();
     first_turn_items.push(RolloutItem::ImagesShrunk(ImagesShrunkItem {
         tier: 1,
@@ -256,8 +261,16 @@ async fn images_shrunk_replay_downgrades_older_images_and_keeps_rolled_back_hist
     // newest turn is rolled back, but the shrunken turn must survive in full:
     // the marker is a history rewrite, never a replay baseline that would pin
     // replay to a mid-turn position and truncate everything before it.
-    let mut expected = vec![user_image_message(ImageDetail::High); 2];
-    expected.extend(vec![user_image_message(ImageDetail::Original); 5]);
+    let expected = (0..7)
+        .map(|index| {
+            let detail = if index < 2 {
+                ImageDetail::High
+            } else {
+                ImageDetail::Original
+            };
+            user_image_message(&shot_url(index), detail)
+        })
+        .collect::<Vec<_>>();
     assert_eq!(reconstructed.history, expected);
 }
 
