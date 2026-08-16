@@ -5,8 +5,10 @@ use super::tests::make_session_and_context;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CompactedItem;
+use codex_protocol::protocol::ImagesShrunkItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ResumedHistory;
@@ -204,6 +206,98 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
 
     assert_eq!(session.previous_turn_settings().await, None);
     assert!(session.reference_context_item().await.is_none());
+}
+
+/// 1x1 PNG, the same placeholder the image ladder swaps in at tiers 3 and 4.
+const TEST_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+
+fn user_image_message(detail: ImageDetail) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputImage {
+            image_url: TEST_PNG_DATA_URL.to_string(),
+            detail: Some(detail),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+#[tokio::test]
+async fn images_shrunk_replay_downgrades_older_images_and_keeps_rolled_back_history_intact() {
+    let (session, turn_context) = make_session_and_context().await;
+    let first_context_item = turn_context.to_turn_context_item();
+    let mut rolled_back_context_item = first_context_item.clone();
+    rolled_back_context_item.turn_id = Some("rolled-back-turn".to_string());
+
+    let mut first_turn_items: Vec<RolloutItem> = (0..7)
+        .map(|_| RolloutItem::ResponseItem(user_image_message(ImageDetail::Original)))
+        .collect();
+    first_turn_items.push(RolloutItem::ImagesShrunk(ImagesShrunkItem {
+        tier: 1,
+        changed: Some(2),
+    }));
+
+    let mut rollout_items = completed_user_turn_rollout(first_context_item, first_turn_items);
+    rollout_items.extend(completed_user_turn_rollout(
+        rolled_back_context_item,
+        vec![RolloutItem::ResponseItem(user_message("turn 2 user"))],
+    ));
+    rollout_items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+    )));
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    // Tier 1 keeps the last five images and downgrades the two older ones. The
+    // newest turn is rolled back, but the shrunken turn must survive in full:
+    // the marker is a history rewrite, never a replay baseline that would pin
+    // replay to a mid-turn position and truncate everything before it.
+    let mut expected = vec![user_image_message(ImageDetail::High); 2];
+    expected.extend(vec![user_image_message(ImageDetail::Original); 5]);
+    assert_eq!(reconstructed.history, expected);
+}
+
+#[tokio::test]
+async fn images_shrunk_marker_does_not_count_as_a_rollback_turn() {
+    let (session, turn_context) = make_session_and_context().await;
+    let first_context_item = turn_context.to_turn_context_item();
+    let mut second_context_item = first_context_item.clone();
+    second_context_item.turn_id = Some("turn-2".to_string());
+    let mut third_context_item = first_context_item.clone();
+    third_context_item.turn_id = Some("turn-3".to_string());
+
+    let turn_one_user = user_message("turn 1 user");
+    let mut rollout_items = completed_user_turn_rollout(
+        first_context_item,
+        vec![RolloutItem::ResponseItem(turn_one_user.clone())],
+    );
+    rollout_items.extend(completed_user_turn_rollout(
+        second_context_item,
+        vec![
+            RolloutItem::ResponseItem(user_message("turn 2 user")),
+            RolloutItem::ImagesShrunk(ImagesShrunkItem {
+                tier: 1,
+                changed: Some(1),
+            }),
+        ],
+    ));
+    rollout_items.extend(completed_user_turn_rollout(
+        third_context_item,
+        vec![RolloutItem::ResponseItem(user_message("turn 3 user"))],
+    ));
+    rollout_items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 2 },
+    )));
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    assert_eq!(reconstructed.history, vec![turn_one_user]);
 }
 
 #[tokio::test]

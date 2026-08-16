@@ -2642,6 +2642,7 @@ impl InitialHistory {
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
+                | RolloutItem::ImagesShrunk(_)
                 | RolloutItem::WorldState(_)
                 | RolloutItem::EventMsg(_) => None,
             })
@@ -2978,6 +2979,7 @@ fn multi_agent_version_from_items(
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
+            | RolloutItem::ImagesShrunk(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::EventMsg(_) => None,
         })
@@ -3139,6 +3141,8 @@ pub enum RolloutItem {
         trigger_turn: bool,
     },
     Compacted(CompactedItem),
+    /// Content-addressed image rewrites applied to already-recorded history.
+    ImagesShrunk(ImagesShrunkItem),
     TurnContext(TurnContextItem),
     WorldState(WorldStateItem),
     EventMsg(EventMsg),
@@ -3193,6 +3197,26 @@ impl From<CompactedItem> for ResponseItem {
             internal_chat_message_metadata_passthrough: None,
         }
     }
+}
+
+/// Records that already-recorded images were shrunk in place after repeated
+/// context-window overflows.
+///
+/// Unlike [`CompactedItem`] this is not a history baseline: replay re-applies
+/// the same ladder tier on top of whatever history it has already rebuilt, so
+/// turn boundaries, rollback counts and the compaction window chain are all
+/// unaffected. Storing the tier instead of the rewritten images keeps the
+/// record tiny and keeps replay correct after a rollback shortens history,
+/// because "keep the last N images" is re-evaluated against the surviving
+/// history rather than replayed from stale positions.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct ImagesShrunkItem {
+    /// Ladder tier applied to the history at this point.
+    pub tier: u8,
+    /// Images the live session changed when this tier ran. Informational only;
+    /// replay re-derives the effect from `tier`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]

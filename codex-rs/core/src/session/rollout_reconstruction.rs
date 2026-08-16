@@ -1,6 +1,7 @@
 use super::*;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
+use crate::context_overflow_image_ladder::apply_image_ladder_tier;
 use codex_protocol::protocol::SessionContextWindow;
 use uuid::Uuid;
 
@@ -278,7 +279,11 @@ impl Session {
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
                     active_segment.counts_as_user_turn = true;
                 }
-                RolloutItem::EventMsg(_)
+                // Image shrinking is a mid-turn rewrite of already-recorded
+                // content, so it must not open a segment, count as a user turn
+                // or become a replay baseline.
+                RolloutItem::ImagesShrunk(_)
+                | RolloutItem::EventMsg(_)
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
             }
@@ -338,6 +343,18 @@ impl Session {
                     );
                 }
                 RolloutItem::InterAgentCommunicationMetadata { .. } => {}
+                RolloutItem::ImagesShrunk(images_shrunk) => {
+                    // Re-derive the shrunken images from the recorded tier so
+                    // "keep the last N images" is evaluated against the history
+                    // that survived any intervening rollback.
+                    //
+                    // Image preparation is deliberately not re-run here: it is a
+                    // send-time step that rewrites unprocessable images into text
+                    // placeholders, which must not happen while rebuilding stored
+                    // history. The tiers only change `detail` or swap in a known
+                    // placeholder URL, so nothing needs re-encoding.
+                    apply_image_ladder_tier(history.raw_items_mut(), images_shrunk.tier);
+                }
                 RolloutItem::Compacted(compacted) => {
                     if let Some(replacement_history) = &compacted.replacement_history {
                         // This should actually never happen, because the reverse loop above (to build rollout_suffix)
@@ -414,6 +431,7 @@ impl Session {
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::ImagesShrunk(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::EventMsg(_) => {
                     unreachable!("only world-state replay items are collected")

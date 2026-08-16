@@ -11,6 +11,12 @@
 //!
 //! A no-op tier is skipped in the same trigger so a thread with no originals
 //! does not burn another 3 retries before eviction.
+//!
+//! Each applied tier is persisted as a `RolloutItem::ImagesShrunk` carrying only
+//! the tier number. Rollout replay re-runs [`apply_image_ladder_tier`] against
+//! the history it has rebuilt so far, which keeps "keep the last N images"
+//! correct even when a rollback has since shortened that history. Every tier is
+//! idempotent: already-downgraded and already-placeholdered images are skipped.
 
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -40,7 +46,7 @@ pub(crate) fn apply_next_image_ladder_tier(
 ) -> Option<ImageLadderReport> {
     let start = (*applied_tier).saturating_add(1).max(1);
     for tier in start..=MAX_TIER {
-        let changed = apply_tier(items, tier);
+        let changed = apply_image_ladder_tier(items, tier);
         if changed > 0 {
             *applied_tier = tier;
             return Some(ImageLadderReport {
@@ -72,7 +78,11 @@ fn ladder_message(tier: u8, changed: usize) -> String {
     }
 }
 
-fn apply_tier(items: &mut [ResponseItem], tier: u8) -> usize {
+/// Applies a single ladder tier and reports how many images it changed.
+///
+/// Also used by rollout replay to rebuild the shrunken history from a persisted
+/// tier number.
+pub(crate) fn apply_image_ladder_tier(items: &mut [ResponseItem], tier: u8) -> usize {
     match tier {
         1 => downgrade_except_last(items, 5),
         2 => downgrade_except_last(items, 1),

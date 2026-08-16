@@ -1152,7 +1152,6 @@ async fn run_sampling_request(
     let retry_budget = turn_context.provider.info().stream_retry_budget();
     let mut retries = 0;
     let mut display_retries = 0;
-    let mut image_ladder_tier: u8 = 0;
     let mut initial_input = Some(input);
     let mut original_input = None;
     loop {
@@ -1221,7 +1220,7 @@ async fn run_sampling_request(
         .await?;
         if is_context_window_exceeded && retries > 0 && retries % 3 == 0 {
             if let Some(report) = sess
-                .apply_context_overflow_image_ladder(&mut image_ladder_tier)
+                .apply_context_overflow_image_ladder(&turn_context.sub_id)
                 .await
             {
                 sess.notify_transient_stream_error(

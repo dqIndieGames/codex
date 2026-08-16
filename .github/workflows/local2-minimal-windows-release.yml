@@ -21,10 +21,67 @@ jobs:
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      # Advisory only: local3 development forbids local compilation, so this is
+      # the first place formatting drift can be observed. It must not block the
+      # release artifact.
+      - name: Check formatting (advisory)
+        shell: bash
+        continue-on-error: true
+        run: cargo fmt --all -- --check
 
       - name: Build codex.exe
         shell: bash
         run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
+
+      - name: Run local3 first-turn checklist regression tests
+        shell: bash
+        run: cargo test -p codex-core --lib first_turn_checklist -- --nocapture
+
+      # Guards the context-overflow image ladder: shrinking must stay a history
+      # rewrite and must never behave like a compaction baseline, otherwise
+      # thread rollback rebuilds a truncated history.
+      - name: Run image-ladder and rollout replay regression tests
+        shell: bash
+        run: cargo test -p codex-core --lib -- images_shrunk rollout_reconstruction image_ladder --nocapture
+
+      - name: Run rollout and protocol tests
+        shell: bash
+        run: |
+          cargo test -p codex-protocol
+          cargo test -p codex-rollout
+
+      - name: Smoke test codex.exe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = 'x86_64-pc-windows-msvc'
+          $exe = Join-Path $env:GITHUB_WORKSPACE "codex-rs\target\$target\release\codex.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Missing built binary: $exe"
+          }
+
+          $cargoToml = Get-Content "Cargo.toml" -Raw
+          $expectedVersion = [regex]::Match($cargoToml, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if ([string]::IsNullOrWhiteSpace($expectedVersion)) {
+            throw "Failed to read expected version from codex-rs/Cargo.toml"
+          }
+          $expectedDisplayVersion = "$expectedVersion-local3"
+
+          $version = & $exe --version
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          Write-Host $version
+          if ($version -notmatch [regex]::Escape($expectedDisplayVersion)) {
+            throw "Expected $expectedDisplayVersion version output from $exe, got: $version"
+          }
+
+          & $exe --help | Select-Object -First 30
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
       - name: Package codex.exe
         id: package

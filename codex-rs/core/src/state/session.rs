@@ -45,6 +45,10 @@ pub(crate) struct SessionState {
     pending_first_turn_checklist_source: Option<codex_hooks::SessionStartSource>,
     granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
     next_turn_is_first: bool,
+    /// Turn the context-overflow image ladder progress below belongs to.
+    image_ladder_turn_key: Option<String>,
+    /// Highest image-ladder tier already applied within that turn.
+    image_ladder_tier: u8,
 }
 
 impl SessionState {
@@ -79,6 +83,8 @@ impl SessionState {
             pending_first_turn_checklist_source: None,
             granted_permissions_by_environment_id: HashMap::new(),
             next_turn_is_first: true,
+            image_ladder_turn_key: None,
+            image_ladder_tier: 0,
         }
     }
 
@@ -185,6 +191,23 @@ impl SessionState {
 
     pub(crate) fn advance_auto_compact_window(&mut self) -> (u64, AutoCompactWindowIds) {
         self.auto_compact_window.advance()
+    }
+
+    /// Highest context-overflow image ladder tier already applied within
+    /// `turn_key`. A new turn restarts the ladder at tier 0 so every turn gets
+    /// the full downgrade-then-evict progression instead of inheriting the
+    /// previous turn's exhausted tier.
+    pub(crate) fn image_ladder_tier(&self, turn_key: &str) -> u8 {
+        if self.image_ladder_turn_key.as_deref() == Some(turn_key) {
+            self.image_ladder_tier
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn set_image_ladder_tier(&mut self, turn_key: &str, tier: u8) {
+        self.image_ladder_turn_key = Some(turn_key.to_string());
+        self.image_ladder_tier = tier;
     }
 
     pub(crate) fn request_new_context_window(&mut self) {

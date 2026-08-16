@@ -288,6 +288,7 @@ impl ThreadMetadataSync {
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
+                | RolloutItem::ImagesShrunk(_)
                 | RolloutItem::WorldState(_) => {}
             }
         }
