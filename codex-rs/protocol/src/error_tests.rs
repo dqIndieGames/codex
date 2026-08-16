@@ -142,6 +142,7 @@ fn remote_model_request_errors_are_retryable() {
         CodexErr::UnexpectedStatus(UnexpectedResponseError {
             status: StatusCode::TOO_MANY_REQUESTS,
             body: "retry me".to_string(),
+            user_message: None,
             url: None,
             cf_ray: None,
             request_id: None,
