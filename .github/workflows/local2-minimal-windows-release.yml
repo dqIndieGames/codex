@@ -51,6 +51,12 @@ jobs:
           cargo test -p codex-protocol
           cargo test -p codex-rollout
 
+      - name: Run empty-completed-after-tools regression tests
+        shell: bash
+        run: |
+          cargo test -p codex-core --lib empty_completed_after_tools -- --nocapture
+          cargo test -p codex-core --test empty_completed_after_tools -- --nocapture
+
       - name: Build codex.exe
         shell: bash
         run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
