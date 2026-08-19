@@ -25,7 +25,7 @@ use tokio::time::timeout;
 const EMPTY_COMPLETED_MARKER: &str = "empty completed after tools";
 const CLOSING_MESSAGE: &str = "closing after tools";
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retries_empty_completed_after_tools_then_closes_with_assistant_text() {
     skip_if_no_network!();
 
@@ -107,7 +107,7 @@ async fn retries_empty_completed_after_tools_then_closes_with_assistant_text() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn empty_completed_without_tools_still_succeeds() {
     skip_if_no_network!();
 

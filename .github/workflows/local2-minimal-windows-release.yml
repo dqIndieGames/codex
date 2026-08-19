@@ -53,6 +53,10 @@ jobs:
 
       - name: Run empty-completed-after-tools regression tests
         shell: bash
+        env:
+          # Windows debug tokio workers overflow the default stack while
+          # constructing TestCodex. This does not compile the project locally.
+          RUST_MIN_STACK: "33554432"
         run: |
           cargo test -p codex-core --lib empty_completed_after_tools -- --nocapture
           cargo test -p codex-core --test empty_completed_after_tools -- --nocapture
