@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use codex_features::Feature;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
+use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -63,16 +63,10 @@ async fn retries_empty_completed_after_tools_then_closes_with_assistant_text() {
         .expect("test codex");
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "run a tool then stop empty".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "run a tool then stop empty".into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("submit turn");
 
@@ -133,16 +127,10 @@ async fn empty_completed_without_tools_still_succeeds() {
         .expect("test codex");
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello".into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("submit turn");
 
