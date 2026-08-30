@@ -118,6 +118,7 @@ pub struct Provider {
     pub headers: HeaderMap,
     pub retry: RetryConfig,
     pub stream_idle_timeout: Duration,
+    pub first_model_event_timeout: Duration,
 }
 
 impl Provider {

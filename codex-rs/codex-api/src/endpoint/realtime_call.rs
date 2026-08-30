@@ -119,6 +119,7 @@ impl<T: HttpTransport> RealtimeCallClient<T> {
                     req.headers
                         .insert(CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
                     req.body = Some(RequestBody::Raw(Bytes::from(sdp.clone())));
+                    req.timeout = Some(self.session.provider_snapshot().first_model_event_timeout);
                 },
             )
             .await?;
@@ -160,7 +161,9 @@ impl<T: HttpTransport> RealtimeCallClient<T> {
                         request,
                         event_parser,
                         /*uses_backend_request_shape*/ true,
-                    )
+                    );
+                    request.timeout =
+                        Some(self.session.provider_snapshot().first_model_event_timeout);
                 })
                 .await?;
             let sdp = decode_sdp_response(resp.body.as_ref())?;
@@ -202,6 +205,7 @@ impl<T: HttpTransport> RealtimeCallClient<T> {
                         HeaderValue::from_static(MULTIPART_CONTENT_TYPE),
                     );
                     req.body = Some(RequestBody::Raw(Bytes::from(body.clone())));
+                    req.timeout = Some(self.session.provider_snapshot().first_model_event_timeout);
                 },
             )
             .await?;
@@ -385,6 +389,7 @@ mod tests {
                 retry_transport: true,
             },
             stream_idle_timeout: Duration::from_secs(1),
+            first_model_event_timeout: Duration::from_secs(1),
         }
     }
 

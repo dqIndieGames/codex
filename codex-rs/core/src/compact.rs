@@ -36,7 +36,6 @@ use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
-use codex_protocol::error::RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
@@ -345,7 +344,7 @@ async fn run_compact_task_inner_impl(
                     }
                     let delay = backoff(retries);
                     let status_message = if e.is_retry_time_budget_interrupted() {
-                        RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string()
+                        e.to_string()
                     } else {
                         format!("Reconnecting... {retries} (auto retry)")
                     };

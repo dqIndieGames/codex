@@ -30,9 +30,32 @@ use tokio::task::JoinError;
 
 pub type Result<T> = std::result::Result<T, CodexErr>;
 
-/// User-visible transient status when one model-network attempt idles out.
-pub const RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE: &str =
-    "本次网络请求连续 5 分钟无进展，已自动中断，正在自动重试。";
+/// Waiting for HTTP response headers on one streaming attempt.
+pub const RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE: &str =
+    "等待响应头超过 1 分钟，已自动中断，正在自动重试。";
+/// Streaming is open but the first model event has not arrived.
+pub const RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE: &str =
+    "等待首个模型事件超过 6.5 分钟，已自动中断，正在自动重试。";
+/// At least one model event arrived, then the stream idled.
+pub const RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE: &str =
+    "已有输出后超过 1 分钟无新事件，已自动中断，正在自动重试。";
+
+pub fn is_retry_watchdog_interrupted_message(message: &str) -> bool {
+    matches!(
+        message,
+        RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE
+            | RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE
+            | RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE
+    )
+}
+
+pub fn retry_stream_idle_interrupted_message(seen_model_event: bool) -> &'static str {
+    if seen_model_event {
+        RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE
+    } else {
+        RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE
+    }
+}
 
 /// Limit UI error messages to a reasonable size while keeping useful context.
 const ERROR_MESSAGE_UI_MAX_BYTES: usize = 2 * 1024;

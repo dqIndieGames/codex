@@ -11,9 +11,11 @@ use crate::rate_limits::parse_rate_limit_event;
 use crate::safety_buffering::treatment_from_headers;
 use crate::sse::ResponsesStreamEvent;
 use crate::sse::process_responses_event;
+use crate::sse::stream_event_kind_is_model_progress;
 use crate::telemetry::WebsocketTelemetry;
 use codex_client::TransportError;
 use codex_http_client::HttpClientFactory;
+use codex_protocol::error::retry_stream_idle_interrupted_message;
 use codex_websocket_client::WebSocketConnection;
 use codex_websocket_client::WebSocketConnector;
 use futures::SinkExt;
@@ -186,6 +188,7 @@ pub struct ResponsesWebsocketConnection {
     endpoint: ResponsesEndpoint,
     // TODO (pakrym): is this the right place for timeout?
     idle_timeout: Duration,
+    first_model_event_timeout: Duration,
     server_reasoning_included: bool,
     server_model: Option<String>,
     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
@@ -197,6 +200,7 @@ impl std::fmt::Debug for ResponsesWebsocketConnection {
             .field("stream", &"<ws-stream>")
             .field("endpoint", &self.endpoint)
             .field("idle_timeout", &self.idle_timeout)
+            .field("first_model_event_timeout", &self.first_model_event_timeout)
             .field("server_reasoning_included", &self.server_reasoning_included)
             .field("server_model", &self.server_model)
             .field("telemetry", &self.telemetry.as_ref().map(|_| "<telemetry>"))
@@ -208,6 +212,7 @@ impl ResponsesWebsocketConnection {
     fn new(
         stream: WsStream,
         idle_timeout: Duration,
+        first_model_event_timeout: Duration,
         server_reasoning_included: bool,
         server_model: Option<String>,
         telemetry: Option<Arc<dyn WebsocketTelemetry>>,
@@ -217,6 +222,7 @@ impl ResponsesWebsocketConnection {
             stream: Arc::new(Mutex::new(Some(stream))),
             endpoint,
             idle_timeout,
+            first_model_event_timeout,
             server_reasoning_included,
             server_model,
             telemetry,
@@ -243,6 +249,7 @@ impl ResponsesWebsocketConnection {
             mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
         let stream = Arc::clone(&self.stream);
         let idle_timeout = self.idle_timeout;
+        let first_model_event_timeout = self.first_model_event_timeout;
         let server_reasoning_included = self.server_reasoning_included;
         let server_model = self.server_model.clone();
         let telemetry = self.telemetry.clone();
@@ -315,6 +322,7 @@ impl ResponsesWebsocketConnection {
                             ws_stream,
                             tx_event.clone(),
                             request_text,
+                            first_model_event_timeout,
                             idle_timeout,
                             telemetry,
                             turn_state.as_deref(),
@@ -424,6 +432,7 @@ impl ResponsesWebsocketClient {
         Ok(ResponsesWebsocketConnection::new(
             stream,
             self.provider.stream_idle_timeout,
+            self.provider.first_model_event_timeout,
             server_reasoning_included,
             server_model,
             telemetry,
@@ -694,6 +703,7 @@ async fn run_websocket_response_stream(
     ws_stream: &mut WsStream,
     tx_event: mpsc::Sender<std::result::Result<ResponseEvent, ApiError>>,
     request_text: String,
+    first_event_timeout: Duration,
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
     turn_state: Option<&OnceLock<String>>,
@@ -710,11 +720,27 @@ async fn run_websocket_response_stream(
     )
     .await?;
 
+    let mut seen_model_event = false;
+    let first_event_deadline = Instant::now() + first_event_timeout;
     loop {
         let poll_start = Instant::now();
-        let response = tokio::time::timeout(idle_timeout, ws_stream.next())
+        let phase_idle = if seen_model_event {
+            idle_timeout
+        } else {
+            first_event_deadline.saturating_duration_since(Instant::now())
+        };
+        if phase_idle.is_zero() {
+            return Err(ApiError::Stream(
+                retry_stream_idle_interrupted_message(seen_model_event).to_string(),
+            ));
+        }
+        let response = tokio::time::timeout(phase_idle, ws_stream.next())
             .await
-            .map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()));
+            .map_err(|_| {
+                ApiError::Stream(
+                    retry_stream_idle_interrupted_message(seen_model_event).to_string(),
+                )
+            });
         if let Some(t) = telemetry.as_ref() {
             t.on_ws_event(&response, poll_start.elapsed());
         }
@@ -749,6 +775,9 @@ async fn run_websocket_response_stream(
                         continue;
                     }
                 };
+                if stream_event_kind_is_model_progress(event.kind()) {
+                    seen_model_event = true;
+                }
                 emit_responses_websocket_timing_event(
                     event.kind(),
                     text.as_str(),
@@ -824,6 +853,9 @@ async fn run_websocket_response_stream(
                 }
                 match process_responses_event(event) {
                     Ok(Some(event)) => {
+                        if event.is_model_progress_event() {
+                            seen_model_event = true;
+                        }
                         let is_completed = matches!(event, ResponseEvent::Completed { .. });
                         let _ = tx_event.send(Ok(event)).await;
                         if is_completed {

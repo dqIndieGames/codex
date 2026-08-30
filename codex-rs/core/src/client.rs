@@ -143,13 +143,14 @@ use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
 #[cfg(test)]
 use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
-use codex_model_provider_info::MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS;
+use codex_model_provider_info::HEADER_WAIT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::is_chatgpt_codex_base_url;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
-pub(crate) use codex_protocol::error::RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE;
+use codex_protocol::error::RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE;
+use codex_protocol::error::RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::extract_response_debug_context_from_api_error;
 use codex_response_debug_context::telemetry_api_error_message;
@@ -178,12 +179,8 @@ const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 const RESPONSES_ENDPOINT: &str = "/responses";
 const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
-// `/responses/compact` is unary, so the timeout covers the full response rather than one idle
-// period between stream events.
-const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
 const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
-pub(crate) const RETRY_TIME_BUDGET: Duration =
-    Duration::from_millis(MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS);
+pub(crate) const HEADER_WAIT_TIMEOUT: Duration = Duration::from_millis(HEADER_WAIT_TIMEOUT_MS);
 #[cfg(test)]
 pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
     Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
@@ -781,6 +778,10 @@ impl ModelClient {
                     RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
                     self.state.auth_env_telemetry.clone(),
                 )
+                .with_request_attempt_timeout(
+                    client_setup.api_provider.first_model_event_timeout,
+                    RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE,
+                )
                 .with_http_retry(
                     request_route_recovery.clone(),
                     settings.request_retry_notifier.clone(),
@@ -859,11 +860,7 @@ impl ModelClient {
                 extra_headers.insert(X_CODEX_ROUTING_HINT_HEADER, header_value);
             }
             add_responses_lite_header(&mut extra_headers, model_info.use_responses_lite);
-            let compact_request_timeout = client_setup
-                .api_provider
-                .stream_idle_timeout
-                .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER)
-                .min(RETRY_TIME_BUDGET);
+            let compact_request_timeout = client_setup.api_provider.first_model_event_timeout;
             let client = ApiCompactClient::new(
                 transport,
                 client_setup.api_provider,
@@ -1833,6 +1830,7 @@ impl ModelClientSession {
                     self.client
                         .request_retry_guard(self.client.current_provider_runtime_generation()),
                 ),
+                client_setup.api_provider.stream_idle_timeout,
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let mut options = self
@@ -2172,12 +2170,17 @@ impl ModelClientSession {
         request_route_recovery: Option<RequestRouteRecovery>,
         request_retry_notifier: Option<RequestRetryNotifier>,
         request_retry_guard: Option<RequestRetryGuard>,
+        header_wait_timeout: Duration,
     ) -> (Arc<dyn RequestTelemetry>, Arc<dyn SseTelemetry>) {
         let mut telemetry = ApiTelemetry::new(
             session_telemetry.clone(),
             auth_context,
             request_route_telemetry,
             auth_env_telemetry,
+        )
+        .with_request_attempt_timeout(
+            header_wait_timeout,
+            RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE,
         );
         if let Some(request_route_recovery) = request_route_recovery {
             telemetry = telemetry.with_http_retry(request_route_recovery, request_retry_notifier);
@@ -2808,6 +2811,8 @@ struct ApiTelemetry {
     request_route_recovery: Option<RequestRouteRecovery>,
     request_retry_notifier: Option<RequestRetryNotifier>,
     request_retry_guard: Option<RequestRetryGuard>,
+    request_attempt_timeout: Duration,
+    timeout_interrupt_message: &'static str,
 }
 
 impl ApiTelemetry {
@@ -2825,6 +2830,8 @@ impl ApiTelemetry {
             request_route_recovery: None,
             request_retry_notifier: None,
             request_retry_guard: None,
+            request_attempt_timeout: HEADER_WAIT_TIMEOUT,
+            timeout_interrupt_message: RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE,
         }
     }
 
@@ -2840,6 +2847,16 @@ impl ApiTelemetry {
 
     fn with_request_retry_guard(mut self, request_retry_guard: Option<RequestRetryGuard>) -> Self {
         self.request_retry_guard = request_retry_guard;
+        self
+    }
+
+    fn with_request_attempt_timeout(
+        mut self,
+        timeout: Duration,
+        message: &'static str,
+    ) -> Self {
+        self.request_attempt_timeout = timeout;
+        self.timeout_interrupt_message = message;
         self
     }
 }
@@ -2927,7 +2944,7 @@ impl RequestTelemetry for ApiTelemetry {
                 status,
                 details: user_visible_transport_retry_details(error),
                 message_override: matches!(error, TransportError::Timeout)
-                    .then(|| RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string()),
+                    .then(|| self.timeout_interrupt_message.to_string()),
             });
         }
     }
@@ -2946,7 +2963,7 @@ impl RequestTelemetry for ApiTelemetry {
     }
 
     fn request_retry_timeout(&self) -> Option<Duration> {
-        Some(RETRY_TIME_BUDGET)
+        Some(self.request_attempt_timeout)
     }
 }
 

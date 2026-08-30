@@ -9,7 +9,8 @@ use chrono::Utc;
 use codex_protocol::auth::PlanType;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
-use codex_protocol::error::RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE;
+use codex_protocol::error::is_retry_watchdog_interrupted_message;
+use codex_protocol::error::RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE;
 use codex_protocol::error::ConnectionFailedError;
 use codex_protocol::error::RetryLimitReachedError;
 use codex_protocol::error::UnexpectedResponseError;
@@ -61,7 +62,13 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                 None => error,
             }
         }
-        ApiError::Stream(msg) => CodexErr::Stream(msg),
+        ApiError::Stream(msg) => {
+            if is_retry_watchdog_interrupted_message(&msg) {
+                CodexErr::RetryTimeBudgetInterrupted(msg)
+            } else {
+                CodexErr::Stream(msg)
+            }
+        }
         ApiError::ServerOverloaded => CodexErr::ServerOverloaded,
         ApiError::Api { status, message } => {
             let user_message = api_error_user_message(status, &message);
@@ -230,7 +237,9 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
             }),
             TransportError::RetryInterrupted(reason) => CodexErr::Stream(reason),
             TransportError::Timeout => {
-                CodexErr::RetryTimeBudgetInterrupted(RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string())
+                CodexErr::RetryTimeBudgetInterrupted(
+                    RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE.to_string(),
+                )
             }
             TransportError::Connection(source) => {
                 CodexErr::ConnectionFailed(ConnectionFailedError { source })

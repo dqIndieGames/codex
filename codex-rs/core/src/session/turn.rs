@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use crate::client::ModelClientSession;
@@ -3013,7 +3014,11 @@ pub(crate) fn request_retry_notifier(
 ) -> RequestRetryNotifier {
     let sess = Arc::clone(sess);
     let turn_context = Arc::clone(turn_context);
+    let display_retries = Arc::new(AtomicU64::new(0));
     Arc::new(move |event: RequestRetryEvent| {
+        let retry_number = display_retries
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
         let sess = Arc::clone(&sess);
         let turn_context = Arc::clone(&turn_context);
         tokio::spawn(async move {
@@ -3026,12 +3031,12 @@ pub(crate) fn request_retry_notifier(
                 )
             } else if let Some(status) = event.status {
                 (
-                    request_retry_message_for_status(status, event.retry_number, event.max_attempts),
+                    request_retry_message_for_status(status, retry_number, event.max_attempts),
                     request_retry_error_info_for_status(status),
                 )
             } else {
                 (
-                    transport_retry_status_message(event.retry_number, event.max_attempts),
+                    transport_retry_status_message(retry_number, event.max_attempts),
                     CodexErrorInfo::ResponseStreamDisconnected {
                         http_status_code: None,
                     },

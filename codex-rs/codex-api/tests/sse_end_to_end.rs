@@ -70,6 +70,7 @@ fn provider(name: &str) -> Provider {
             retry_transport: true,
         },
         stream_idle_timeout: Duration::from_millis(50),
+        first_model_event_timeout: Duration::from_millis(50),
     }
 }
 

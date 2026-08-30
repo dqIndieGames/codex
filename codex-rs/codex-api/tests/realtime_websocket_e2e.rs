@@ -72,6 +72,7 @@ fn test_provider(base_url: String) -> Provider {
             retry_transport: false,
         },
         stream_idle_timeout: Duration::from_secs(5),
+        first_model_event_timeout: Duration::from_secs(5),
     }
 }
 

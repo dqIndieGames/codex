@@ -146,6 +146,25 @@ pub enum ResponseEvent {
     ModelsEtag(String),
 }
 
+impl ResponseEvent {
+    /// Protocol/lifecycle frames such as `response.created` are not model output.
+    /// The 390s first-event window stays open until one of these arrives.
+    pub(crate) fn is_model_progress_event(&self) -> bool {
+        matches!(
+            self,
+            Self::OutputItemDone(_)
+                | Self::OutputItemAdded(_)
+                | Self::OutputTextDelta(_)
+                | Self::ToolCallInputDelta { .. }
+                | Self::ReasoningSummaryDelta { .. }
+                | Self::ReasoningSummaryDone { .. }
+                | Self::ReasoningContentDelta { .. }
+                | Self::ReasoningSummaryPartAdded { .. }
+                | Self::Completed { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct SafetyBuffering {
     pub use_cases: Vec<String>,

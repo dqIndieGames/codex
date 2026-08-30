@@ -861,7 +861,7 @@ impl RealtimeWebsocketClient {
                         Err(_) => Err(ApiError::Transport(TransportError::Timeout)),
                     }
                 }
-                None => match tokio::time::timeout(Duration::from_secs(300), connect_once()).await {
+                None => match tokio::time::timeout(Duration::from_secs(390), connect_once()).await {
                     Ok(result) => result,
                     Err(_) => Err(ApiError::Transport(TransportError::Timeout)),
                 },
@@ -2290,6 +2290,7 @@ mod tests {
                 retry_transport: false,
             },
             stream_idle_timeout: Duration::from_secs(5),
+            first_model_event_timeout: Duration::from_secs(5),
         });
 
         let url = client
@@ -2486,6 +2487,7 @@ mod tests {
                 retry_transport: false,
             },
             stream_idle_timeout: Duration::from_secs(5),
+            first_model_event_timeout: Duration::from_secs(5),
         };
         let client = RealtimeWebsocketClient::new(provider);
         let connection = client
@@ -2812,6 +2814,7 @@ mod tests {
                 retry_transport: false,
             },
             stream_idle_timeout: Duration::from_secs(5),
+            first_model_event_timeout: Duration::from_secs(5),
         };
         let client = RealtimeWebsocketClient::new(provider);
         let connection = client
@@ -2939,6 +2942,7 @@ mod tests {
                 retry_transport: false,
             },
             stream_idle_timeout: Duration::from_secs(5),
+            first_model_event_timeout: Duration::from_secs(5),
         };
         let client = RealtimeWebsocketClient::new(provider);
         let connection = client
@@ -3045,6 +3049,7 @@ mod tests {
                 retry_transport: false,
             },
             stream_idle_timeout: Duration::from_secs(5),
+            first_model_event_timeout: Duration::from_secs(5),
         };
         let client = RealtimeWebsocketClient::new(provider);
         let connection = client
@@ -3137,6 +3142,7 @@ mod tests {
                 retry_transport: false,
             },
             stream_idle_timeout: Duration::from_secs(5),
+            first_model_event_timeout: Duration::from_secs(5),
         };
         let client = RealtimeWebsocketClient::new(provider);
         let connection = client

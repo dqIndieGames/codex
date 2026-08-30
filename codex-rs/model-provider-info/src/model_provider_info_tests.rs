@@ -3,6 +3,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use pretty_assertions::assert_eq;
 use std::num::NonZeroU64;
+use std::time::Duration;
 use tempfile::tempdir;
 
 #[test]
@@ -663,4 +664,75 @@ refresh_interval_ms = 0
     let auth = provider.auth.expect("auth config should deserialize");
     assert_eq!(auth.refresh_interval_ms, 0);
     assert_eq!(auth.refresh_interval(), None);
+}
+
+#[test]
+fn phase_watchdog_defaults_follow_local3_checklist() {
+    // Ground truth: docs/local3-custom-feature-checklist-2026-05-10.md
+    // header 60s, first event 390s, post-output idle 60s.
+    let provider = ModelProviderInfo {
+        name: "test".into(),
+        base_url: None,
+        env_key: None,
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        aws: None,
+        wire_api: WireApi::Responses,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+        supports_standalone_web_search: false,
+    };
+    assert_eq!(
+        provider.header_wait_timeout(),
+        Duration::from_millis(HEADER_WAIT_TIMEOUT_MS)
+    );
+    assert_eq!(
+        provider.first_model_event_timeout(),
+        Duration::from_millis(FIRST_MODEL_EVENT_TIMEOUT_MS)
+    );
+    assert_eq!(
+        provider.stream_idle_timeout(),
+        Duration::from_millis(POST_OUTPUT_IDLE_TIMEOUT_MS)
+    );
+
+    let mut shorter = provider.clone();
+    shorter.stream_idle_timeout_ms = Some(5_000);
+    assert_eq!(shorter.header_wait_timeout(), Duration::from_secs(5));
+    assert_eq!(
+        shorter.first_model_event_timeout(),
+        Duration::from_millis(FIRST_MODEL_EVENT_TIMEOUT_MS)
+    );
+    assert_eq!(shorter.stream_idle_timeout(), Duration::from_secs(5));
+
+    let mut longer_idle = provider.clone();
+    longer_idle.stream_idle_timeout_ms = Some(120_000);
+    assert_eq!(longer_idle.header_wait_timeout(), Duration::from_secs(60));
+    assert_eq!(
+        longer_idle.first_model_event_timeout(),
+        Duration::from_millis(FIRST_MODEL_EVENT_TIMEOUT_MS)
+    );
+    assert_eq!(longer_idle.stream_idle_timeout(), Duration::from_secs(60));
+
+    let mut legacy_five_min = provider;
+    legacy_five_min.stream_idle_timeout_ms = Some(300_000);
+    assert_eq!(
+        legacy_five_min.header_wait_timeout(),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        legacy_five_min.first_model_event_timeout(),
+        Duration::from_millis(FIRST_MODEL_EVENT_TIMEOUT_MS)
+    );
+    assert_eq!(
+        legacy_five_min.stream_idle_timeout(),
+        Duration::from_secs(60)
+    );
 }

@@ -10,7 +10,6 @@ use codex_client::RetryOperation;
 use codex_features::Feature;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
-use codex_protocol::error::RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE;
 use tracing::debug;
 
 const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
@@ -112,7 +111,7 @@ fn maybe_activate_route_recovery(client_session: &mut ModelClientSession, retry_
 
 fn retry_status_message(err: &CodexErr, retry_count: u64) -> String {
     if err.is_retry_time_budget_interrupted() {
-        RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string()
+        err.to_string()
     } else {
         format!("Reconnecting... {retry_count} (auto retry)")
     }

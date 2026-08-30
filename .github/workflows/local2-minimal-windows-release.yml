@@ -31,27 +31,21 @@ jobs:
         continue-on-error: true
         run: cargo fmt --all -- --check
 
-      # GitHub compile for this local3 0.151 cut only requires Windows
-      # `codex.exe`. Restore these test steps after the release binary builds.
       - name: Run local3 first-turn checklist regression tests
-        if: false
         shell: bash
         run: cargo test -p codex-core --lib first_turn_checklist -- --nocapture
 
       - name: Run image-ladder and rollout replay regression tests
-        if: false
         shell: bash
         run: cargo test -p codex-core --lib -- images_shrunk rollout_reconstruction image_ladder --nocapture
 
       - name: Run rollout and protocol tests
-        if: false
         shell: bash
         run: |
           cargo test -p codex-protocol
           cargo test -p codex-rollout
 
       - name: Run empty-completed-after-tools regression tests
-        if: false
         shell: bash
         env:
           # Windows debug tokio workers overflow the default stack while

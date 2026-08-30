@@ -253,6 +253,35 @@ fn retry_time_budget_interruption_stays_retryable_and_keeps_its_message() {
 }
 
 #[test]
+fn phase_watchdog_messages_match_local3_checklist() {
+    // Ground truth: docs/local3-custom-feature-checklist-2026-05-10.md item 3.
+    assert_eq!(
+        RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE,
+        "等待响应头超过 1 分钟，已自动中断，正在自动重试。"
+    );
+    assert_eq!(
+        RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE,
+        "等待首个模型事件超过 6.5 分钟，已自动中断，正在自动重试。"
+    );
+    assert_eq!(
+        RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE,
+        "已有输出后超过 1 分钟无新事件，已自动中断，正在自动重试。"
+    );
+    assert!(is_retry_watchdog_interrupted_message(
+        RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE
+    ));
+    assert!(is_retry_watchdog_interrupted_message(
+        RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE
+    ));
+    assert!(is_retry_watchdog_interrupted_message(
+        RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE
+    ));
+    assert!(!is_retry_watchdog_interrupted_message(
+        "本次网络请求连续 5 分钟无进展，已自动中断，正在自动重试。"
+    ));
+}
+
+#[test]
 fn sandbox_denied_uses_aggregated_output_when_stderr_empty() {
     let output = ExecToolCallOutput {
         exit_code: 77,

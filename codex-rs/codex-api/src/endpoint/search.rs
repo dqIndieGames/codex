@@ -130,6 +130,7 @@ mod tests {
                 retry_transport: true,
             },
             stream_idle_timeout: Duration::from_secs(1),
+            first_model_event_timeout: Duration::from_secs(1),
         }
     }
 

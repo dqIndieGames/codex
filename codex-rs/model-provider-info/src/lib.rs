@@ -24,9 +24,15 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
-/// Maximum consecutive no-progress time allowed for a model-network attempt.
-pub const MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS: u64 = 300_000;
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS;
+/// Wait for HTTP response headers on one streaming attempt.
+pub const HEADER_WAIT_TIMEOUT_MS: u64 = 60_000;
+/// Wait for the first model event after the stream is open (6.5 minutes).
+pub const FIRST_MODEL_EVENT_TIMEOUT_MS: u64 = 390_000;
+/// Idle after at least one model event has arrived.
+pub const POST_OUTPUT_IDLE_TIMEOUT_MS: u64 = 60_000;
+/// Cap for unary compact / realtime / WebRTC connect (same as first-event).
+pub const MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS: u64 = FIRST_MODEL_EVENT_TIMEOUT_MS;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = POST_OUTPUT_IDLE_TIMEOUT_MS;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 const DEFAULT_AWS_AUTH_REFRESH_TIMEOUT_MS: u64 = 300_000;
@@ -168,8 +174,9 @@ pub struct ModelProviderInfo {
     pub request_max_retries: Option<u64>,
     /// Number of times to retry reconnecting a dropped streaming response before failing.
     pub stream_max_retries: Option<u64>,
-    /// Idle timeout (in milliseconds) to wait for activity on a streaming response before treating
-    /// the connection as lost.
+    /// Idle timeout in milliseconds after the first model event (phase 3).
+    /// Default 60s; an explicit shorter value can fire earlier. This does not
+    /// cap the 390s first-event thinking window.
     pub stream_idle_timeout_ms: Option<u64>,
     /// Maximum time (in milliseconds) to wait for a websocket connection attempt before treating
     /// it as failed.
@@ -390,6 +397,7 @@ impl ModelProviderInfo {
             headers,
             retry,
             stream_idle_timeout: self.stream_idle_timeout(),
+            first_model_event_timeout: self.first_model_event_timeout(),
         })
     }
 
@@ -459,12 +467,33 @@ impl ModelProviderInfo {
         matches!(current_retry_mode(), RetryMode::Unbounded)
     }
 
-    /// Effective idle timeout for streaming responses.
+    /// Effective idle timeout after the first model event (phase 3).
+    ///
+    /// Explicit shorter `stream_idle_timeout_ms` can fire earlier; the default
+    /// must not extend past 60s or cut the 390s first-event window.
     pub fn stream_idle_timeout(&self) -> Duration {
         Duration::from_millis(
             self.stream_idle_timeout_ms
                 .unwrap_or(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
-                .min(MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS),
+                .min(POST_OUTPUT_IDLE_TIMEOUT_MS),
+        )
+    }
+
+    /// Effective wait for the first model event after the stream is open.
+    ///
+    /// Phase 2 is the 390s thinking window. `stream_idle_timeout_ms` is an idle
+    /// timeout for other phases and must not cut this window (including legacy
+    /// `300000` / 5 minute configs).
+    pub fn first_model_event_timeout(&self) -> Duration {
+        Duration::from_millis(FIRST_MODEL_EVENT_TIMEOUT_MS)
+    }
+
+    /// Effective wait for HTTP response headers on one streaming attempt.
+    pub fn header_wait_timeout(&self) -> Duration {
+        Duration::from_millis(
+            self.stream_idle_timeout_ms
+                .unwrap_or(HEADER_WAIT_TIMEOUT_MS)
+                .min(HEADER_WAIT_TIMEOUT_MS),
         )
     }
 

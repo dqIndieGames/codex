@@ -608,7 +608,7 @@ impl RealtimeConversationManager {
 
         let client = RealtimeWebsocketClient::new(api_provider)
             .with_request_retry_notifier(websocket_retry_notifier)
-            .with_request_retry_timeout(Some(Arc::new(|| Some(Duration::from_secs(300)))))
+            .with_request_retry_timeout(Some(Arc::new(|| Some(Duration::from_secs(390)))))
             .with_request_retry_guard(Some(
                 model_client.request_retry_guard(model_client.current_provider_runtime_generation()),
             ));

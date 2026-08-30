@@ -205,6 +205,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         let provider = self.session.provider_snapshot();
         Ok(spawn_response_stream(
             stream_response,
+            provider.first_model_event_timeout,
             provider.stream_idle_timeout,
             self.sse_telemetry.clone(),
             turn_state,
