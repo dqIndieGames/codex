@@ -151,6 +151,7 @@ async fn create_replacement_recorder(
             .clone()
             .unwrap_or_else(|| store.config.default_model_provider_id.clone()),
         generate_memories: source_meta.memory_mode.as_deref() != Some("disabled"),
+        rollout_batch_flush_enabled: store.config.rollout_batch_flush_enabled,
     };
     let mut params = RolloutRecorderParams::new(
         source_meta.id,

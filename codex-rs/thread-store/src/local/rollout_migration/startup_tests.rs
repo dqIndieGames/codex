@@ -101,6 +101,7 @@ async fn indexed_store(home: &Path) -> LocalThreadStore {
         cwd: home.to_path_buf(),
         model_provider_id: config.default_model_provider_id.clone(),
         generate_memories: false,
+        rollout_batch_flush_enabled: config.rollout_batch_flush_enabled,
     };
     let state_db = codex_rollout::state_db::try_init(&rollout_config)
         .await
