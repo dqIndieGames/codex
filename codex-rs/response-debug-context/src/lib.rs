@@ -101,6 +101,7 @@ pub fn user_visible_transport_retry_details(error: &TransportError) -> String {
         TransportError::RetryLimit => "Retry limit reached".to_string(),
         TransportError::RetryInterrupted(_) => "Request retry interrupted".to_string(),
         TransportError::Timeout => "Request timed out, retrying".to_string(),
+        TransportError::Connection(_) => "Connection error, retrying".to_string(),
         TransportError::Network(_) => "Network error, retrying".to_string(),
         TransportError::Build(_) => "Request build error".to_string(),
     }
