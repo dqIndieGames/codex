@@ -382,6 +382,7 @@ impl LunaSampler {
             )
             | LunaSamplerError::Api(ApiError::Transport(
                 TransportError::RetryLimit
+                | TransportError::RetryInterrupted(_)
                 | TransportError::Timeout
                 | TransportError::Connection(_)
                 | TransportError::Network(_),
