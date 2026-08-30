@@ -186,20 +186,22 @@ fn remote_model_request_errors_are_retryable() {
         promo_message: None,
         rate_limit_reached_type: None,
     };
-    let response = HttpResponse::builder()
+    let response = RawHttpResponse::builder()
         .status(StatusCode::TOO_MANY_REQUESTS)
-        .url(Url::parse("http://example.com").unwrap())
         .body("")
         .unwrap();
-    let source = Response::from(response).error_for_status_ref().unwrap_err();
+    let source = HttpResponse::from(response)
+        .error_for_status_ref()
+        .unwrap_err()
+        .with_url("http://example.com".parse().unwrap());
 
     let errors = [
         CodexErr::ContextWindowExceeded,
         CodexErr::UsageLimitReached(usage_limit),
         CodexErr::ServerOverloaded,
-        CodexErr::CyberPolicy {
+        CodexErr::new(CodexErrorDetails::CyberPolicy {
             message: "policy".to_string(),
-        },
+        }),
         CodexErr::UsageNotIncluded,
         CodexErr::QuotaExceeded,
         CodexErr::Stream("stream".to_string()),
