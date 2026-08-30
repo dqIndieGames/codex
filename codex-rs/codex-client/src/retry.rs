@@ -26,9 +26,10 @@ impl RetryOn {
             return false;
         }
         match err {
-            TransportError::Http { .. } | TransportError::Timeout | TransportError::Network(_) => {
-                true
-            }
+            TransportError::Http { .. }
+            | TransportError::Timeout
+            | TransportError::Connection(_)
+            | TransportError::Network(_) => true,
             TransportError::RetryLimit
             | TransportError::RetryInterrupted(_)
             | TransportError::Build(_) => false,
@@ -38,6 +39,42 @@ impl RetryOn {
 
 pub fn fixed_retry_delay() -> Duration {
     FIXED_RETRY_DELAY
+}
+
+/// local3: every automatic retry waits a fixed 5s. Callers may still pass a
+/// base/attempt, but those values must not change the wait.
+pub fn backoff(_base: Duration, _attempt: u64) -> Duration {
+    FIXED_RETRY_DELAY
+}
+
+/// Identifies a retry path and its associated trace-event layer.
+#[derive(Debug, Clone, Copy)]
+pub enum RetryOperation {
+    HttpRequest,
+    Sampling,
+    RemoteCompactionV2,
+}
+
+/// Emits retry telemetry at the caller's source location without adding it to normal OTEL logs.
+#[macro_export]
+macro_rules! record_retry {
+    ($attempt:expr, $delay:expr, $operation:expr $(,)?) => {{
+        let (layer, operation) = match $operation {
+            $crate::RetryOperation::HttpRequest => ("http", "request"),
+            $crate::RetryOperation::Sampling => ("stream", "sampling"),
+            $crate::RetryOperation::RemoteCompactionV2 => ("stream", "remote_compaction_v2"),
+        };
+
+        ::tracing::event!(
+            target: "codex_otel.trace_safe",
+            ::tracing::Level::TRACE,
+            event.name = "codex.retry",
+            retry.attempt = $attempt,
+            retry.delay_ms = ($delay).as_millis() as u64,
+            retry.layer = layer,
+            retry.operation = operation,
+        );
+    }};
 }
 
 pub async fn run_with_retry<T, F, Fut>(
@@ -58,7 +95,10 @@ where
                     .retry_on
                     .should_retry(&err, attempt, policy.max_attempts) =>
             {
-                sleep(fixed_retry_delay()).await;
+                let retry_attempt = attempt + 1;
+                let delay = fixed_retry_delay();
+                crate::record_retry!(retry_attempt, delay, RetryOperation::HttpRequest);
+                sleep(delay).await;
             }
             Err(err) => return Err(err),
         }
@@ -100,5 +140,6 @@ mod tests {
     #[test]
     fn request_retry_delay_is_fixed_to_five_seconds() {
         assert_eq!(fixed_retry_delay(), Duration::from_secs(5));
+        assert_eq!(backoff(Duration::from_millis(1), 8), Duration::from_secs(5));
     }
 }

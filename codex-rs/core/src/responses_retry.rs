@@ -3,260 +3,153 @@
 use std::time::Duration;
 
 use crate::client::ModelClientSession;
-use crate::client::RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::util::fixed_retry_delay;
+use codex_client::RetryOperation;
+use codex_features::Feature;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::error::RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE;
+use tracing::debug;
 
-const STREAM_RETRY_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
     Sampling,
-    LocalCompaction,
     RemoteCompactionV2,
+}
+
+pub(crate) struct ResponsesStreamRetryState {
+    pub(crate) retries: u64,
+    connection_retries: u64,
+}
+
+impl Default for ResponsesStreamRetryState {
+    fn default() -> Self {
+        Self {
+            retries: 0,
+            connection_retries: 0,
+        }
+    }
 }
 
 /// Handles a retryable stream error and returns `Ok(())` when the caller should
 /// retry the request loop.
 pub(crate) async fn handle_retryable_response_stream_error(
-    retries: &mut u64,
-    display_retries: &mut u64,
-    fallback_retry_threshold: u64,
-    retry_budget: Option<u64>,
+    retry_state: &mut ResponsesStreamRetryState,
+    max_retries: u64,
     err: CodexErr,
     client_session: &mut ModelClientSession,
     sess: &Session,
     turn_context: &TurnContext,
-    _request: ResponsesStreamRequest,
-    allow_route_recovery: bool,
+    request: ResponsesStreamRequest,
 ) -> Result<(), CodexErr> {
-    client_session.begin_retry_time_budget();
+    let operation = match request {
+        ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
+        ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
+    };
+    let delay = fixed_retry_delay();
 
-    if client_session.provider_runtime_changed() {
-        *retries = 0;
-        client_session.sync_latest_provider_runtime_generation();
+    if turn_context
+        .config
+        .features
+        .enabled(Feature::UnboundedConnectionRetries)
+        && matches!(request, ResponsesStreamRequest::Sampling)
+        && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_))
+        && !turn_context.session_source.is_internal()
+        && !turn_context.provider.info().is_amazon_bedrock()
+    {
+        retry_state.connection_retries = retry_state.connection_retries.saturating_add(1);
+        maybe_activate_route_recovery(client_session, retry_state.connection_retries);
+        log_retry(request, turn_context, &err, retry_state.connection_retries, max_retries, delay);
+        sess.notify_stream_error(
+            turn_context,
+            retry_status_message(&err, retry_state.connection_retries),
+            err,
+        )
+        .await;
+        codex_client::record_retry!(retry_state.connection_retries, delay, operation);
+        tokio::time::sleep(delay).await;
         return Ok(());
     }
 
-    let persistent_route_recovery = requires_persistent_route_recovery(&err);
-    let effective_retry_budget =
-        effective_stream_retry_budget(retry_budget, persistent_route_recovery);
-    let effective_fallback_retry_threshold =
-        effective_fallback_retry_threshold(fallback_retry_threshold, persistent_route_recovery);
-
-    if *retries >= effective_fallback_retry_threshold
+    if retry_state.retries >= max_retries
         && client_session.try_switch_fallback_transport(
             &turn_context.session_telemetry,
-            &turn_context.model_info,
+            turn_context.model_info(),
         )
     {
-        let fallback_message = if err.is_retry_time_budget_interrupted() {
-            format!(
-                "{RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE} Falling back from WebSockets to HTTPS transport. {err:#}"
-            )
-        } else {
-            format!("Falling back from WebSockets to HTTPS transport. {err:#}")
-        };
-        sess.notify_transient_stream_error(
-            turn_context,
-            fallback_message,
-            err,
-        )
-        .await;
-        *retries = 0;
+        retry_state.retries = 0;
         return Ok(());
     }
 
-    if effective_retry_budget.is_none_or(|max_retries| *retries < max_retries) {
-        *retries += 1;
-        let retry_count = *retries;
-        let display_retry_count = next_display_retry_count(display_retries);
-        if allow_route_recovery && retry_count % ROUTE_RECOVERY_RETRY_THRESHOLD == 0 {
-            client_session.activate_retry_route_recovery();
-        }
-        let display_max_retries = effective_retry_budget.unwrap_or(u64::MAX);
-        let delay = response_stream_retry_delay(&err);
-        // Surface every visible retry so the user-facing count remains continuous from 1.
-        let status_message = if err.is_retry_time_budget_interrupted() {
-            format!(
-                "{RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE} {}",
-                transport_retry_status_message(display_retry_count, display_max_retries)
-            )
-        } else {
-            transport_retry_status_message(display_retry_count, display_max_retries)
-        };
-        sess.notify_transient_stream_error(
+    if retry_state.retries < max_retries {
+        retry_state.retries += 1;
+        let retry_count = retry_state.retries;
+        maybe_activate_route_recovery(client_session, retry_count);
+        log_retry(request, turn_context, &err, retry_count, max_retries, delay);
+        sess.notify_stream_error(
             turn_context,
-            status_message,
+            retry_status_message(&err, retry_count),
             err,
         )
         .await;
-        if sleep_stream_retry_delay(delay, retries, client_session).await {
-            let interruption = CodexErr::RetryTimeBudgetInterrupted(
-                RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string(),
-            );
-            sess.notify_transient_stream_error(
-                turn_context,
-                RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string(),
-                interruption,
-            )
-            .await;
-        }
+        codex_client::record_retry!(retry_count, delay, operation);
+        tokio::time::sleep(delay).await;
         return Ok(());
     }
 
     Err(err)
 }
 
-fn effective_stream_retry_budget(
-    retry_budget: Option<u64>,
-    requires_persistent_route_recovery: bool,
-) -> Option<u64> {
-    if requires_persistent_route_recovery {
-        None
-    } else {
-        retry_budget
+fn maybe_activate_route_recovery(client_session: &mut ModelClientSession, retry_count: u64) {
+    if retry_count > 0 && retry_count % ROUTE_RECOVERY_RETRY_THRESHOLD == 0 {
+        client_session.activate_retry_route_recovery();
     }
 }
 
-fn effective_fallback_retry_threshold(
-    fallback_retry_threshold: u64,
-    requires_persistent_route_recovery: bool,
-) -> u64 {
-    if requires_persistent_route_recovery {
-        fallback_retry_threshold.max(ROUTE_RECOVERY_RETRY_THRESHOLD)
+fn retry_status_message(err: &CodexErr, retry_count: u64) -> String {
+    if err.is_retry_time_budget_interrupted() {
+        RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string()
     } else {
-        fallback_retry_threshold
+        format!("Reconnecting... {retry_count} (auto retry)")
     }
 }
 
-fn requires_persistent_route_recovery(err: &CodexErr) -> bool {
-    matches!(err, CodexErr::ServerOverloaded)
-}
-
-fn retry_status_suffix(retries: u64, max_retries: u64) -> String {
-    if max_retries == u64::MAX {
-        format!("{retries} (auto retry)")
-    } else {
-        format!("{retries}/{max_retries}")
-    }
-}
-
-fn transport_retry_status_message(retries: u64, max_retries: u64) -> String {
-    format!(
-        "Reconnecting... {}",
-        retry_status_suffix(retries, max_retries)
-    )
-}
-
-fn response_stream_retry_delay(_err: &CodexErr) -> Duration {
-    fixed_retry_delay()
-}
-
-fn next_display_retry_count(display_retries: &mut u64) -> u64 {
-    *display_retries = (*display_retries).saturating_add(1);
-    *display_retries
-}
-
-async fn sleep_stream_retry_delay(
+fn log_retry(
+    request: ResponsesStreamRequest,
+    turn_context: &TurnContext,
+    err: &CodexErr,
+    retries: u64,
+    max_retries: u64,
     delay: Duration,
-    retries: &mut u64,
-    client_session: &mut ModelClientSession,
-) -> bool {
-    if delay.is_zero() {
-        return false;
-    }
-
-    let start = tokio::time::Instant::now();
-    loop {
-        if client_session
-            .retry_time_budget()
-            .interruption_error()
-            .is_some()
-        {
-            return true;
+) {
+    match request {
+        ResponsesStreamRequest::Sampling => {
+            debug!(
+                turn_id = %turn_context.sub_id,
+                retries,
+                max_retries,
+                sampling_error = %err,
+                delay_ms = delay.as_millis() as u64,
+                "stream disconnected - retrying sampling request",
+            );
         }
-        if client_session.provider_runtime_changed() {
-            *retries = 0;
-            client_session.sync_latest_provider_runtime_generation();
-            return false;
+        ResponsesStreamRequest::RemoteCompactionV2 => {
+            debug!(
+                turn_id = %turn_context.sub_id,
+                retries,
+                max_retries,
+                compact_error = %err,
+                delay_ms = delay.as_millis() as u64,
+                "remote compaction v2 stream failed; retrying request after delay"
+            );
         }
-
-        let elapsed = start.elapsed();
-        if elapsed >= delay {
-            return false;
-        }
-
-        tokio::time::sleep((delay - elapsed).min(STREAM_RETRY_INTERRUPT_POLL_INTERVAL)).await;
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::next_display_retry_count;
-    use super::response_stream_retry_delay;
-    use super::transport_retry_status_message;
-    use codex_protocol::error::CodexErr;
-    use std::time::Duration;
-
-    #[test]
-    fn visible_stream_retry_count_survives_internal_retry_reset() {
-        let mut internal_retries = 0;
-        let mut display_retries = 0;
-
-        internal_retries += 1;
-        assert_eq!(internal_retries, 1);
-        assert_eq!(next_display_retry_count(&mut display_retries), 1);
-        internal_retries += 1;
-        assert_eq!(internal_retries, 2);
-        assert_eq!(next_display_retry_count(&mut display_retries), 2);
-        internal_retries += 1;
-        assert_eq!(internal_retries, 3);
-        assert_eq!(next_display_retry_count(&mut display_retries), 3);
-
-        internal_retries = 0;
-        internal_retries += 1;
-
-        assert_eq!(internal_retries, 1);
-        assert_eq!(next_display_retry_count(&mut display_retries), 4);
-    }
-
-    #[test]
-    fn visible_stream_retry_message_marks_automatic_retry() {
-        let message = transport_retry_status_message(6, u64::MAX);
-
-        assert!(message.starts_with("Reconnecting... 6"));
-        assert!(message.contains("auto retry"));
-        assert!(!message.contains("unbounded"));
-        assert!(!message.contains(&u64::MAX.to_string()));
-    }
-
-    #[test]
-    fn stream_retry_delay_is_fixed_and_ignores_retry_after() {
-        let short_retry_after = CodexErr::Stream(
-            "retry after short".to_string(),
-            Some(Duration::from_millis(28)),
-        );
-        let long_retry_after = CodexErr::Stream(
-            "retry after long".to_string(),
-            Some(Duration::from_secs(35)),
-        );
-        let no_retry_after = CodexErr::Stream("no retry after".to_string(), None);
-
-        assert_eq!(
-            response_stream_retry_delay(&short_retry_after),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            response_stream_retry_delay(&long_retry_after),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            response_stream_retry_delay(&no_retry_after),
-            Duration::from_secs(5)
-        );
-    }
-}
+#[path = "responses_retry_tests.rs"]
+mod tests;

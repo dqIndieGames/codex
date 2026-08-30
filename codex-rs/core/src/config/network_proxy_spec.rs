@@ -4,6 +4,7 @@ use codex_network_proxy::BlockedRequestObserver;
 use codex_network_proxy::ConfigReloader;
 use codex_network_proxy::ConfigReloaderFuture;
 use codex_network_proxy::ConfigState;
+use codex_network_proxy::EnvironmentNetworkPolicy;
 use codex_network_proxy::NetworkDecision;
 use codex_network_proxy::NetworkPolicyDecider;
 use codex_network_proxy::NetworkProxy;
@@ -14,6 +15,8 @@ use codex_network_proxy::NetworkProxyHandle;
 use codex_network_proxy::NetworkProxyState;
 use codex_network_proxy::build_config_state;
 use codex_network_proxy::host_and_port_from_network_addr;
+#[cfg(any(target_os = "windows", test))]
+use codex_network_proxy::managed_proxy_ports;
 use codex_network_proxy::normalize_host;
 use codex_network_proxy::validate_policy_against_constraints;
 use codex_protocol::models::PermissionProfile;
@@ -74,18 +77,28 @@ impl ConfigReloader for StaticNetworkProxyReloader {
 
 impl NetworkProxySpec {
     pub(crate) fn enabled(&self) -> bool {
-        self.config.network.enabled
+        self.config.enabled
     }
 
     pub fn proxy_host_and_port(&self) -> String {
-        host_and_port_from_network_addr(&self.config.network.proxy_url, /*default_port*/ 3128)
+        host_and_port_from_network_addr(&self.config.proxy_url, /*default_port*/ 3128)
     }
 
     pub fn socks_enabled(&self) -> bool {
-        self.config.network.enable_socks5
+        self.config.enable_socks5
     }
 
-    pub(crate) fn from_config_and_constraints(
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn configured_proxy_ports(&self) -> std::io::Result<Vec<u16>> {
+        managed_proxy_ports(&self.config).map_err(std::io::Error::other)
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn allow_local_binding(&self) -> bool {
+        self.config.allow_local_binding
+    }
+
+    pub fn from_config_and_constraints(
         config: NetworkProxyConfig,
         requirements: Option<NetworkConstraints>,
         permission_profile: &PermissionProfile,
@@ -161,6 +174,80 @@ impl NetworkProxySpec {
         )
     }
 
+    /// Returns the effective traffic policy without exposing controller-owned proxy settings.
+    pub fn environment_policy(&self) -> EnvironmentNetworkPolicy {
+        EnvironmentNetworkPolicy::from_config(&self.config, self.hard_deny_allowlist_misses)
+    }
+
+    pub(crate) fn for_environment(
+        controller: Option<&Self>,
+        policy: &EnvironmentNetworkPolicy,
+        permission_profile: &PermissionProfile,
+        exec_policy: &Policy,
+    ) -> std::io::Result<Self> {
+        if matches!(permission_profile, PermissionProfile::Disabled) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "environment network policy requires managed network enforcement",
+            ));
+        }
+        if controller.is_some_and(|controller| !controller.enabled()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "environment network policy cannot override a disabled controller proxy",
+            ));
+        }
+        let mut spec = match controller {
+            Some(controller) => controller.recompute_for_permission_profile(permission_profile)?,
+            None => Self::from_config_and_constraints(
+                NetworkProxyConfig {
+                    enabled: true,
+                    // Without a controller, the owner supplies the entire permission ceiling.
+                    dangerously_allow_all_unix_sockets: true,
+                    allow_local_binding: true,
+                    ..NetworkProxyConfig::default()
+                },
+                /*requirements*/ None,
+                permission_profile,
+            )?,
+        };
+        policy.apply_to(&mut spec.config);
+        let protected_denials = spec.config.denied_domains().unwrap_or_default();
+
+        // A fixed controller allowlist remains a ceiling; an expandable one is only a baseline.
+        // Profiles without managed approvals must not reuse approvals cached by another profile.
+        let fixed_allowlist = spec.hard_deny_allowlist_misses
+            || spec.constraints.allowlist_expansion_enabled == Some(false);
+        spec.hard_deny_allowlist_misses |= policy.managed_allowed_domains_only
+            || !Self::managed_sandbox_active(permission_profile);
+        let allow_owner_grants = !spec.hard_deny_allowlist_misses && !fixed_allowlist;
+        if fixed_allowlist {
+            spec.constraints.allowlist_expansion_enabled = None;
+        } else {
+            spec.constraints.allowed_domains =
+                Some(spec.config.allowed_domains().unwrap_or_default());
+            spec.constraints.allowlist_expansion_enabled = Some(allow_owner_grants);
+        }
+        spec.constraints.denylist_expansion_enabled = Some(true);
+
+        // Saved grants can extend a reviewable owner policy; owner denials are restored last.
+        let (allowed_domains, denied_domains) = exec_policy.compiled_network_domains();
+        if allow_owner_grants {
+            upsert_network_domains(&mut spec.config, allowed_domains, /*allow*/ true);
+        }
+        upsert_network_domains(&mut spec.config, denied_domains, /*allow*/ false);
+        upsert_network_domains(&mut spec.config, protected_denials, /*allow*/ false);
+        spec.constraints.denied_domains = spec.config.denied_domains();
+
+        validate_policy_against_constraints(&spec.config, &spec.constraints).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("environment network policy violates managed requirements: {error}"),
+            )
+        })?;
+        Ok(spec)
+    }
+
     pub(crate) fn with_exec_policy_network_rules(
         &self,
         exec_policy: &Policy,
@@ -190,7 +277,7 @@ impl NetworkProxySpec {
             })
     }
 
-    fn build_state_with_audit_metadata(
+    pub(crate) fn build_state_with_audit_metadata(
         &self,
         audit_metadata: NetworkProxyAuditMetadata,
     ) -> std::io::Result<NetworkProxyState> {
@@ -221,31 +308,30 @@ impl NetworkProxySpec {
         let denylist_expansion_enabled = Self::denylist_expansion_enabled(permission_profile);
 
         if let Some(enabled) = requirements.enabled {
-            config.network.enabled = enabled;
+            config.enabled = enabled;
             constraints.enabled = Some(enabled);
         }
         if let Some(http_port) = requirements.http_port {
-            config.network.proxy_url = format!("http://127.0.0.1:{http_port}");
+            config.proxy_url = format!("http://127.0.0.1:{http_port}");
         }
         if let Some(socks_port) = requirements.socks_port {
-            config.network.socks_url = format!("http://127.0.0.1:{socks_port}");
+            config.socks_url = format!("http://127.0.0.1:{socks_port}");
         }
         if let Some(allow_upstream_proxy) = requirements.allow_upstream_proxy {
-            config.network.allow_upstream_proxy = allow_upstream_proxy;
+            config.allow_upstream_proxy = allow_upstream_proxy;
             constraints.allow_upstream_proxy = Some(allow_upstream_proxy);
         }
         if let Some(dangerously_allow_non_loopback_proxy) =
             requirements.dangerously_allow_non_loopback_proxy
         {
-            config.network.dangerously_allow_non_loopback_proxy =
-                dangerously_allow_non_loopback_proxy;
+            config.dangerously_allow_non_loopback_proxy = dangerously_allow_non_loopback_proxy;
             constraints.dangerously_allow_non_loopback_proxy =
                 Some(dangerously_allow_non_loopback_proxy);
         }
         if let Some(dangerously_allow_all_unix_sockets) =
             requirements.dangerously_allow_all_unix_sockets
         {
-            config.network.dangerously_allow_all_unix_sockets = dangerously_allow_all_unix_sockets;
+            config.dangerously_allow_all_unix_sockets = dangerously_allow_all_unix_sockets;
             constraints.dangerously_allow_all_unix_sockets =
                 Some(dangerously_allow_all_unix_sockets);
         }
@@ -270,14 +356,12 @@ impl NetworkProxySpec {
             let effective_allowed_domains = if allowlist_expansion_enabled {
                 Self::merge_domain_lists(
                     managed_allowed_domains.clone(),
-                    config.network.allowed_domains().as_deref().unwrap_or(&[]),
+                    config.allowed_domains().as_deref().unwrap_or(&[]),
                 )
             } else {
                 managed_allowed_domains.clone()
             };
-            config
-                .network
-                .set_allowed_domains(effective_allowed_domains);
+            config.set_allowed_domains(effective_allowed_domains);
             constraints.allowed_domains = Some(managed_allowed_domains);
             constraints.allowlist_expansion_enabled = Some(allowlist_expansion_enabled);
         }
@@ -289,12 +373,12 @@ impl NetworkProxySpec {
             let effective_denied_domains = if denylist_expansion_enabled {
                 Self::merge_domain_lists(
                     managed_denied_domains.clone(),
-                    config.network.denied_domains().as_deref().unwrap_or(&[]),
+                    config.denied_domains().as_deref().unwrap_or(&[]),
                 )
             } else {
                 managed_denied_domains.clone()
             };
-            config.network.set_denied_domains(effective_denied_domains);
+            config.set_denied_domains(effective_denied_domains);
             constraints.denied_domains = Some(managed_denied_domains);
             constraints.denylist_expansion_enabled = Some(denylist_expansion_enabled);
         }
@@ -304,13 +388,11 @@ impl NetworkProxySpec {
                 .as_ref()
                 .map(codex_config::NetworkUnixSocketPermissionsToml::allow_unix_sockets)
                 .unwrap_or_default();
-            config
-                .network
-                .set_allow_unix_sockets(allow_unix_sockets.clone());
+            config.set_allow_unix_sockets(allow_unix_sockets.clone());
             constraints.allow_unix_sockets = Some(allow_unix_sockets);
         }
         if let Some(allow_local_binding) = requirements.allow_local_binding {
-            config.network.allow_local_binding = allow_local_binding;
+            config.allow_local_binding = allow_local_binding;
             constraints.allow_local_binding = Some(allow_local_binding);
         }
 
@@ -359,7 +441,7 @@ fn upsert_network_domains(config: &mut NetworkProxyConfig, hosts: Vec<String>, a
     let mut incoming = HashSet::new();
     for host in hosts {
         if incoming.insert(host.clone()) {
-            config.network.upsert_domain_permission(
+            config.upsert_domain_permission(
                 host,
                 if allow {
                     codex_network_proxy::NetworkDomainPermission::Allow

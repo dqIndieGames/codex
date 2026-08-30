@@ -1,6 +1,7 @@
 //! Patch summaries and image-tool transcript helpers.
 
 use super::*;
+use crate::diff_render::create_diff_preview;
 use codex_utils_path_uri::LegacyAppPathString;
 
 #[derive(Debug)]
@@ -11,6 +12,10 @@ pub(crate) struct PatchHistoryCell {
 
 impl HistoryCell for PatchHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        create_diff_preview(&self.changes, &self.cwd, width as usize)
+    }
+
+    fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
         create_diff_summary(&self.changes, &self.cwd, width as usize)
     }
 
@@ -43,11 +48,7 @@ pub(crate) fn new_patch_apply_failure(stderr: String) -> PlainHistoryCell {
 
     if !stderr.trim().is_empty() {
         let output = output_lines(
-            Some(&CommandOutput {
-                exit_code: 1,
-                formatted_output: String::new(),
-                aggregated_output: stderr,
-            }),
+            Some(&CommandOutput::new(/*exit_code*/ 1, stderr)),
             OutputLinesParams {
                 line_limit: TOOL_CALL_MAX_LINES,
                 only_err: true,

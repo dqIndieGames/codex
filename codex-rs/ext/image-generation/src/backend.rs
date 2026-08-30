@@ -2,106 +2,121 @@ use codex_api::ImageEditRequest;
 use codex_api::ImageGenerationRequest;
 use codex_api::ImageResponse;
 use codex_api::ImagesClient;
-use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
-use codex_api::TransportError;
-use codex_login::default_client::build_reqwest_client;
-use codex_model_provider::create_model_provider;
+use codex_api::map_api_error;
+use codex_login::default_client::add_originator_header;
+use codex_login::default_client::create_client;
+use codex_model_provider::SharedModelProvider;
+use codex_protocol::error::CodexErr;
 use http::HeaderMap;
-use http::StatusCode;
-use std::sync::Arc;
-use std::time::Duration;
+use http::HeaderValue;
 
-use crate::extension::ImageGenerationExtensionRuntime;
+const X_CODEX_IMAGE_TURN_ID_HEADER: &str = "x-codex-image-turn-id";
+
+pub(crate) struct ImageBackendError {
+    message: String,
+    codex_error: CodexErr,
+}
+
+impl ImageBackendError {
+    fn from_api(error: codex_api::ApiError) -> Self {
+        let message = error.to_string();
+        Self {
+            message,
+            codex_error: map_api_error(error),
+        }
+    }
+
+    fn from_message(message: String) -> Self {
+        Self {
+            codex_error: CodexErr::Stream(message.clone()),
+            message,
+        }
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn codex_error(&self) -> &CodexErr {
+        &self.codex_error
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct CodexImagesBackend {
-    runtime: Arc<ImageGenerationExtensionRuntime>,
-}
-
-struct ImageRequestTelemetry {
-    runtime: Arc<ImageGenerationExtensionRuntime>,
-    generation: u64,
-}
-
-impl RequestTelemetry for ImageRequestTelemetry {
-    fn on_request(
-        &self,
-        _attempt: u64,
-        _status: Option<StatusCode>,
-        _error: Option<&TransportError>,
-        _duration: Duration,
-        _emit_log_trace: bool,
-    ) {
-    }
-
-    fn can_continue_request_retry(&self) -> bool {
-        self.runtime.matches_generation(self.generation)
-    }
+    provider: SharedModelProvider,
+    originator: Option<String>,
 }
 
 impl CodexImagesBackend {
     /// Creates a backend that sends image requests through the active model provider.
-    pub(crate) fn new(runtime: Arc<ImageGenerationExtensionRuntime>) -> Self {
-        Self { runtime }
+    pub(crate) fn new(provider: SharedModelProvider, originator: Option<String>) -> Self {
+        Self {
+            provider,
+            originator,
+        }
     }
 
     /// Resolves the provider and auth required for the current image API request.
-    async fn client(&self) -> Result<(ImagesClient<ReqwestTransport>, u64), String> {
-        let snapshot = self.runtime.snapshot();
-        let provider = create_model_provider(
-            snapshot.config.provider.clone(),
-            Some(snapshot.auth_manager.clone()),
-        );
-        let api_provider = provider
+    async fn client(&self) -> Result<ImagesClient<ReqwestTransport>, ImageBackendError> {
+        let provider = self
+            .provider
             .api_provider()
             .await
-            .map_err(|err| err.to_string())?;
-        let auth = provider.api_auth().await.map_err(|err| err.to_string())?;
-        let client = ImagesClient::new(
-            ReqwestTransport::new(build_reqwest_client()),
-            api_provider,
+            .map_err(|err| ImageBackendError::from_message(err.to_string()))?;
+        let auth = self
+            .provider
+            .api_auth()
+            .await
+            .map_err(|err| ImageBackendError::from_message(err.to_string()))?;
+        Ok(ImagesClient::new(
+            ReqwestTransport::from_http_client(create_client()),
+            provider,
             auth,
-        )
-        .with_telemetry(Some(Arc::new(ImageRequestTelemetry {
-            runtime: self.runtime.clone(),
-            generation: snapshot.generation,
-        })));
-        Ok((client, snapshot.generation))
+        ))
     }
 
     /// Sends a standalone image generation request through the configured Images client.
     pub(crate) async fn generate(
         &self,
         request: ImageGenerationRequest,
-    ) -> Result<ImageResponse, String> {
-        loop {
-            let (client, generation) = self.client().await?;
-            match client.generate(&request, HeaderMap::new()).await {
-                Ok(response) => return Ok(response),
-                Err(codex_api::ApiError::Transport(TransportError::RetryInterrupted(_)))
-                    if !self.runtime.matches_generation(generation) =>
-                {
-                    continue;
-                }
-                Err(err) => return Err(err.to_string()),
-            }
-        }
+        turn_id: &str,
+    ) -> Result<(ImageResponse, Option<String>), ImageBackendError> {
+        self.client()
+            .await?
+            .generate(
+                &request,
+                image_request_headers(self.originator.as_deref(), turn_id),
+            )
+            .await
+            .map_err(ImageBackendError::from_api)
     }
 
     /// Sends a standalone image edit request through the configured Images client.
-    pub(crate) async fn edit(&self, request: ImageEditRequest) -> Result<ImageResponse, String> {
-        loop {
-            let (client, generation) = self.client().await?;
-            match client.edit(&request, HeaderMap::new()).await {
-                Ok(response) => return Ok(response),
-                Err(codex_api::ApiError::Transport(TransportError::RetryInterrupted(_)))
-                    if !self.runtime.matches_generation(generation) =>
-                {
-                    continue;
-                }
-                Err(err) => return Err(err.to_string()),
-            }
-        }
+    pub(crate) async fn edit(
+        &self,
+        request: ImageEditRequest,
+        turn_id: &str,
+    ) -> Result<(ImageResponse, Option<String>), ImageBackendError> {
+        self.client()
+            .await?
+            .edit(
+                &request,
+                image_request_headers(self.originator.as_deref(), turn_id),
+            )
+            .await
+            .map_err(ImageBackendError::from_api)
     }
+}
+
+fn image_request_headers(originator: Option<&str>, turn_id: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(turn_id) = HeaderValue::from_str(turn_id) {
+        headers.insert(X_CODEX_IMAGE_TURN_ID_HEADER, turn_id);
+    }
+    if let Some(originator) = originator {
+        add_originator_header(&mut headers, originator);
+    }
+    headers
 }

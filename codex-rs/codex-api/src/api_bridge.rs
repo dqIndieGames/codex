@@ -8,39 +8,37 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::auth::PlanType;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::error::RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE;
+use codex_protocol::error::ConnectionFailedError;
 use codex_protocol::error::RetryLimitReachedError;
 use codex_protocol::error::UnexpectedResponseError;
 use codex_protocol::error::UsageLimitReachedError;
+use codex_protocol::protocol::MisalignmentErrorDetails;
 use http::HeaderMap;
 use serde::Deserialize;
 use serde_json::Value;
 
 pub fn map_api_error(err: ApiError) -> CodexErr {
-    map_api_error_with_mode(err, HttpErrorMode::Default)
-}
-
-pub fn map_responses_request_api_error(err: ApiError) -> CodexErr {
-    map_api_error_with_mode(err, HttpErrorMode::RequestLayer)
-}
-
-pub fn map_responses_stream_api_error(err: ApiError) -> CodexErr {
-    map_api_error_with_mode(err, HttpErrorMode::StreamLayer)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HttpErrorMode {
-    Default,
-    RequestLayer,
-    StreamLayer,
-}
-
-fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
     match err {
         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
-        ApiError::Retryable { message, delay } => CodexErr::Stream(message, delay),
-        ApiError::Stream(msg) => CodexErr::Stream(msg, None),
+        ApiError::Retryable { message, delay } => {
+            let error = CodexErr::Stream(message);
+            match delay {
+                Some(delay) => error.with_retry_delay(delay),
+                None => error,
+            }
+        }
+        ApiError::RateLimitExceeded { message, delay } => {
+            let error = CodexErr::new(CodexErrorDetails::RateLimitExceeded(message));
+            match delay {
+                Some(delay) => error.with_retry_delay(delay),
+                None => error,
+            }
+        }
+        ApiError::Stream(msg) => CodexErr::Stream(msg),
         ApiError::ServerOverloaded => CodexErr::ServerOverloaded,
         ApiError::Api { status, message } => {
             let user_message = api_error_user_message(status, &message);
@@ -55,13 +53,17 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                 identity_error_code: None,
             })
         }
-        ApiError::InvalidRequest { message } => match mode {
-            HttpErrorMode::Default => CodexErr::InvalidRequest(message),
-            HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
-                CodexErr::Stream(message, None)
-            }
-        },
-        ApiError::CyberPolicy { message } => CodexErr::CyberPolicy { message },
+        ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
+        ApiError::CyberPolicy { message } => {
+            CodexErr::new(CodexErrorDetails::CyberPolicy { message })
+        }
+        ApiError::MisalignmentPolicyViolation {
+            message,
+            misalignment,
+        } => CodexErr::new(CodexErrorDetails::MisalignmentPolicyViolation {
+            message,
+            misalignment,
+        }),
         ApiError::Transport(transport) => match transport {
             TransportError::Http {
                 status,
@@ -84,6 +86,29 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                     return CodexErr::ServerOverloaded;
                 }
 
+                if (status == http::StatusCode::BAD_REQUEST
+                    || status == http::StatusCode::FORBIDDEN)
+                    && let Ok(parsed) = serde_json::from_str::<Value>(&body_text)
+                    && let Some(error) = parsed.get("error")
+                    && error.get("code").and_then(Value::as_str)
+                        == Some(MISALIGNMENT_POLICY_VIOLATION_ERROR_CODE)
+                {
+                    let message = error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .filter(|message| !message.trim().is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            MISALIGNMENT_POLICY_VIOLATION_FALLBACK_MESSAGE.to_string()
+                        });
+                    return CodexErr::new(CodexErrorDetails::MisalignmentPolicyViolation {
+                        message,
+                        misalignment: error.get("misalignment").cloned().and_then(|details| {
+                            serde_json::from_value::<MisalignmentErrorDetails>(details).ok()
+                        }),
+                    });
+                }
+
                 if status == http::StatusCode::BAD_REQUEST {
                     if let Ok(parsed) = serde_json::from_str::<Value>(&body_text)
                         && let Some(error) = parsed.get("error")
@@ -96,39 +121,32 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                             .filter(|message| !message.trim().is_empty())
                             .map(str::to_string)
                             .unwrap_or_else(|| CYBER_POLICY_FALLBACK_MESSAGE.to_string());
-                        CodexErr::CyberPolicy { message }
+                        CodexErr::new(CodexErrorDetails::CyberPolicy { message })
                     } else if body_text
                         .contains("The image data you provided does not represent a valid image")
                     {
-                        match mode {
-                            HttpErrorMode::Default => CodexErr::InvalidImageRequest(),
-                            HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
-                                CodexErr::Stream(body_text, None)
-                            }
-                        }
+                        CodexErr::InvalidImageRequest()
                     } else {
-                        match mode {
-                            HttpErrorMode::Default => CodexErr::InvalidRequest(body_text),
-                            HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
-                                CodexErr::Stream(body_text, None)
-                            }
-                        }
+                        CodexErr::InvalidRequest(body_text)
                     }
                 } else if status == http::StatusCode::INTERNAL_SERVER_ERROR {
                     CodexErr::InternalServerError
-                } else if matches!(
-                    status,
-                    http::StatusCode::TOO_MANY_REQUESTS | http::StatusCode::PAYMENT_REQUIRED
-                ) {
+                } else if status == http::StatusCode::TOO_MANY_REQUESTS {
                     if let Ok(err) = serde_json::from_str::<UsageErrorResponse>(&body_text) {
                         if err.error.error_type.as_deref() == Some("usage_limit_reached") {
                             let limit_id = extract_header(headers.as_ref(), ACTIVE_LIMIT_HEADER);
-                            let rate_limits = headers.as_ref().and_then(|map| {
-                                parse_rate_limit_for_limit(map, limit_id.as_deref())
-                            });
                             let promo_message = headers.as_ref().and_then(parse_promo_message);
                             let rate_limit_reached_type =
                                 headers.as_ref().and_then(parse_rate_limit_reached_type);
+                            let rate_limits = headers
+                                .as_ref()
+                                .and_then(|map| {
+                                    parse_rate_limit_for_limit(map, limit_id.as_deref())
+                                })
+                                .map(|mut snapshot| {
+                                    snapshot.rate_limit_reached_type = rate_limit_reached_type;
+                                    snapshot
+                                });
                             let resets_at = err
                                 .error
                                 .resets_at
@@ -145,77 +163,41 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                         }
                     }
 
-                    if body_looks_like_usage_limit_message(&body_text) {
-                        return CodexErr::UsageLimitReached(UsageLimitReachedError {
-                            plan_type: None,
-                            resets_at: None,
-                            rate_limits: None,
-                            promo_message: None,
-                            rate_limit_reached_type: None,
-                        });
-                    }
-
-                    match mode {
-                        HttpErrorMode::Default if status == http::StatusCode::TOO_MANY_REQUESTS => {
-                            CodexErr::RetryLimit(RetryLimitReachedError {
-                                status,
-                                request_id: extract_request_tracking_id(headers.as_ref()),
-                            })
-                        }
-                        HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
-                            CodexErr::Stream(body_text, None)
-                        }
-                        HttpErrorMode::Default => CodexErr::UnexpectedStatus(
-                            build_unexpected_response_error(status, body_text, url, headers),
-                        ),
-                    }
+                    CodexErr::RetryLimit(RetryLimitReachedError {
+                        status,
+                        request_id: extract_request_tracking_id(headers.as_ref()),
+                    })
                 } else {
-                    CodexErr::UnexpectedStatus(build_unexpected_response_error(
-                        status, body_text, url, headers,
-                    ))
+                    CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                        status,
+                        user_message: api_error_user_message(status, &body_text),
+                        body: body_text,
+                        url,
+                        cf_ray: extract_header(headers.as_ref(), CF_RAY_HEADER),
+                        request_id: extract_request_id(headers.as_ref()),
+                        identity_authorization_error: extract_header(
+                            headers.as_ref(),
+                            X_OPENAI_AUTHORIZATION_ERROR_HEADER,
+                        ),
+                        identity_error_code: extract_x_error_json_code(headers.as_ref()),
+                    })
                 }
             }
             TransportError::RetryLimit => CodexErr::RetryLimit(RetryLimitReachedError {
                 status: http::StatusCode::INTERNAL_SERVER_ERROR,
                 request_id: None,
             }),
-            TransportError::RetryInterrupted(msg) => CodexErr::Stream(msg, None),
-            TransportError::Timeout => CodexErr::RequestTimeout,
-            TransportError::Network(msg) | TransportError::Build(msg) => {
-                CodexErr::Stream(msg, None)
+            TransportError::RetryInterrupted(reason) => CodexErr::Stream(reason),
+            TransportError::Timeout => {
+                CodexErr::RetryTimeBudgetInterrupted(RETRY_TIME_BUDGET_INTERRUPTED_MESSAGE.to_string())
             }
+            TransportError::Connection(source) => {
+                CodexErr::ConnectionFailed(ConnectionFailedError { source })
+            }
+            TransportError::Network(msg) | TransportError::Build(msg) => CodexErr::Stream(msg),
         },
-        ApiError::RateLimit(msg) => CodexErr::Stream(msg, None),
+        ApiError::RateLimit(msg) => CodexErr::Stream(msg),
     }
-}
-
-fn build_unexpected_response_error(
-    status: http::StatusCode,
-    body: String,
-    url: Option<String>,
-    headers: Option<HeaderMap>,
-) -> UnexpectedResponseError {
-    UnexpectedResponseError {
-        status,
-        user_message: api_error_user_message(status, &body),
-        body,
-        url,
-        cf_ray: extract_header(headers.as_ref(), CF_RAY_HEADER),
-        request_id: extract_request_id(headers.as_ref()),
-        identity_authorization_error: extract_header(
-            headers.as_ref(),
-            X_OPENAI_AUTHORIZATION_ERROR_HEADER,
-        ),
-        identity_error_code: extract_x_error_json_code(headers.as_ref()),
-    }
-}
-
-fn body_looks_like_usage_limit_message(body: &str) -> bool {
-    let normalized = body.trim().to_ascii_lowercase();
-    !normalized.is_empty()
-        && (normalized.contains("usage_limit_reached")
-            || normalized.contains("usage limit reached")
-            || normalized.contains("daily spending limit reached"))
 }
 
 const ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";
@@ -227,6 +209,9 @@ const X_ERROR_JSON_HEADER: &str = "x-error-json";
 const CYBER_POLICY_ERROR_CODE: &str = "cyber_policy";
 const CYBER_POLICY_FALLBACK_MESSAGE: &str =
     "This request has been flagged for possible cybersecurity risk.";
+const MISALIGNMENT_POLICY_VIOLATION_ERROR_CODE: &str = "misalignment_policy_violation";
+const MISALIGNMENT_POLICY_VIOLATION_FALLBACK_MESSAGE: &str =
+    "This request was blocked due to a misalignment policy violation.";
 const CLOUDFLARE_BLOCKED_MESSAGE: &str =
     "Access blocked by Cloudflare. This usually happens when connecting from a restricted region";
 

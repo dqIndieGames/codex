@@ -10,6 +10,7 @@ impl ChatWidget {
         let Some(wait) = self.unified_exec_wait_streak.take() else {
             return;
         };
+        self.flush_completed_command_activity();
         self.transcript.needs_final_message_separator = true;
         let cell = history_cell::new_unified_exec_interaction(wait.command_display, String::new());
         self.app_event_tx
@@ -44,10 +45,10 @@ impl ChatWidget {
                 return;
             }
         }
-        let item2 = item.clone();
         self.defer_or_handle(
-            |q| q.push_item_started(item),
-            |s| s.handle_command_execution_started_now(item2),
+            item,
+            InterruptManager::push_item_started,
+            Self::handle_command_execution_started_now,
         );
     }
 
@@ -155,10 +156,10 @@ impl ChatWidget {
                 return;
             }
         }
-        let item2 = item.clone();
         self.defer_or_handle(
-            |q| q.push_item_completed(item),
-            |s| s.handle_command_execution_completed_now(item2),
+            item,
+            InterruptManager::push_item_completed,
+            Self::handle_command_execution_completed_now,
         );
     }
 
@@ -240,7 +241,6 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_command_execution_started_now(&mut self, item: ThreadItem) {
-        self.record_visible_turn_activity();
         let ThreadItem::CommandExecution {
             id,
             command,
@@ -285,7 +285,7 @@ impl ChatWidget {
             .active_cell
             .as_mut()
             .and_then(|c| c.as_any_mut().downcast_mut::<ExecCell>())
-            && let Some(new_exec) = cell.with_added_call(
+            && cell.add_call(
                 id.clone(),
                 command.clone(),
                 parsed_cmd.clone(),
@@ -293,7 +293,6 @@ impl ChatWidget {
                 /*interaction_input*/ None,
             )
         {
-            *cell = new_exec;
             self.bump_active_cell_revision();
         } else {
             self.flush_active_cell();
@@ -336,6 +335,7 @@ impl ChatWidget {
             command,
             process_id: _,
             source,
+            status,
             command_actions,
             aggregated_output,
             exit_code,
@@ -351,13 +351,18 @@ impl ChatWidget {
             .map(codex_app_server_protocol::CommandAction::into_core)
             .collect();
         let duration = Duration::from_millis(duration_ms.unwrap_or_default().max(0) as u64);
-        let exit_code = exit_code.unwrap_or_default();
+        let exit_code = if status == codex_app_server_protocol::CommandExecutionStatus::Completed {
+            exit_code.unwrap_or_default()
+        } else {
+            exit_code.filter(|code| *code != 0).unwrap_or(1)
+        };
         let aggregated_output = aggregated_output.unwrap_or_default();
 
         let running = self.running_commands.remove(&id);
         if self.suppressed_exec_calls.remove(&id) {
             return;
         }
+        let was_running = running.is_some();
         let (command, parsed, source) = match running {
             Some(rc) => (rc.command, rc.parsed_cmd, rc.source),
             None => (event_command, event_parsed, source),
@@ -366,12 +371,42 @@ impl ChatWidget {
         let is_unified_exec_interaction =
             matches!(source, ExecCommandSource::UnifiedExecInteraction);
         let is_user_shell = source == ExecCommandSource::UserShell;
+        let retain_untracked_unified_exec = !was_running
+            && source == ExecCommandSource::UnifiedExecStartup
+            && self.transcript.active_cell.is_none();
+        // Unified exec skips unknown start events, so group their successful completions here.
+        if !was_running
+            && source == ExecCommandSource::UnifiedExecStartup
+            && let Some(cell) = self
+                .transcript
+                .active_cell
+                .as_mut()
+                .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+            && !cell.is_active()
+            && cell.iter_calls().all(|call| {
+                matches!(
+                    call.source,
+                    ExecCommandSource::Agent | ExecCommandSource::UnifiedExecStartup
+                )
+            })
+        {
+            cell.add_call(
+                id.clone(),
+                command.clone(),
+                parsed.clone(),
+                source,
+                /*interaction_input*/ None,
+            );
+        }
         let end_target = match self.transcript.active_cell.as_ref() {
             Some(cell) => match cell.as_any().downcast_ref::<ExecCell>() {
                 Some(exec_cell) if exec_cell.iter_calls().any(|call| call.call_id == id) => {
                     ExecEndTarget::ActiveTracked
                 }
                 Some(exec_cell) if exec_cell.is_active() => {
+                    ExecEndTarget::OrphanHistoryWhileActiveExec
+                }
+                None if cell.as_any().is::<McpToolCallCell>() => {
                     ExecEndTarget::OrphanHistoryWhileActiveExec
                 }
                 Some(_) | None => ExecEndTarget::NewCell,
@@ -382,21 +417,17 @@ impl ChatWidget {
         // Unified exec interaction rows intentionally hide command output text in the exec cell and
         // instead render the interaction-specific content elsewhere in the UI.
         let output = if is_unified_exec_interaction {
-            CommandOutput {
-                exit_code,
-                formatted_output: String::new(),
-                aggregated_output: String::new(),
-            }
+            CommandOutput::new(exit_code, String::new())
         } else {
-            CommandOutput {
-                exit_code,
-                formatted_output: aggregated_output.clone(),
-                aggregated_output,
-            }
+            CommandOutput::new(exit_code, aggregated_output)
         };
 
         match end_target {
             ExecEndTarget::ActiveTracked => {
+                let has_active_hook = self
+                    .active_hook_cell
+                    .as_ref()
+                    .is_some_and(HookCell::has_visible_running_run);
                 if let Some(cell) = self
                     .transcript
                     .active_cell
@@ -405,7 +436,7 @@ impl ChatWidget {
                 {
                     let completed = cell.complete_call(&id, output, duration);
                     debug_assert!(completed, "active exec cell should contain {id}");
-                    if cell.should_flush() {
+                    if cell.should_flush() || (has_active_hook && !cell.is_active()) {
                         self.flush_active_cell();
                     } else {
                         self.bump_active_cell_revision();
@@ -441,7 +472,7 @@ impl ChatWidget {
                 );
                 let completed = cell.complete_call(&id, output, duration);
                 debug_assert!(completed, "new exec cell should contain {id}");
-                if cell.should_flush() {
+                if (!was_running && !retain_untracked_unified_exec) || cell.should_flush() {
                     self.add_to_history(cell);
                 } else {
                     self.transcript.active_cell = Some(Box::new(cell));

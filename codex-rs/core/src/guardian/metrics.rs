@@ -60,6 +60,10 @@ fn emit_guardian_token_usage_histograms(
         ("total", token_usage.total_tokens.max(0)),
         ("input", token_usage.input_tokens.max(0)),
         ("cached_input", token_usage.cached_input()),
+        (
+            "cache_write_input",
+            token_usage.cache_write_input_tokens.max(0),
+        ),
         ("non_cached_input", token_usage.non_cached_input()),
         ("output", token_usage.output_tokens.max(0)),
         (
@@ -174,6 +178,7 @@ fn reviewed_action_tag(action: &GuardianReviewedAction) -> &'static str {
     match action {
         GuardianReviewedAction::Shell { .. } => "shell",
         GuardianReviewedAction::UnifiedExec { .. } => "unified_exec",
+        GuardianReviewedAction::WriteStdin { .. } => "write_stdin",
         GuardianReviewedAction::Execve { .. } => "execve",
         GuardianReviewedAction::ApplyPatch {} => "apply_patch",
         GuardianReviewedAction::NetworkAccess { .. } => "network_access",
@@ -348,9 +353,11 @@ mod tests {
             token_usage: Some(TokenUsage {
                 input_tokens: 10,
                 cached_input_tokens: 4,
+                cache_write_input_tokens: 2,
                 output_tokens: 3,
                 reasoning_output_tokens: 2,
                 total_tokens: 15,
+                codex_rollout_budget_units: None,
             }),
             time_to_first_token_ms: Some(123),
             ..GuardianReviewAnalyticsResult::without_session()
@@ -399,6 +406,7 @@ mod tests {
             histogram_sums(&snapshot, GUARDIAN_REVIEW_TOKEN_USAGE_METRIC),
             BTreeMap::from([
                 ("cached_input".to_string(), 4),
+                ("cache_write_input".to_string(), 2),
                 ("input".to_string(), 10),
                 ("non_cached_input".to_string(), 6),
                 ("output".to_string(), 3),

@@ -22,6 +22,7 @@ fn model_presets_with_test_upgrades() -> Vec<ModelPreset> {
             model_link: None,
             upgrade_copy: None,
             migration_markdown: None,
+            retirement_at: None,
         });
     }
     presets
@@ -96,7 +97,7 @@ fn select_model_availability_nux_picks_only_eligible_model() {
 }
 
 #[test]
-fn select_model_availability_nux_skips_missing_and_exhausted_models() {
+fn select_model_availability_nux_does_not_fall_back_to_older_announcement() {
     let mut presets = all_model_presets();
     presets.iter_mut().for_each(|preset| {
         preset.availability_nux = None;
@@ -121,13 +122,7 @@ fn select_model_availability_nux_skips_missing_and_exhausted_models() {
         &model_availability_nux_config(&[("gpt-5.4", MODEL_AVAILABILITY_NUX_MAX_SHOW_COUNT)]),
     );
 
-    assert_eq!(
-        selected,
-        Some(StartupTooltipOverride {
-            model_slug: "gpt-5.4-mini".to_string(),
-            message: "gpt-5.4-mini is available".to_string(),
-        })
-    );
+    assert_eq!(selected, None);
 }
 
 #[test]
@@ -311,6 +306,7 @@ async fn model_migration_prompt_skips_when_target_missing_or_hidden() {
         model_link: None,
         upgrade_copy: None,
         migration_markdown: None,
+        retirement_at: None,
     });
     available.retain(|preset| preset.model != "gpt-5.2");
     available.push(current.clone());

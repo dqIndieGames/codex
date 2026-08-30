@@ -4,6 +4,7 @@ use anyhow::bail;
 use clap::Parser;
 use codex_core::config::Config;
 use codex_core::config::find_codex_home;
+use codex_core::plugins_manager_for_config;
 use codex_core_plugins::ConfiguredMarketplace;
 use codex_core_plugins::OPENAI_BUNDLED_MARKETPLACE_NAME;
 use codex_core_plugins::PluginInstallOutcome;
@@ -18,16 +19,15 @@ use codex_core_plugins::marketplace::MarketplacePluginAuthPolicy;
 use codex_core_plugins::marketplace::MarketplacePluginInstallPolicy;
 use codex_core_plugins::marketplace::MarketplacePluginSource;
 use codex_core_plugins::marketplace::find_marketplace_manifest_path;
-use codex_login::CodexAuth;
-use codex_login::auth::read_codex_api_key_from_env;
+use codex_login::AuthManager;
 use codex_plugin::PluginId;
 use codex_plugin::validate_plugin_segment;
-use codex_protocol::auth::AuthMode;
 use codex_utils_cli::CliConfigOverrides;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::marketplace_cmd::MarketplaceCli;
 
@@ -483,10 +483,8 @@ pub(crate) fn configured_marketplace_sources(
     plugins_input: &PluginsConfigInput,
     codex_home: &Path,
 ) -> HashMap<String, JsonMarketplaceSource> {
-    let Some(user_config) = plugins_input.config_layer_stack.effective_user_config() else {
-        return HashMap::new();
-    };
-    let Some(marketplaces) = user_config
+    let effective_config = plugins_input.config_layer_stack.effective_config();
+    let Some(marketplaces) = effective_config
         .get("marketplaces")
         .and_then(toml::Value::as_table)
     else {
@@ -590,8 +588,7 @@ async fn load_plugin_command_context(
         .await
         .context("failed to load configuration")?;
     let plugins_input = config.plugins_config_input();
-    let manager = PluginsManager::new(codex_home.to_path_buf());
-    manager.set_auth_mode(load_cli_auth_mode(&config).await);
+    let manager = plugins_manager_for_config(&config, load_cli_auth_manager(&config).await?);
     Ok(PluginCommandContext {
         codex_home: codex_home.to_path_buf(),
         plugins_input,
@@ -599,23 +596,8 @@ async fn load_plugin_command_context(
     })
 }
 
-pub(crate) async fn load_cli_auth_mode(config: &Config) -> Option<AuthMode> {
-    if let Some(api_key) = read_codex_api_key_from_env() {
-        return Some(CodexAuth::from_api_key(&api_key).api_auth_mode());
-    }
-
-    let auth_route_config = config.auth_route_config();
-    CodexAuth::from_auth_storage(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        Some(&config.chatgpt_base_url),
-        config.auth_keyring_backend_kind(),
-        auth_route_config.as_ref(),
-    )
-    .await
-    .ok()
-    .flatten()
-    .map(|auth| auth.api_auth_mode())
+pub(crate) async fn load_cli_auth_manager(config: &Config) -> Result<Arc<AuthManager>> {
+    Ok(AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await?)
 }
 
 struct PluginSelection {
@@ -742,10 +724,8 @@ pub(crate) fn configured_marketplace_snapshot_issues(
     load_errors: &[MarketplaceListError],
     marketplace_name: Option<&str>,
 ) -> Vec<ConfiguredMarketplaceSnapshotIssue> {
-    let Some(user_config) = plugins_input.config_layer_stack.effective_user_config() else {
-        return Vec::new();
-    };
-    let Some(configured_marketplaces) = user_config
+    let effective_config = plugins_input.config_layer_stack.effective_config();
+    let Some(configured_marketplaces) = effective_config
         .get("marketplaces")
         .and_then(toml::Value::as_table)
     else {

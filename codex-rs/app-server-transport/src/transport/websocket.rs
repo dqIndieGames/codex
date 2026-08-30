@@ -39,6 +39,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as TungsteniteWebSocketMessage;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -146,7 +147,7 @@ pub async fn start_websocket_acceptor(
     if print_startup_banner {
         print_websocket_startup_banner(local_addr);
     }
-    info!("app-server websocket listening on ws://{local_addr}");
+    debug!("app-server websocket listening on ws://{local_addr}");
 
     let router = Router::new()
         .route("/readyz", get(health_check_handler))

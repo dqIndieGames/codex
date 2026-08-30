@@ -1,10 +1,10 @@
-use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
 use codex_api::SearchClient;
 use codex_api::SearchCommands;
 use codex_api::SearchQuery;
 use codex_api::SearchRequest;
-use codex_api::TransportError;
+use codex_api::SearchSettings;
+use codex_core::X_CODEX_TURN_METADATA_HEADER;
 use codex_core::web_search_action_detail;
 use codex_extension_api::ExtensionTurnItem;
 use codex_extension_api::FunctionCallError;
@@ -18,8 +18,9 @@ use codex_extension_api::parse_tool_input_schema_without_compaction;
 use codex_extension_items::ExtensionItem;
 use codex_extension_items::web_search::WebSearchAction;
 use codex_extension_items::web_search::WebSearchItem;
-use codex_login::default_client::build_reqwest_client;
-use codex_model_provider::create_model_provider;
+use codex_login::default_client::add_originator_header;
+use codex_login::default_client::create_client;
+use codex_model_provider::SharedModelProvider;
 use codex_protocol::models::WebSearchAction as CoreWebSearchAction;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WebSearchBeginEvent;
@@ -29,12 +30,9 @@ use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ToolExposure;
 use codex_tools::default_namespace_description;
 use http::HeaderMap;
-use http::StatusCode;
-use std::sync::Arc;
-use std::time::Duration;
+use http::HeaderValue;
 use url::Url;
 
-use crate::extension::WebSearchExtensionRuntime;
 use crate::history::recent_input;
 use crate::output::SearchOutput;
 use crate::schema::commands_schema;
@@ -42,34 +40,16 @@ use crate::schema::commands_schema;
 pub(crate) const WEB_NAMESPACE: &str = "web";
 pub(crate) const RUN_TOOL_NAME: &str = "run";
 const WEB_RUN_DESCRIPTION: &str = include_str!("../web_run_description.md");
+const RESULTS_PAYLOAD_BYTES_METRIC: &str = "codex.web_search.results.payload_bytes";
 
 pub(crate) struct WebSearchTool {
     pub(crate) session_id: String,
-    pub(crate) runtime: Arc<WebSearchExtensionRuntime>,
+    pub(crate) provider: SharedModelProvider,
+    pub(crate) settings: SearchSettings,
+    pub(crate) originator: Option<String>,
 }
 
-struct WebSearchRequestTelemetry {
-    runtime: Arc<WebSearchExtensionRuntime>,
-    generation: u64,
-}
-
-impl RequestTelemetry for WebSearchRequestTelemetry {
-    fn on_request(
-        &self,
-        _attempt: u64,
-        _status: Option<StatusCode>,
-        _error: Option<&TransportError>,
-        _duration: Duration,
-        _emit_log_trace: bool,
-    ) {
-    }
-
-    fn can_continue_request_retry(&self) -> bool {
-        self.runtime.matches_generation(self.generation)
-    }
-}
-
-impl ToolExecutor<ToolCall> for WebSearchTool {
+impl<'call> ToolExecutor<ToolCall<'call>> for WebSearchTool {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced(WEB_NAMESPACE, RUN_TOOL_NAME)
     }
@@ -103,71 +83,77 @@ impl ToolExecutor<ToolCall> for WebSearchTool {
         true
     }
 
-    fn handle(&self, call: ToolCall) -> codex_extension_api::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, call: ToolCall<'call>) -> codex_extension_api::ToolExecutorFuture<'a>
+    where
+        'call: 'a,
+    {
         Box::pin(self.handle_call(call))
     }
 }
 
 impl WebSearchTool {
-    async fn handle_call(&self, call: ToolCall) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    async fn handle_call(
+        &self,
+        call: ToolCall<'_>,
+    ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let commands = parse_commands(&call)?;
         let command_action = command_action(&commands);
+        let provider = self
+            .provider
+            .api_provider()
+            .await
+            .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+        let auth = self
+            .provider
+            .api_auth()
+            .await
+            .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+        let client = SearchClient::new(
+            ReqwestTransport::from_http_client(create_client()),
+            provider,
+            auth,
+        );
+        let request = SearchRequest {
+            id: self.session_id.clone(),
+            model: call.model.clone(),
+            reasoning: None,
+            input: recent_input(call.conversation_history.items()),
+            commands: Some(commands),
+            settings: Some(self.settings.clone()),
+            max_output_tokens: Some(
+                u64::try_from(call.truncation_policy.token_budget()).unwrap_or(u64::MAX),
+            ),
+        };
+        let extra_headers = search_request_headers(
+            self.originator.as_deref(),
+            call.codex_turn_metadata.as_deref(),
+        );
         call.turn_item_emitter
             .emit_started(extension_turn_item(
                 WebSearchItem {
                     id: call.call_id.clone(),
                     query: String::new(),
                     action: None,
+                    results: None,
                 },
                 EventMsg::WebSearchBegin(WebSearchBeginEvent {
                     call_id: call.call_id.clone(),
                 }),
             ))
             .await;
-        let response = loop {
-            let snapshot = self.runtime.snapshot();
-            let provider = create_model_provider(
-                snapshot.config.provider.clone(),
-                Some(snapshot.auth_manager.clone()),
-            );
-            let api_provider = provider
-                .api_provider()
-                .await
-                .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
-            let auth = provider
-                .api_auth()
-                .await
-                .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
-            let client = SearchClient::new(
-                ReqwestTransport::new(build_reqwest_client()),
-                api_provider,
-                auth,
-            )
-            .with_telemetry(Some(Arc::new(WebSearchRequestTelemetry {
-                runtime: self.runtime.clone(),
-                generation: snapshot.generation,
-            })));
-            let request = SearchRequest {
-                id: self.session_id.clone(),
-                model: call.model.clone(),
-                reasoning: None,
-                input: recent_input(call.conversation_history.items()),
-                commands: Some(commands.clone()),
-                settings: Some(snapshot.config.settings.clone()),
-                max_output_tokens: Some(
-                    u64::try_from(call.truncation_policy.token_budget()).unwrap_or(u64::MAX),
-                ),
-            };
-            match client.search(&request, HeaderMap::new()).await {
-                Ok(response) => break response,
-                Err(codex_api::ApiError::Transport(TransportError::RetryInterrupted(_)))
-                    if !self.runtime.matches_generation(snapshot.generation) =>
-                {
-                    continue;
-                }
-                Err(err) => return Err(FunctionCallError::Fatal(err.to_string())),
-            }
-        };
+        let response = client
+            .search(&request, extra_headers)
+            .await
+            .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+        let output = response.output;
+        let results = response.results;
+        if let Some(results) = results.as_ref()
+            && let Some(metrics) = codex_otel::global()
+            && let Ok(payload) = serde_json::to_vec(results)
+        {
+            let payload_bytes = i64::try_from(payload.len()).unwrap_or(i64::MAX);
+            let _ = metrics.histogram(RESULTS_PAYLOAD_BYTES_METRIC, payload_bytes, &[]);
+        }
         let legacy_action = match &command_action {
             WebSearchAction::Search { query, queries } => CoreWebSearchAction::Search {
                 query: query.clone(),
@@ -187,20 +173,36 @@ impl WebSearchTool {
                     id: call.call_id.clone(),
                     query: query.clone(),
                     action: Some(command_action),
+                    results: results.clone(),
                 },
                 EventMsg::WebSearchEnd(WebSearchEndEvent {
                     call_id: call.call_id.clone(),
                     query,
                     action: legacy_action,
+                    results,
                 }),
             ))
             .await;
 
-        Ok(Box::new(SearchOutput::new(response.output)))
+        Ok(Box::new(SearchOutput::new(output)))
     }
 }
 
-fn parse_commands(call: &ToolCall) -> Result<SearchCommands, FunctionCallError> {
+fn search_request_headers(originator: Option<&str>, turn_metadata: Option<&str>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Some(turn_metadata) = turn_metadata
+        && let Ok(header_value) = HeaderValue::from_str(turn_metadata)
+    {
+        headers.insert(X_CODEX_TURN_METADATA_HEADER, header_value);
+    }
+
+    if let Some(originator) = originator {
+        add_originator_header(&mut headers, originator);
+    }
+    headers
+}
+
+fn parse_commands(call: &ToolCall<'_>) -> Result<SearchCommands, FunctionCallError> {
     let arguments = call.function_arguments()?;
     if arguments.trim().is_empty() {
         return Ok(SearchCommands::default());
@@ -271,6 +273,25 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::command_action;
+    use super::search_request_headers;
+    use codex_core::X_CODEX_TURN_METADATA_HEADER;
+
+    #[test]
+    fn search_request_headers_forward_thread_originator_and_turn_metadata() {
+        let headers = search_request_headers(Some("chatgpt_cca"), Some("turn-metadata"));
+        assert_eq!(
+            headers
+                .get("originator")
+                .and_then(|value| value.to_str().ok()),
+            Some("chatgpt_cca")
+        );
+        assert_eq!(
+            headers
+                .get(X_CODEX_TURN_METADATA_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("turn-metadata")
+        );
+    }
 
     #[test]
     fn command_action_reports_queries_and_navigation_detail() {

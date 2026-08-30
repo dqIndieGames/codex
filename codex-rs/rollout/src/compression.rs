@@ -32,12 +32,10 @@ pub fn spawn_rollout_compression_worker(codex_home: PathBuf) {
 
 /// Returns the modified time for the existing plain or compressed rollout file.
 pub(crate) async fn file_modified_time(path: &Path) -> io::Result<Option<time::OffsetDateTime>> {
-    let Some(path) = path::existing_rollout_path(path).await else {
-        return Ok(None);
-    };
-    let meta = tokio::fs::metadata(path).await?;
-    let modified = meta.modified().ok();
-    Ok(modified.map(time::OffsetDateTime::from))
+    Ok(path::existing_rollout_with_metadata(path)
+        .await
+        .and_then(|(_, metadata)| metadata.modified().ok())
+        .map(time::OffsetDateTime::from))
 }
 
 /// Opens a rollout line reader that transparently handles plain `.jsonl` and `.jsonl.zst` files.
@@ -89,20 +87,24 @@ pub(crate) fn materialize_rollout_for_append_blocking(path: &Path) -> io::Result
         std::fs::create_dir_all(parent)?;
     }
     let result: io::Result<()> = (|| {
-        let permissions = std::fs::metadata(compressed_path.as_path())?.permissions();
+        let metadata = std::fs::metadata(compressed_path.as_path())?;
+        let permissions = metadata.permissions();
+        let mut output = create_file_with_permissions(temp_path.as_path(), &permissions)?;
         {
             let input = File::open(compressed_path.as_path())?;
             let mut decoder = zstd::stream::read::Decoder::new(input)?;
-            let mut output = create_file_with_permissions(temp_path.as_path(), &permissions)?;
             io::copy(&mut decoder, &mut output)?;
-            output.flush()?;
-            output.sync_all()?;
         }
+        output.flush()?;
+        output.sync_all()?;
         match std::fs::hard_link(temp_path.as_path(), plain_path.as_path()) {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
             Err(_) => persist_temp_file_noclobber(temp_path.as_path(), plain_path.as_path())?,
         }
+        output.set_times(std::fs::FileTimes::new().set_modified(metadata.modified()?))?;
+        output.sync_all()?;
+        drop(output);
         let _ = std::fs::remove_file(temp_path.as_path());
         match std::fs::remove_file(compressed_path.as_path()) {
             Ok(()) => {}
@@ -242,6 +244,7 @@ mod worker {
     use tokio::task::JoinSet;
 
     use crate::ARCHIVED_SESSIONS_SUBDIR;
+    use crate::RolloutReferenceIndex;
     use crate::SESSIONS_SUBDIR;
 
     use super::RolloutFile;
@@ -341,6 +344,16 @@ mod worker {
     }
 
     pub(super) async fn run(codex_home: PathBuf) -> io::Result<()> {
+        let Some(_maintenance_guard) =
+            crate::try_acquire_rollout_maintenance_lock(codex_home.as_path())?
+        else {
+            metrics::run("skipped_maintenance");
+            debug!(
+                "rollout maintenance is already running for {}",
+                codex_home.display()
+            );
+            return Ok(());
+        };
         let marker = match CompressionRunMarker::try_claim(codex_home.as_path()) {
             Ok(Some(marker)) => marker,
             Ok(None) => {
@@ -361,6 +374,15 @@ mod worker {
         let started_at = Instant::now();
         let result = async {
             cleanup_stale_temps(codex_home.as_path()).await?;
+            let Some(reference_index) = RolloutReferenceIndex::scan_until(
+                codex_home.as_path(),
+                started_at,
+                WORKER_MAX_RUNTIME,
+            )
+            .await?
+            else {
+                return Ok(CompressionStats::default());
+            };
             let mut stats = CompressionStats::default();
             for root in [
                 codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
@@ -369,7 +391,8 @@ mod worker {
                 if started_at.elapsed() >= WORKER_MAX_RUNTIME {
                     break;
                 }
-                compress_rollouts_in_root(root.as_path(), started_at, &mut stats).await?;
+                compress_rollouts_in_root(root.as_path(), started_at, &reference_index, &mut stats)
+                    .await?;
             }
             Ok::<_, io::Error>(stats)
         }
@@ -409,6 +432,7 @@ mod worker {
     async fn compress_rollouts_in_root(
         root: &Path,
         started_at: Instant,
+        reference_index: &RolloutReferenceIndex,
         stats: &mut CompressionStats,
     ) -> io::Result<()> {
         if !tokio::fs::try_exists(root).await.unwrap_or(false) {
@@ -467,6 +491,26 @@ mod worker {
                     continue;
                 }
                 let path = rollout_file.into_path();
+                let Some(rollout_id) = crate::rollout_id_from_path(path.as_path()) else {
+                    stats.skipped = stats.skipped.saturating_add(1);
+                    metrics::file("skipped_unreadable_meta");
+                    continue;
+                };
+                let Ok(meta) = crate::read_session_meta_line(path.as_path()).await else {
+                    stats.skipped = stats.skipped.saturating_add(1);
+                    metrics::file("skipped_unreadable_meta");
+                    continue;
+                };
+                if reference_index.reference_count(rollout_id) > 0 {
+                    stats.skipped = stats.skipped.saturating_add(1);
+                    metrics::file("skipped_referenced");
+                    continue;
+                }
+                if meta.meta.history_base.is_some() {
+                    stats.skipped = stats.skipped.saturating_add(1);
+                    metrics::file("skipped_fork_pointer");
+                    continue;
+                }
                 stats.scanned = stats.scanned.saturating_add(1);
                 metrics::file("scanned");
                 while jobs.len() >= MAX_CONCURRENT_COMPRESSION_JOBS {
@@ -905,6 +949,7 @@ pub async fn existing_rollout_path(path: &Path) -> Option<PathBuf> {
 
 mod path {
     use std::ffi::OsStr;
+    use std::fs::Metadata;
     use std::path::Path;
     use std::path::PathBuf;
 
@@ -943,15 +988,26 @@ mod path {
     }
 
     pub(super) async fn existing_rollout_path(path: &Path) -> Option<PathBuf> {
+        existing_rollout_with_metadata(path)
+            .await
+            .map(|(path, _)| path)
+    }
+
+    /// Resolves the plain rollout before its compressed sibling and retains the lookup metadata.
+    ///
+    /// Returning the metadata lets callers inspect the selected file without a second stat.
+    pub(super) async fn existing_rollout_with_metadata(path: &Path) -> Option<(PathBuf, Metadata)> {
         let plain_path = plain_rollout_path(path);
-        if matches!(tokio::fs::metadata(plain_path.as_path()).await, Ok(metadata) if metadata.is_file())
+        if let Ok(metadata) = tokio::fs::metadata(plain_path.as_path()).await
+            && metadata.is_file()
         {
-            return Some(plain_path);
+            return Some((plain_path, metadata));
         }
         let compressed_path = compressed_rollout_path(plain_path.as_path());
-        if matches!(tokio::fs::metadata(compressed_path.as_path()).await, Ok(metadata) if metadata.is_file())
+        if let Ok(metadata) = tokio::fs::metadata(compressed_path.as_path()).await
+            && metadata.is_file()
         {
-            return Some(compressed_path);
+            return Some((compressed_path, metadata));
         }
         None
     }

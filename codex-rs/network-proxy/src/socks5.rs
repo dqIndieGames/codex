@@ -29,6 +29,7 @@ use rama_core::error::BoxError;
 use rama_core::extensions::Extensions;
 use rama_core::extensions::ExtensionsMut;
 use rama_core::extensions::ExtensionsRef;
+use rama_core::service::BoxService;
 use rama_core::service::service_fn;
 use rama_net::address::HostWithPort;
 use rama_net::client::EstablishedClientConnection;
@@ -129,6 +130,23 @@ async fn run_socks5_with_listener(
         }
     }
 
+    listener
+        .serve(socks5_proxy_service(
+            state,
+            policy_decider,
+            environment_id,
+            enable_socks5_udp,
+        ))
+        .await;
+    Ok(())
+}
+
+pub(crate) fn socks5_proxy_service(
+    state: Arc<NetworkProxyState>,
+    policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
+    environment_id: Option<String>,
+    enable_socks5_udp: bool,
+) -> BoxService<TcpStream, (), BoxError> {
     let tcp_connector = TargetCheckedTcpConnector::new(state.clone());
     let policy_tcp_connector = service_fn({
         let policy_decider = policy_decider.clone();
@@ -163,19 +181,10 @@ async fn run_socks5_with_listener(
                 }
             }));
         let socks_acceptor = base.with_udp_associator(udp_relay);
-        listener
-            .serve(BindConnectionAttribution::new(
-                socks_acceptor,
-                state,
-                environment_id,
-            ))
-            .await;
+        BindConnectionAttribution::new(socks_acceptor, state, environment_id).boxed()
     } else {
-        listener
-            .serve(BindConnectionAttribution::new(base, state, environment_id))
-            .await;
+        BindConnectionAttribution::new(base, state, environment_id).boxed()
     }
-    Ok(())
 }
 
 async fn handle_socks5_tcp(
@@ -809,7 +818,6 @@ mod tests {
     use super::*;
     use crate::config::NetworkMode;
     use crate::config::NetworkProxyConfig;
-    use crate::config::NetworkProxySettings;
     use crate::mitm_hook::MitmHookConfig;
     use crate::mitm_hook::MitmHookMatchConfig;
     use crate::network_policy::test_support::POLICY_DECISION_EVENT_NAME;
@@ -855,12 +863,9 @@ mod tests {
         }
     }
 
-    fn state_for_settings(network: NetworkProxySettings) -> Arc<NetworkProxyState> {
-        let config = NetworkProxyConfig { network };
-        let _mitm_config_state_guard = config
-            .network
-            .mitm
-            .then(|| MITM_CONFIG_STATE_LOCK.lock().unwrap());
+    fn state_for_settings(network: NetworkProxyConfig) -> Arc<NetworkProxyState> {
+        let config = network;
+        let _mitm_config_state_guard = config.mitm.then(|| MITM_CONFIG_STATE_LOCK.lock().unwrap());
         let state = build_config_state(config, NetworkProxyConstraints::default()).unwrap();
         let reloader = Arc::new(StaticReloader {
             state: state.clone(),
@@ -870,10 +875,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_emits_block_decision_for_proxy_disabled() {
-        let state = state_for_settings(NetworkProxySettings {
+        let state = state_for_settings(NetworkProxyConfig {
             enabled: false,
             mode: NetworkMode::Full,
-            ..NetworkProxySettings::default()
+            ..NetworkProxyConfig::default()
         });
         let mut request =
             TcpRequest::new(HostWithPort::try_from("example.com:443").expect("valid authority"));
@@ -912,11 +917,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_uses_mitm_in_limited_mode() {
-        let mut settings = NetworkProxySettings {
+        let mut settings = NetworkProxyConfig {
             enabled: true,
             mode: NetworkMode::Limited,
             mitm: true,
-            ..NetworkProxySettings::default()
+            ..NetworkProxyConfig::default()
         };
         settings.set_allowed_domains(vec!["example.com".to_string()]);
         let state = state_for_settings(settings);
@@ -938,10 +943,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_blocks_non_https_in_limited_mode() {
-        let mut settings = NetworkProxySettings {
+        let mut settings = NetworkProxyConfig {
             enabled: true,
             mode: NetworkMode::Limited,
-            ..NetworkProxySettings::default()
+            ..NetworkProxyConfig::default()
         };
         settings.set_allowed_domains(vec!["example.com".to_string()]);
         let state = state_for_settings(settings);
@@ -985,12 +990,12 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_detects_tls_for_brokered_nonstandard_port_in_full_mode() {
-        let mut settings = NetworkProxySettings {
+        let mut settings = NetworkProxyConfig {
             enabled: true,
             mode: NetworkMode::Full,
             mitm: true,
             credential_broker: true,
-            ..NetworkProxySettings::default()
+            ..NetworkProxyConfig::default()
         };
         settings.set_allowed_domains(vec!["api.openai.com".to_string()]);
         let state = state_for_settings(settings);
@@ -1015,10 +1020,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_blocks_limited_mode_without_mitm_state() {
-        let mut settings = NetworkProxySettings {
+        let mut settings = NetworkProxyConfig {
             enabled: true,
             mode: NetworkMode::Limited,
-            ..NetworkProxySettings::default()
+            ..NetworkProxyConfig::default()
         };
         settings.set_allowed_domains(vec!["example.com".to_string()]);
         let state = state_for_settings(settings);
@@ -1043,7 +1048,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_uses_mitm_for_hooked_host_in_full_mode() {
-        let mut settings = NetworkProxySettings {
+        let mut settings = NetworkProxyConfig {
             enabled: true,
             mode: NetworkMode::Full,
             mitm: true,
@@ -1056,7 +1061,7 @@ mod tests {
                 },
                 ..MitmHookConfig::default()
             }],
-            ..NetworkProxySettings::default()
+            ..NetworkProxyConfig::default()
         };
         settings.set_allowed_domains(vec!["api.github.com".to_string()]);
         let state = state_for_settings(settings);
@@ -1078,7 +1083,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_socks5_tcp_blocks_hooked_non_https_host_in_full_mode() {
-        let mut settings = NetworkProxySettings {
+        let mut settings = NetworkProxyConfig {
             enabled: true,
             mode: NetworkMode::Full,
             mitm: true,
@@ -1091,7 +1096,7 @@ mod tests {
                 },
                 ..MitmHookConfig::default()
             }],
-            ..NetworkProxySettings::default()
+            ..NetworkProxyConfig::default()
         };
         settings.set_allowed_domains(vec!["api.github.com".to_string()]);
         let state = state_for_settings(settings);
@@ -1116,10 +1121,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn inspect_socks5_udp_emits_block_decision_for_mode_guard_deny() {
-        let state = state_for_settings(NetworkProxySettings {
+        let state = state_for_settings(NetworkProxyConfig {
             enabled: true,
             mode: NetworkMode::Limited,
-            ..NetworkProxySettings::default()
+            ..NetworkProxyConfig::default()
         });
         let request = RelayRequest {
             direction: RelayDirection::South,

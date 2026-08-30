@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 
 use crate::CellId;
 use crate::CodeModeNestedToolCall;
+use crate::CodeModeSessionCellExecutionLimits;
 use crate::CodeModeToolKind;
 use crate::ExecuteRequest;
 use crate::FunctionCallOutputContentItem;
@@ -15,6 +16,38 @@ use crate::RuntimeResponse;
 use crate::ToolDefinition;
 use crate::WaitOutcome;
 use crate::WaitRequest;
+
+/// The per-cell execution limits carried by a V1 session-open request.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct WireSessionCellExecutionLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_yield_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_heap_size_bytes: Option<u64>,
+}
+
+impl TryFrom<CodeModeSessionCellExecutionLimits> for WireSessionCellExecutionLimits {
+    type Error = TryFromIntError;
+
+    fn try_from(value: CodeModeSessionCellExecutionLimits) -> Result<Self, Self::Error> {
+        Ok(Self {
+            max_yield_time_ms: value.max_yield_time_ms,
+            max_heap_size_bytes: value.max_heap_size_bytes.map(u64::try_from).transpose()?,
+        })
+    }
+}
+
+impl TryFrom<WireSessionCellExecutionLimits> for CodeModeSessionCellExecutionLimits {
+    type Error = TryFromIntError;
+
+    fn try_from(value: WireSessionCellExecutionLimits) -> Result<Self, Self::Error> {
+        Ok(Self {
+            max_yield_time_ms: value.max_yield_time_ms,
+            max_heap_size_bytes: value.max_heap_size_bytes.map(usize::try_from).transpose()?,
+        })
+    }
+}
 
 /// A cell identifier with a wire representation owned by protocol V1.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -245,6 +278,9 @@ pub enum WireContentItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<WireImageDetail>,
     },
+    InputAudio {
+        audio_url: String,
+    },
 }
 
 impl From<FunctionCallOutputContentItem> for WireContentItem {
@@ -255,6 +291,9 @@ impl From<FunctionCallOutputContentItem> for WireContentItem {
                 image_url,
                 detail: detail.map(Into::into),
             },
+            FunctionCallOutputContentItem::InputAudio { audio_url } => {
+                Self::InputAudio { audio_url }
+            }
         }
     }
 }
@@ -267,6 +306,7 @@ impl From<WireContentItem> for FunctionCallOutputContentItem {
                 image_url,
                 detail: detail.map(Into::into),
             },
+            WireContentItem::InputAudio { audio_url } => Self::InputAudio { audio_url },
         }
     }
 }

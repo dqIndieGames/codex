@@ -1,12 +1,8 @@
-use super::ApiTelemetry;
 use super::AuthRequestTelemetryContext;
 use super::CompactConversationRequestSettings;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
-use super::RequestRetryEvent;
-use super::RequestRouteTelemetry;
-use super::RetryTimeBudget;
 use super::UnauthorizedRecoveryExecution;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
@@ -21,33 +17,40 @@ use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
 use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
-use codex_api::RequestTelemetry;
 use codex_api::ResponseEvent;
+use codex_api::ResponsesEndpoint;
 use codex_api::TransportError;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_login::AuthCredentialsStoreMode;
-use codex_login::AuthEnvTelemetry;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::BearerAuthProvider;
+use codex_model_provider::ModelProvider;
+use codex_model_provider::ModelProviderFuture;
+use codex_model_provider::ProviderAccountResult;
+use codex_model_provider::ProviderUnauthorizedRecovery;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
-use codex_model_provider_info::is_chatgpt_codex_base_url;
+use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -60,12 +63,11 @@ use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
 use futures::StreamExt;
-use http::HeaderMap;
-use http::HeaderValue;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -110,62 +112,14 @@ fn test_model_client_with_thread_id(
         session_source,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
-        /*force_service_tier_priority*/ true,
+        /*content_item_kinds_enabled*/ true,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     )
-}
-
-#[test]
-fn retry_route_recovery_skips_chatgpt_codex_backend() {
-    let client = test_model_client(SessionSource::Exec);
-    let mut session = client.new_session();
-    session.last_api_base_url = Some(CHATGPT_CODEX_BASE_URL.to_string());
-    session
-        .turn_state
-        .set("official-turn-state".to_string())
-        .expect("set turn state");
-
-    session.activate_retry_route_recovery();
-
-    assert_eq!(session.route_recovery_generation, 0);
-    assert_eq!(
-        session.turn_state.get().map(String::as_str),
-        Some("official-turn-state")
-    );
-}
-
-#[test]
-fn retry_route_recovery_for_relay_rotates_and_clears_turn_state() {
-    let client = test_model_client(SessionSource::Exec);
-    let mut session = client.new_session();
-    session.last_api_base_url = Some("https://relay.example.com/v1".to_string());
-    session
-        .turn_state
-        .set("relay-turn-state".to_string())
-        .expect("set turn state");
-
-    session.activate_retry_route_recovery();
-
-    assert_eq!(session.route_recovery_generation, 1);
-    assert_eq!(session.turn_state.get(), None);
-}
-
-#[test]
-fn request_route_recovery_gate_allows_non_codex_chatgpt_paths() {
-    let route_recovery = super::RequestRouteRecovery::new(!is_chatgpt_codex_base_url(
-        "https://foo.chatgpt.com/custom-relay",
-    ));
-
-    route_recovery.request_restart(3);
-
-    assert!(route_recovery.restart_requested());
-    assert_eq!(route_recovery.restart_retry_number(), 3);
 }
 
 #[tokio::test]
@@ -204,11 +158,10 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
         SessionSource::Cli,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
-        /*force_service_tier_priority*/ false,
+        /*content_item_kinds_enabled*/ true,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -225,6 +178,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
         }],
         base_instructions: BaseInstructions {
             text: "base instructions".to_string(),
+            provenance: None,
         },
         ..Default::default()
     };
@@ -245,6 +199,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
                 effort: None,
                 summary: codex_protocol::config_types::ReasoningSummary::None,
                 service_tier: None,
+                request_retry_notifier: None,
             },
             &test_session_telemetry(),
             &CompactionTraceContext::disabled(),
@@ -281,7 +236,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
 }
 
 fn test_model_provider() -> SharedModelProvider {
-    test_model_client(SessionSource::Cli).current_provider()
+    test_model_client(SessionSource::Cli).state.provider.clone()
 }
 
 fn test_responses_metadata_for_client(
@@ -318,20 +273,82 @@ fn test_model_info() -> ModelInfo {
         "supported_in_api": true,
         "priority": 1,
         "upgrade": null,
-        "base_instructions": "base instructions",
         "model_messages": null,
-        "supports_reasoning_summaries": false,
         "support_verbosity": false,
         "default_verbosity": null,
         "apply_patch_tool_type": null,
         "truncation_policy": {"mode": "bytes", "limit": 10000},
-        "supports_parallel_tool_calls": false,
         "supports_image_detail_original": false,
         "context_window": 272000,
         "auto_compact_token_limit": null,
         "experimental_supported_tools": []
     }))
     .expect("deserialize test model info")
+}
+
+#[test]
+fn responses_lite_prefix_ids_track_thread_and_payload() -> anyhow::Result<()> {
+    let thread_id = ThreadId::new();
+    let client = test_model_client_with_thread_id(thread_id, SessionSource::Cli);
+    let mut model = test_model_info();
+    model.use_responses_lite = true;
+    let mut prompt = Prompt {
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+            provenance: None,
+        },
+        ..Default::default()
+    };
+    let build = |client: &ModelClient, prompt: &Prompt| {
+        client.build_responses_request(
+            prompt,
+            &model,
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &test_responses_metadata_for_client(
+                client,
+                /*turn_id*/ None,
+                format!("{}:0", client.state.thread_id),
+                /*parent_thread_id*/ None,
+                TestCodexResponsesRequestKind::Turn,
+            ),
+        )
+    };
+
+    let original = build(&client, &prompt)?;
+    assert_eq!(build(&client, &prompt)?, original);
+
+    prompt.base_instructions.text.push_str(" with an update");
+    let changed_instructions = build(&client, &prompt)?;
+    assert_eq!(changed_instructions.input[0], original.input[0]);
+    assert_ne!(changed_instructions.input[1].id(), original.input[1].id());
+
+    prompt.tools = vec![codex_tools::ToolSpec::Freeform(codex_tools::FreeformTool {
+        name: "exec".to_string(),
+        description: "Execute JavaScript.".to_string(),
+        defer_loading: None,
+        format: codex_tools::FreeformToolFormat {
+            r#type: "grammar".to_string(),
+            syntax: "lark".to_string(),
+            definition: "start: /.+/".to_string(),
+        },
+    })]
+    .into();
+    let changed_tools = build(&client, &prompt)?;
+    assert_ne!(
+        changed_tools.input[0].id(),
+        changed_instructions.input[0].id()
+    );
+    assert_eq!(changed_tools.input[1], changed_instructions.input[1]);
+
+    let independent = build(
+        &test_model_client_with_thread_id(ThreadId::new(), SessionSource::Cli),
+        &prompt,
+    )?;
+    assert_ne!(independent.input[0].id(), changed_tools.input[0].id());
+    assert_ne!(independent.input[1].id(), changed_tools.input[1].id());
+    Ok(())
 }
 
 fn test_session_telemetry() -> SessionTelemetry {
@@ -349,14 +366,137 @@ fn test_session_telemetry() -> SessionTelemetry {
     )
 }
 
+fn spawned_session_source() -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    })
+}
+
+fn reasoning_effort_in_request(
+    model_info: &ModelInfo,
+    session_source: SessionSource,
+    effort: ReasoningEffort,
+) -> ReasoningEffort {
+    let client = test_model_client(session_source);
+    client
+        .build_responses_request(
+            &Prompt::default(),
+            model_info,
+            Some(effort),
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &test_responses_metadata_for_client(
+                &client,
+                /*turn_id*/ None,
+                format!("{}:0", client.state.thread_id),
+                /*parent_thread_id*/ None,
+                TestCodexResponsesRequestKind::Turn,
+            ),
+        )
+        .expect("build responses request")
+        .reasoning
+        .expect("request should include reasoning")
+        .effort
+        .expect("request should include reasoning effort")
+}
+
 #[test]
-fn ultra_reasoning_uses_max_for_requests() {
+fn reasoning_effort_for_requests_uses_multi_agent_override_for_ultra() {
+    let mut model_info = test_model_info();
+    model_info.multi_agent_reasoning_effort = Some(ReasoningEffort::High);
+    model_info
+        .supported_reasoning_levels
+        .push(ReasoningEffortPreset {
+            effort: ReasoningEffort::High,
+            description: "high".to_string(),
+        });
+
+    let actual = [SessionSource::Cli, spawned_session_source()].map(|session_source| {
+        reasoning_effort_in_request(&model_info, session_source, ReasoningEffort::Ultra)
+    });
+
+    assert_eq!(actual, [ReasoningEffort::High, ReasoningEffort::High]);
+}
+
+#[test]
+fn reasoning_effort_for_requests_falls_back_for_missing_or_invalid_override() {
+    let mut model_info = test_model_info();
+    model_info.supported_reasoning_levels = vec![
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Low,
+            description: "low".to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::XHigh,
+            description: "xhigh".to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Ultra,
+            description: "ultra".to_string(),
+        },
+    ];
+
+    let actual = [
+        None,
+        Some(ReasoningEffort::Ultra),
+        Some(ReasoningEffort::High),
+    ]
+    .map(|multi_agent_reasoning_effort| {
+        model_info.multi_agent_reasoning_effort = multi_agent_reasoning_effort;
+        reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::Ultra)
+    });
+
+    assert_eq!(
+        actual,
+        [
+            ReasoningEffort::XHigh,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::XHigh,
+        ]
+    );
+
+    model_info.multi_agent_reasoning_effort = None;
+    model_info.supported_reasoning_levels.insert(
+        1,
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Max,
+            description: "max".to_string(),
+        },
+    );
+    assert_eq!(
+        reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::Ultra),
+        ReasoningEffort::Max
+    );
+
+    model_info.supported_reasoning_levels.clear();
+    assert_eq!(
+        reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::Ultra),
+        ReasoningEffort::Medium
+    );
+}
+
+#[test]
+fn reasoning_effort_for_requests_preserves_non_ultra_and_persistent_behavior() {
+    let mut model_info = test_model_info();
+    model_info.multi_agent_reasoning_effort = Some(ReasoningEffort::Low);
+
     assert_eq!(
         (
-            super::reasoning_effort_for_request(ReasoningEffort::Ultra),
-            super::reasoning_effort_for_request(ReasoningEffort::High),
+            reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::High,),
+            reasoning_effort_in_request(
+                &model_info,
+                SessionSource::Cli,
+                ReasoningEffort::Persistent,
+            ),
         ),
-        (ReasoningEffort::Max, ReasoningEffort::High,)
+        (
+            ReasoningEffort::High,
+            ReasoningEffort::Custom("disabled".to_string()),
+        )
     );
 }
 
@@ -389,7 +529,7 @@ async fn chatgpt_auth_manager(
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
-        /*auth_route_config*/ None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     let auth = auth_manager.auth().await.expect("auth should load");
@@ -398,6 +538,7 @@ async fn chatgpt_auth_manager(
         agent_identity_authapi_base_url,
     )
 }
+
 #[derive(Default)]
 struct TagCollectorVisitor {
     tags: BTreeMap<String, String>,
@@ -472,7 +613,7 @@ fn started_inference_attempt(temp: &TempDir) -> anyhow::Result<InferenceTraceAtt
 
 fn output_message(id: &str, text: &str) -> ResponseItem {
     ResponseItem::Message {
-        id: Some(id.to_string()),
+        id: Some(codex_protocol::ResponseItemId::with_suffix("msg", id)),
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
             text: text.to_string(),
@@ -531,6 +672,24 @@ fn build_subagent_headers_sets_other_subagent_label() {
         .get(X_OPENAI_SUBAGENT_HEADER)
         .and_then(|value| value.to_str().ok());
     assert_eq!(value, Some("memory_consolidation"));
+}
+
+#[test]
+fn internal_session_prompt_cache_key_is_scoped_to_parent_thread() {
+    let parent_thread_id = ThreadId::new();
+    let client = test_model_client(SessionSource::Internal(InternalSessionSource::Guardian));
+    let metadata = test_responses_metadata_for_client(
+        &client,
+        Some("turn-123"),
+        "window-1".to_string(),
+        Some(parent_thread_id),
+        TestCodexResponsesRequestKind::Turn,
+    );
+
+    assert_eq!(
+        client.prompt_cache_key(&metadata),
+        format!("guardian:{parent_thread_id}")
+    );
 }
 
 #[test]
@@ -639,7 +798,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
     // response.completed event. The harness has enough information to keep this
     // item in history, so the trace should preserve it when the stream is
     // abandoned.
-    let item = output_message("msg-1", "partial answer");
+    let item = output_message("1", "partial answer");
     let api_stream = futures::stream::iter([Ok(ResponseEvent::OutputItemDone(item))])
         .chain(futures::stream::pending());
     let (mut stream, _) = super::map_response_events(
@@ -647,8 +806,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         api_stream,
         test_session_telemetry(),
         attempt,
-        Arc::new(|| true),
-        /*upstream_cancellation*/ None,
+        test_model_provider(),
     );
 
     let observed = stream
@@ -690,6 +848,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         Ok(ResponseEvent::Completed {
             response_id: "resp-123".to_string(),
             token_usage: None,
+            usage_metadata: None,
             end_turn: Some(true),
         }),
     ]);
@@ -698,8 +857,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         api_stream,
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
-        Arc::new(|| true),
-        /*upstream_cancellation*/ None,
+        test_model_provider(),
     );
 
     while stream.next().await.is_some() {}
@@ -722,6 +880,7 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
         /*auth_manager*/ None,
     );
     let mut auth_recovery = None;
+    let mut provider_auth_recovery_attempted = false;
     let url = "https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses";
     let error = super::handle_unauthorized(
         TransportError::Http {
@@ -734,6 +893,7 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
             ),
         },
         &mut auth_recovery,
+        &mut provider_auth_recovery_attempted,
         &test_session_telemetry(),
         &provider,
     )
@@ -748,6 +908,113 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
     );
 }
 
+#[derive(Debug)]
+struct TestRecoveryProvider {
+    inner: SharedModelProvider,
+    should_fail: bool,
+    attempts: Arc<AtomicUsize>,
+}
+
+impl ModelProvider for TestRecoveryProvider {
+    fn info(&self) -> &ModelProviderInfo {
+        self.inner.info()
+    }
+
+    fn auth_manager(&self) -> Option<Arc<AuthManager>> {
+        None
+    }
+
+    fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>> {
+        self.inner.auth()
+    }
+
+    fn account_state(&self) -> ProviderAccountResult {
+        self.inner.account_state()
+    }
+
+    fn recover_from_unauthorized(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderUnauthorizedRecovery>> {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async move {
+            if self.should_fail {
+                Err(CodexErr::Io(std::io::Error::other(
+                    "provider recovery failed",
+                )))
+            } else {
+                Ok(ProviderUnauthorizedRecovery::Recovered)
+            }
+        })
+    }
+
+    fn models_manager(
+        &self,
+        codex_home: PathBuf,
+        config_model_catalog: Option<ModelsResponse>,
+    ) -> SharedModelsManager {
+        self.inner.models_manager(codex_home, config_model_catalog)
+    }
+}
+
+#[tokio::test]
+async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_failures() {
+    for should_fail in [false, true] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let provider: SharedModelProvider = Arc::new(TestRecoveryProvider {
+            inner: test_model_provider(),
+            should_fail,
+            attempts: Arc::clone(&attempts),
+        });
+        assert!(provider.auth_manager().is_none());
+
+        let unauthorized = || TransportError::Http {
+            status: http::StatusCode::UNAUTHORIZED,
+            url: Some("https://example.com/v1/responses".to_string()),
+            headers: None,
+            body: Some("unauthorized".to_string()),
+        };
+        let mut auth_recovery = None;
+        let mut provider_auth_recovery_attempted = false;
+        let telemetry = test_session_telemetry();
+        let result = super::handle_unauthorized(
+            unauthorized(),
+            &mut auth_recovery,
+            &mut provider_auth_recovery_attempted,
+            &telemetry,
+            &provider,
+        )
+        .await;
+
+        let error = if should_fail {
+            result.expect_err("failed provider recovery should return the original error")
+        } else {
+            let recovered = result.expect("provider recovery should succeed without AuthManager");
+            assert_eq!(
+                (recovered.mode, recovered.phase),
+                ("provider", "provider_refresh")
+            );
+            super::handle_unauthorized(
+                unauthorized(),
+                &mut auth_recovery,
+                &mut provider_auth_recovery_attempted,
+                &telemetry,
+                &provider,
+            )
+            .await
+            .expect_err("provider recovery should not run more than once")
+        };
+
+        match error.details() {
+            CodexErrorDetails::UnexpectedStatus(response) => {
+                assert_eq!(response.status, http::StatusCode::UNAUTHORIZED);
+                assert_eq!(response.body, "unauthorized");
+            }
+            other => panic!("unexpected error after provider recovery: {other}"),
+        }
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+}
+
 #[tokio::test]
 async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
 -> anyhow::Result<()> {
@@ -759,7 +1026,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         events.push_back(ResponseEvent::Created);
     }
     events.push_back(ResponseEvent::OutputItemDone(output_message(
-        "msg-1",
+        "1",
         "partial answer",
     )));
     let api_stream = NotifyAfterEventStream {
@@ -774,8 +1041,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         api_stream,
         test_session_telemetry(),
         attempt,
-        Arc::new(|| true),
-        /*upstream_cancellation*/ None,
+        test_model_provider(),
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
@@ -817,119 +1083,6 @@ fn auth_request_telemetry_context_tracks_attached_auth_and_retry_phase() {
     assert!(auth_context.retry_after_unauthorized);
     assert_eq!(auth_context.recovery_mode, Some("managed"));
     assert_eq!(auth_context.recovery_phase, Some("refresh_token"));
-}
-
-#[test]
-fn every_request_attempt_receives_the_full_timeout() {
-    let limit = Duration::from_secs(10 * 60);
-    let retry_time_budget = RetryTimeBudget::with_limit(limit);
-
-    assert_eq!(retry_time_budget.remaining(), Some(limit));
-    retry_time_budget.begin_retry();
-    assert_eq!(retry_time_budget.remaining(), Some(limit));
-    assert!(retry_time_budget.interruption_error().is_none());
-}
-
-#[test]
-fn api_telemetry_notifies_streaming_request_retry() {
-    let retry_events = Arc::new(Mutex::new(Vec::<RequestRetryEvent>::new()));
-    let retry_time_budget = RetryTimeBudget::with_limit(Duration::from_secs(10 * 60));
-    let notifier = {
-        let retry_events = Arc::clone(&retry_events);
-        Arc::new(move |event| {
-            retry_events.lock().unwrap().push(event);
-        })
-    };
-    let telemetry = ApiTelemetry::new(
-        test_session_telemetry(),
-        AuthRequestTelemetryContext::new(
-            None,
-            &BearerAuthProvider::for_test(None, None),
-            None,
-            PendingUnauthorizedRetry::default(),
-        ),
-        RequestRouteTelemetry::for_endpoint("/responses"),
-        AuthEnvTelemetry::default(),
-        Some(notifier),
-        None,
-        Some(retry_time_budget),
-        None,
-        0,
-    );
-    let mut headers = HeaderMap::new();
-    headers.insert("x-request-id", HeaderValue::from_static("req-503"));
-    let error = TransportError::Http {
-        status: http::StatusCode::SERVICE_UNAVAILABLE,
-        url: Some("https://example.com/v1/responses?api_key=secret".to_string()),
-        headers: Some(headers),
-        body: Some(r#"{"error":{"message":"secret token leaked"}}"#.to_string()),
-    };
-
-    telemetry.on_request_retry(1, 3, Some(http::StatusCode::SERVICE_UNAVAILABLE), &error);
-
-    assert!(telemetry.can_continue_request_retry());
-    assert!(telemetry.request_retry_interruption_reason().is_none());
-    let retry_events = retry_events.lock().unwrap();
-    assert_eq!(retry_events.len(), 1);
-    assert_eq!(retry_events[0].retry_number, 1);
-    assert_eq!(retry_events[0].max_attempts, 3);
-    assert_eq!(
-        retry_events[0].status,
-        Some(http::StatusCode::SERVICE_UNAVAILABLE)
-    );
-    assert!(
-        retry_events[0]
-            .details
-            .contains("HTTP 503 Service Unavailable, retrying")
-    );
-    assert!(
-        retry_events[0]
-            .details
-            .contains("endpoint: example.com/responses")
-    );
-    assert!(retry_events[0].details.contains("request id: req-503"));
-    assert!(!retry_events[0].details.contains("secret token leaked"));
-    assert!(!retry_events[0].details.contains("api_key"));
-}
-
-#[test]
-fn api_telemetry_offsets_visible_retry_count_after_route_recovery_restart() {
-    let retry_events = Arc::new(Mutex::new(Vec::<RequestRetryEvent>::new()));
-    let notifier = {
-        let retry_events = Arc::clone(&retry_events);
-        Arc::new(move |event| {
-            retry_events.lock().unwrap().push(event);
-        })
-    };
-    let telemetry = ApiTelemetry::new(
-        test_session_telemetry(),
-        AuthRequestTelemetryContext::new(
-            None,
-            &BearerAuthProvider::for_test(None, None),
-            None,
-            PendingUnauthorizedRetry::default(),
-        ),
-        RequestRouteTelemetry::for_endpoint("/responses"),
-        AuthEnvTelemetry::default(),
-        Some(notifier),
-        None,
-        None,
-        None,
-        3,
-    );
-    let error = TransportError::Http {
-        status: http::StatusCode::SERVICE_UNAVAILABLE,
-        url: Some("https://example.com/v1/responses".to_string()),
-        headers: None,
-        body: None,
-    };
-
-    telemetry.on_request_retry(1, 5, Some(http::StatusCode::SERVICE_UNAVAILABLE), &error);
-
-    let retry_events = retry_events.lock().unwrap();
-    assert_eq!(retry_events.len(), 1);
-    assert_eq!(retry_events[0].retry_number, 4);
-    assert_eq!(retry_events[0].max_attempts, 8);
 }
 
 #[test]
@@ -996,11 +1149,10 @@ fn model_client_with_counting_attestation(
         SessionSource::Exec,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
-        /*force_service_tier_priority*/ true,
+        /*content_item_kinds_enabled*/ true,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         Some(Arc::new(CountingAttestationProvider {
             calls: attestation_calls.clone(),
@@ -1008,6 +1160,80 @@ fn model_client_with_counting_attestation(
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     );
     (model_client, attestation_calls)
+}
+
+#[test]
+fn guardian_reviewer_uses_dedicated_endpoint_only_with_codex_backend_auth() {
+    let (mut model_client, _) =
+        model_client_with_counting_attestation(/*include_attestation*/ true);
+    Arc::get_mut(&mut model_client.state)
+        .expect("test client should have unique session state")
+        .session_source = SessionSource::SubAgent(SubAgentSource::Other("guardian".to_owned()));
+
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "codex-auto-review",
+        ),
+        ResponsesEndpoint::Responses
+    );
+
+    model_client = model_client.with_free_guardian_enabled(/*free_guardian_enabled*/ true);
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "codex-auto-review",
+        ),
+        ResponsesEndpoint::Guardian
+    );
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "required-reviewer-model",
+        ),
+        ResponsesEndpoint::Responses
+    );
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "parent-fallback-model",
+        ),
+        ResponsesEndpoint::Responses
+    );
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::from_api_key("test-api-key")),
+            "codex-auto-review",
+        ),
+        ResponsesEndpoint::Responses
+    );
+
+    Arc::get_mut(&mut model_client.state)
+        .expect("test client should have unique session state")
+        .provider = create_model_provider(
+        ModelProviderInfo::create_openai_provider(Some("https://proxy.example.com/v1".to_owned())),
+        Some(AuthManager::from_auth_for_testing(
+            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        )),
+    );
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "codex-auto-review",
+        ),
+        ResponsesEndpoint::Responses
+    );
+
+    Arc::get_mut(&mut model_client.state)
+        .expect("test client should have unique session state")
+        .session_source = SessionSource::Exec;
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "codex-auto-review",
+        ),
+        ResponsesEndpoint::Responses
+    );
 }
 
 #[tokio::test]
@@ -1025,6 +1251,25 @@ async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses() 
     let headers = model_client
         .build_websocket_headers(&responses_metadata)
         .await;
+
+    assert_eq!(
+        headers
+            .get(crate::attestation::X_OAI_ATTESTATION_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("v1.header-1"),
+    );
+    assert_eq!(attestation_calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn existing_call_sideband_headers_include_attestation() {
+    let (model_client, attestation_calls) =
+        model_client_with_counting_attestation(/*include_attestation*/ true);
+
+    let headers = model_client
+        .realtime_sideband_headers(http::HeaderMap::new())
+        .await
+        .expect("existing call sideband headers should build");
 
     assert_eq!(
         headers
@@ -1066,37 +1311,4 @@ async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
         None,
     );
     assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
-}
-
-#[tokio::test]
-async fn realtime_websocket_setup_for_provider_token_ignores_chatgpt_auth_mode() {
-    let mut provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
-    provider.experimental_bearer_token = Some("provider-token".to_string());
-    let model_client = ModelClient::new(
-        Some(AuthManager::from_auth_for_testing(
-            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
-        )),
-        AgentIdentityAuthPolicy::JwtOnly,
-        ThreadId::new(),
-        provider,
-        SessionSource::Exec,
-        "test_originator".to_string(),
-        /*model_verbosity*/ None,
-        /*force_service_tier_priority*/ true,
-        /*enable_request_compression*/ false,
-        /*include_timing_metrics*/ false,
-        /*beta_features_header*/ None,
-        /*item_ids_enabled*/ false,
-        /*concurrent_reasoning_summaries_enabled*/ false,
-        /*attestation_provider*/ None,
-        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
-    );
-
-    let setup = model_client
-        .current_realtime_websocket_runtime_setup(/*realtime_ws_base_url*/ None)
-        .await
-        .expect("realtime websocket setup");
-
-    assert_eq!(setup.auth, None);
-    assert_eq!(setup.api_provider.base_url, "https://api.openai.com/v1");
 }

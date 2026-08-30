@@ -27,6 +27,8 @@ use crate::transport::remote_control::enroll::format_headers;
 use crate::transport::remote_control::enroll::load_persisted_remote_control_enrollment;
 use crate::transport::remote_control::enroll::preview_remote_control_response_body;
 use crate::transport::remote_control::enroll::update_persisted_remote_control_enrollment;
+use crate::transport::remote_control::host_device::REMOTE_CONTROL_HOST_DEVICE_KIND_HEADER;
+use crate::transport::remote_control::host_device::host_device_kind;
 use crate::transport::remote_control::server_api::enroll_remote_control_server;
 use crate::transport::remote_control::server_api::refresh_remote_control_server;
 use axum::http::HeaderValue;
@@ -1240,7 +1242,7 @@ fn set_remote_control_header(
     Ok(())
 }
 
-fn build_remote_control_websocket_request(
+async fn build_remote_control_websocket_request(
     websocket_url: &str,
     enrollment: &RemoteControlEnrollment,
     installation_id: &str,
@@ -1280,6 +1282,13 @@ fn build_remote_control_websocket_request(
         REMOTE_CONTROL_INSTALLATION_ID_HEADER,
         installation_id,
     )?;
+    if let Some(host_device_kind) = host_device_kind().await {
+        set_remote_control_header(
+            headers,
+            REMOTE_CONTROL_HOST_DEVICE_KIND_HEADER,
+            host_device_kind,
+        )?;
+    }
     if let Some(subscribe_cursor) = subscribe_cursor {
         set_remote_control_header(
             headers,
@@ -1330,7 +1339,8 @@ pub(super) async fn connect_remote_control_websocket(
         &enrollment,
         connect_options.installation_id,
         connect_options.subscribe_cursor,
-    )?;
+    )
+    .await?;
 
     let websocket_connect_result = tokio::time::timeout(
         REMOTE_CONTROL_WEBSOCKET_CONNECT_TIMEOUT,
@@ -1810,6 +1820,7 @@ mod tests {
     use codex_app_server_protocol::JSONRPCMessage;
     use codex_app_server_protocol::JSONRPCNotification;
     use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::ServerNotificationEnvelope;
     use codex_config::types::AuthCredentialsStoreMode;
     use codex_core::test_support::auth_manager_from_auth;
     use codex_login::AuthDotJson;
@@ -1820,6 +1831,7 @@ mod tests {
     use codex_login::token_data::parse_chatgpt_jwt_claims;
     use codex_protocol::auth::AuthMode;
     use codex_state::StateRuntime;
+    use codex_utils_absolute_path::test_support::PathExt;
     use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
@@ -1973,9 +1985,12 @@ mod tests {
     }
 
     pub(super) async fn remote_control_state_runtime(codex_home: &TempDir) -> Arc<StateRuntime> {
-        StateRuntime::init(codex_home.path().to_path_buf(), "test-provider".to_string())
-            .await
-            .expect("state runtime should initialize")
+        StateRuntime::init(
+            codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state runtime should initialize")
     }
 
     pub(super) fn remote_control_auth_manager() -> Arc<AuthManager> {
@@ -2026,6 +2041,7 @@ mod tests {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         }
     }
 
@@ -2207,7 +2223,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let mut auth_recovery = auth_manager.unauthorized_recovery();
@@ -2306,7 +2322,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let mut auth_recovery = auth_manager.unauthorized_recovery();
@@ -2434,7 +2450,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let mut auth_recovery = auth_manager.unauthorized_recovery();
@@ -3342,12 +3358,17 @@ mod tests {
         ServerEnvelope {
             event: ServerEvent::ServerMessage {
                 message: Box::new(OutgoingMessage::AppServerNotification(
-                    ServerNotification::ConfigWarning(ConfigWarningNotification {
-                        summary: summary.to_string(),
-                        details: None,
-                        path: None,
-                        range: None,
-                    }),
+                    ServerNotificationEnvelope {
+                        notification: ServerNotification::ConfigWarning(
+                            ConfigWarningNotification {
+                                summary: summary.to_string(),
+                                details: None,
+                                path: None,
+                                range: None,
+                            },
+                        ),
+                        emitted_at_ms: Some(1_234),
+                    },
                 )),
             },
             client_id: client_id.clone(),

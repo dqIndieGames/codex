@@ -20,28 +20,33 @@ fn app_server_workspace_write_profile(extra_root: AbsolutePathBuf) -> Permission
                         value: FileSystemSpecialPath::Root,
                     },
                     access: FileSystemAccessMode::Read,
+                    missing_path_behavior: None,
                 },
                 FileSystemSandboxEntry {
                     path: FileSystemPath::Special {
                         value: FileSystemSpecialPath::ProjectRoots { subpath: None },
                     },
                     access: FileSystemAccessMode::Write,
+                    missing_path_behavior: None,
                 },
                 FileSystemSandboxEntry {
                     path: FileSystemPath::Special {
                         value: FileSystemSpecialPath::SlashTmp,
                     },
                     access: FileSystemAccessMode::Write,
+                    missing_path_behavior: None,
                 },
                 FileSystemSandboxEntry {
                     path: FileSystemPath::Special {
                         value: FileSystemSpecialPath::Tmpdir,
                     },
                     access: FileSystemAccessMode::Write,
+                    missing_path_behavior: None,
                 },
                 FileSystemSandboxEntry {
-                    path: FileSystemPath::Path { path: extra_root },
+                    path: extra_root.into(),
                     access: FileSystemAccessMode::Write,
+                    missing_path_behavior: None,
                 },
             ],
             glob_scan_max_depth: None,
@@ -55,13 +60,16 @@ fn windows_sandbox_requirements_stack(
     let requirements_toml = codex_config::ConfigRequirementsToml {
         windows: Some(codex_config::WindowsRequirementsToml {
             allowed_sandbox_implementations: Some(allowed_sandbox_implementations),
+            sandbox_private_desktop: None,
         }),
         ..Default::default()
     };
     requirements_stack(requirements_toml)
 }
 
-fn requirements_stack(requirements_toml: codex_config::ConfigRequirementsToml) -> ConfigLayerStack {
+pub(super) fn requirements_stack(
+    requirements_toml: codex_config::ConfigRequirementsToml,
+) -> ConfigLayerStack {
     let mut requirements_with_sources = codex_config::ConfigRequirementsWithSources::default();
     requirements_with_sources
         .merge_unset_fields(RequirementSource::Unknown, requirements_toml.clone());
@@ -77,7 +85,6 @@ async fn approvals_selection_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ false);
-    chat.config.notices.hide_full_access_warning = None;
     chat.open_approvals_popup();
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
@@ -260,11 +267,11 @@ async fn profile_permissions_selection_emits_auto_review_mode_event() {
 }
 
 #[tokio::test]
-async fn profile_permissions_full_access_opens_confirmation() {
+async fn profile_permissions_full_access_always_opens_confirmation() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.config.explicit_permission_profile_mode = true;
     chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ false);
-    chat.config.notices.hide_full_access_warning = None;
+    chat.config.notices.hide_full_access_warning = Some(true);
 
     chat.open_permissions_popup();
     chat.handle_key_event(KeyEvent::from(KeyCode::Up));
@@ -295,7 +302,6 @@ async fn profile_permissions_full_access_opens_confirmation() {
 async fn approvals_selection_popup_snapshot_windows_degraded_sandbox() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    chat.config.notices.hide_full_access_warning = None;
     chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ true);
     chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
 
@@ -360,12 +366,14 @@ async fn preset_matching_does_not_treat_non_cwd_writable_profile_as_read_only() 
                         value: FileSystemSpecialPath::Root,
                     },
                     access: FileSystemAccessMode::Read,
+                    missing_path_behavior: None,
                 },
                 FileSystemSandboxEntry {
                     path: FileSystemPath::Path {
-                        path: test_path_buf("/tmp/writable").abs(),
+                        path: test_path_buf("/tmp/writable").abs().into(),
                     },
                     access: FileSystemAccessMode::Write,
+                    missing_path_behavior: None,
                 },
             ],
             glob_scan_max_depth: None,
@@ -517,6 +525,80 @@ async fn windows_sandbox_required_enable_prompt_reopens_on_cancel_when_unelevate
 }
 
 #[tokio::test]
+async fn fragmented_terminal_response_cannot_select_non_admin_windows_sandbox() {
+    for use_fallback_prompt in [false, true] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        let preset = builtin_approval_presets()
+            .into_iter()
+            .find(|preset| preset.id == "auto")
+            .expect("auto preset");
+
+        if use_fallback_prompt {
+            chat.open_windows_sandbox_fallback_prompt(preset, /*profile_selection*/ None);
+        } else {
+            chat.open_windows_sandbox_enable_prompt(preset, /*profile_selection*/ None);
+        }
+
+        for character in "20;rgb:2222/ffff/ffff".chars() {
+            chat.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+            assert!(
+                !matches!(
+                    rx.try_recv(),
+                    Ok(AppEvent::BeginWindowsSandboxLegacySetup { .. })
+                ),
+                "a fragmented terminal response must not choose the non-admin sandbox"
+            );
+        }
+
+        assert!(chat.has_active_view());
+        chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AppEvent::BeginWindowsSandboxLegacySetup { .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn fragmented_terminal_response_cannot_acknowledge_world_writable_warning() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.open_world_writable_warning_confirmation(
+        /*preset*/ None,
+        /*profile_selection*/ None,
+        Vec::new(),
+        /*extra_count*/ 0,
+        /*failed_scan*/ true,
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+    assert!(chat.has_active_view());
+    assert!(rx.try_recv().is_err());
+
+    for character in "20;rgb:2222/ffff/ffff".chars() {
+        chat.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        assert!(
+            !matches!(
+                rx.try_recv(),
+                Ok(AppEvent::UpdateWorldWritableWarningAcknowledged(_)
+                    | AppEvent::PersistWorldWritableWarningAcknowledged)
+            ),
+            "a fragmented terminal response must not acknowledge the world-writable warning"
+        );
+    }
+
+    assert!(chat.has_active_view());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::UpdateWorldWritableWarningAcknowledged(true))
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::PersistWorldWritableWarningAcknowledged)
+    ));
+}
+
+#[tokio::test]
 async fn required_windows_sandbox_setup_defers_configured_initial_prompt() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let initial_prompt = "fix required sandbox startup".to_string();
@@ -629,7 +711,6 @@ async fn approvals_popup_shows_disabled_presets() {
     let height = chat.desired_height(width);
     let mut terminal =
         ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
-    terminal.set_viewport_area(Rect::new(0, 0, width, height));
     terminal
         .draw(|f| chat.render(f.area(), f.buffer_mut()))
         .expect("render approvals popup");
@@ -752,19 +833,22 @@ async fn permissions_selection_emits_history_cell_when_selection_changes() {
         chat.config.notices.hide_world_writable_warning = Some(true);
         chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
     }
-    chat.config.notices.hide_full_access_warning = Some(true);
-
-    chat.open_permissions_popup();
+    chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ true);
+    chat.on_task_started();
+    chat.dispatch_command(SlashCommand::Permissions);
+    let command = begin_exec(&mut chat, "call-permissions", "printf before");
+    end_exec(&mut chat, command, "before\n", "", /*exit_code*/ 0);
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
     let cells = drain_insert_history(&mut rx);
     assert_eq!(
         cells.len(),
-        1,
-        "expected one permissions selection history cell"
+        2,
+        "expected command and permissions selection history cells"
     );
-    let rendered = lines_to_single_string(&cells[0]);
+    assert!(lines_to_single_string(&cells[0]).contains("Ran printf before"));
+    let rendered = lines_to_single_string(&cells[1]);
     assert!(
         rendered.contains("Permissions updated to"),
         "expected permissions selection history message, got: {rendered}"
@@ -780,12 +864,24 @@ async fn permissions_selection_history_snapshot_after_mode_switch() {
         chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
     }
     chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ false);
-    chat.config.notices.hide_full_access_warning = Some(true);
-
     chat.open_permissions_popup();
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     #[cfg(target_os = "windows")]
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let (preset, return_to_permissions, profile_selection) =
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|event| match event {
+                AppEvent::OpenFullAccessConfirmation {
+                    preset,
+                    return_to_permissions,
+                    profile_selection,
+                } => Some((preset, return_to_permissions, profile_selection)),
+                _ => None,
+            })
+            .expect("expected full access confirmation event");
+    chat.open_full_access_confirmation(preset, return_to_permissions, profile_selection);
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
     let cells = drain_insert_history(&mut rx);
@@ -804,7 +900,6 @@ async fn permissions_selection_history_snapshot_full_access_to_default() {
         chat.config.notices.hide_world_writable_warning = Some(true);
         chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
     }
-    chat.config.notices.hide_full_access_warning = Some(true);
     chat.config
         .permissions
         .approval_policy
@@ -882,8 +977,6 @@ async fn permissions_selection_hides_auto_review_when_feature_disabled() {
         chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
     }
     chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ false);
-    chat.config.notices.hide_full_access_warning = Some(true);
-
     chat.open_permissions_popup();
     let popup = render_bottom_popup(&chat, /*width*/ 120);
 
@@ -903,7 +996,6 @@ async fn permissions_selection_hides_auto_review_when_feature_disabled_even_if_a
         chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
     }
     chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ false);
-    chat.config.notices.hide_full_access_warning = Some(true);
     chat.config.approvals_reviewer = ApprovalsReviewer::AutoReview;
     chat.config
         .permissions
@@ -932,7 +1024,6 @@ async fn permissions_selection_marks_auto_review_current_after_session_configure
         chat.config.notices.hide_world_writable_warning = Some(true);
         chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
     }
-    chat.config.notices.hide_full_access_warning = Some(true);
     let _ = chat
         .config
         .features
@@ -978,7 +1069,6 @@ async fn permissions_selection_marks_auto_review_current_with_custom_workspace_w
         chat.config.notices.hide_world_writable_warning = Some(true);
         chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
     }
-    chat.config.notices.hide_full_access_warning = Some(true);
     let _ = chat
         .config
         .features
@@ -1028,7 +1118,6 @@ async fn permissions_selection_can_disable_auto_review() {
         chat.config.notices.hide_world_writable_warning = Some(true);
         chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
     }
-    chat.config.notices.hide_full_access_warning = Some(true);
     chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ true);
     chat.config
         .permissions
@@ -1039,6 +1128,7 @@ async fn permissions_selection_can_disable_auto_review() {
         .permissions
         .set_permission_profile(PermissionProfile::workspace_write())
         .expect("set permission profile");
+    chat.set_approvals_reviewer(ApprovalsReviewer::AutoReview);
 
     chat.open_permissions_popup();
     chat.handle_key_event(KeyEvent::from(KeyCode::Up));
@@ -1068,7 +1158,6 @@ async fn permissions_selection_sends_approvals_reviewer_in_override_turn_context
         chat.config.notices.hide_world_writable_warning = Some(true);
         chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
     }
-    chat.config.notices.hide_full_access_warning = Some(true);
     chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ true);
     chat.config
         .permissions
@@ -1151,8 +1240,6 @@ async fn permissions_full_access_history_cell_emitted_only_after_confirmation() 
         chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
     }
     chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ false);
-    chat.config.notices.hide_full_access_warning = None;
-
     chat.open_permissions_popup();
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     #[cfg(target_os = "windows")]

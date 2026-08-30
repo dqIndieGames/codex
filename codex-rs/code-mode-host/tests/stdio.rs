@@ -1,7 +1,6 @@
 #![allow(clippy::expect_used)]
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -12,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use codex_code_mode::CellId;
 use codex_code_mode::CodeModeNestedToolCall;
 use codex_code_mode::CodeModeSession;
+use codex_code_mode::CodeModeSessionCellExecutionLimits;
 use codex_code_mode::CodeModeSessionDelegate;
 use codex_code_mode::CodeModeSessionProvider;
 use codex_code_mode::CodeModeToolKind;
@@ -32,12 +32,11 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Default)]
-struct RecordingDelegate {
-    invocations: Mutex<Vec<CodeModeNestedToolCall>>,
-    notifications: Mutex<Vec<(String, CellId, String)>>,
-    closed_cells: Mutex<Vec<CellId>>,
-}
+#[path = "support/recording_delegate.rs"]
+mod recording_delegate;
+
+use recording_delegate::RecordingDelegate;
+use recording_delegate::cell_id;
 
 #[derive(Debug, Eq, PartialEq)]
 enum CallbackEvent {
@@ -165,45 +164,6 @@ impl CodeModeSessionDelegate for CancellationDelegate {
     }
 }
 
-impl CodeModeSessionDelegate for RecordingDelegate {
-    fn invoke_tool<'a>(
-        &'a self,
-        invocation: CodeModeNestedToolCall,
-        _cancellation_token: CancellationToken,
-    ) -> ToolInvocationFuture<'a> {
-        self.invocations
-            .lock()
-            .expect("invocations lock")
-            .push(invocation);
-        Box::pin(async { Ok(json!({ "value": "output" })) })
-    }
-
-    fn notify<'a>(
-        &'a self,
-        call_id: String,
-        cell_id: CellId,
-        text: String,
-        _cancellation_token: CancellationToken,
-    ) -> NotificationFuture<'a> {
-        self.notifications
-            .lock()
-            .expect("notifications lock")
-            .push((call_id, cell_id, text));
-        Box::pin(async { Ok(()) })
-    }
-
-    fn cell_closed(&self, cell_id: &CellId) {
-        self.closed_cells
-            .lock()
-            .expect("closed cells lock")
-            .push(cell_id.clone());
-    }
-}
-
-fn cell_id(value: &str) -> CellId {
-    CellId::new(value.to_string())
-}
-
 fn execute_request(source: &str) -> ExecuteRequest {
     ExecuteRequest {
         tool_call_id: "call-1".to_string(),
@@ -258,6 +218,74 @@ async fn next_callback_event(
         .await
         .expect("callback event timeout")
         .expect("callback event stream closed")
+}
+
+#[tokio::test]
+async fn session_execution_limits_are_isolated_on_a_shared_process_host() {
+    let provider: Arc<dyn CodeModeSessionProvider> =
+        Arc::new(ProcessOwnedCodeModeSessionProvider::with_host_program(
+            codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").expect("host binary"),
+        ));
+    let limited = provider
+        .create_session_with_limits(
+            Arc::new(RecordingDelegate::default()),
+            CodeModeSessionCellExecutionLimits {
+                max_yield_time_ms: Some(1),
+                max_heap_size_bytes: None,
+            },
+        )
+        .await
+        .expect("create limited session");
+    let other = provider
+        .create_session_with_limits(
+            Arc::new(RecordingDelegate::default()),
+            CodeModeSessionCellExecutionLimits {
+                max_yield_time_ms: Some(1_000),
+                max_heap_size_bytes: None,
+            },
+        )
+        .await
+        .expect("create independently limited session");
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        execute(&limited, execute_request("await new Promise(() => {});")),
+    )
+    .await
+    .expect("session limit should bound the default execution wait");
+    assert_eq!(
+        response,
+        RuntimeResponse::Yielded {
+            cell_id: cell_id("1"),
+            content_items: Vec::new(),
+        }
+    );
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            limited.wait(WaitRequest {
+                cell_id: cell_id("1"),
+                yield_time_ms: 60_000,
+            }),
+        )
+        .await
+        .expect("session limit should bound explicit waits")
+        .expect("wait for yielded cell"),
+        WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+            cell_id: cell_id("1"),
+            content_items: Vec::new(),
+        })
+    );
+
+    limited
+        .terminate(cell_id("1"))
+        .await
+        .expect("terminate cell");
+    limited.shutdown().await.expect("shutdown limited session");
+    other
+        .shutdown()
+        .await
+        .expect("shutdown independent session");
 }
 
 #[tokio::test]

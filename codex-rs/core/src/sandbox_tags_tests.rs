@@ -98,6 +98,7 @@ fn root_write_managed_profile_with_enabled_network_is_untagged() {
                     value: codex_protocol::permissions::FileSystemSpecialPath::Root,
                 },
                 access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
             }],
             glob_scan_max_depth: None,
         },
@@ -145,9 +146,10 @@ fn profile_policy_tag_reports_closest_legacy_mode() {
             glob_scan_max_depth: None,
             entries: vec![FileSystemSandboxEntry {
                 path: FileSystemPath::Path {
-                    path: writable_root,
+                    path: writable_root.into(),
                 },
                 access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
             }],
         },
         NetworkSandboxPolicy::Restricted,

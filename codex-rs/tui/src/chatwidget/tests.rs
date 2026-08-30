@@ -99,6 +99,7 @@ pub(super) use codex_app_server_protocol::RateLimitWindow;
 pub(super) use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
 pub(super) use codex_app_server_protocol::ReviewTarget;
 pub(super) use codex_app_server_protocol::ServerNotification;
+pub(super) use codex_app_server_protocol::SkillMetadata;
 pub(super) use codex_app_server_protocol::SkillSummary;
 pub(super) use codex_app_server_protocol::ThreadClosedNotification;
 pub(super) use codex_app_server_protocol::ThreadItem as AppServerThreadItem;
@@ -121,7 +122,6 @@ pub(super) use codex_config::types::ApprovalsReviewer;
 pub(super) use codex_config::types::Notifications;
 pub(super) use codex_config::types::WindowsSandboxModeToml;
 pub(super) use codex_core_plugins::OPENAI_CURATED_MARKETPLACE_NAME;
-pub(super) use codex_core_skills::model::SkillMetadata;
 pub(super) use codex_features::FEATURES;
 pub(super) use codex_features::Feature;
 pub(super) use codex_git_utils::CommitLogEntry;
@@ -243,6 +243,10 @@ mod guardian;
 pub(crate) mod helpers;
 mod history_replay;
 mod mcp_startup;
+#[path = "tests/misalignment_policy_tests.rs"]
+mod misalignment_policy;
+#[path = "tests/permission_shortcuts_tests.rs"]
+mod permission_shortcuts_tests;
 mod permissions;
 mod plan_mode;
 #[path = "tests/plugin_catalog_tests.rs"]

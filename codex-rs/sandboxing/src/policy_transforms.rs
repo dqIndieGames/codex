@@ -12,6 +12,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::permissions::ReadDenyMatcher;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::canonicalize_preserving_symlinks;
+use codex_utils_path_uri::PathUri;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -36,9 +37,12 @@ pub fn normalize_additional_permissions(
                 }
                 let path = match entry.path {
                     FileSystemPath::Path { path } => FileSystemPath::Path {
-                        path: canonicalize_preserving_symlinks(path.as_path())
+                        path: path
+                            .to_abs_path()
                             .ok()
+                            .and_then(|path| canonicalize_preserving_symlinks(path.as_path()).ok())
                             .and_then(|path| AbsolutePathBuf::from_absolute_path(path).ok())
+                            .map(Into::into)
                             .unwrap_or(path),
                     },
                     FileSystemPath::GlobPattern { pattern } => {
@@ -49,6 +53,7 @@ pub fn normalize_additional_permissions(
                 let normalized_entry = FileSystemSandboxEntry {
                     path,
                     access: entry.access,
+                    missing_path_behavior: entry.missing_path_behavior,
                 };
                 if !entries.contains(&normalized_entry) {
                     entries.push(normalized_entry);
@@ -66,6 +71,21 @@ pub fn normalize_additional_permissions(
         network,
         file_system,
     })
+}
+
+/// Resolves cwd-dependent permission entries without filtering their authority.
+///
+/// Unlike intersection, this preserves narrower grants beneath denied paths.
+pub fn materialize_additional_permissions(
+    mut additional_permissions: AdditionalPermissionProfile,
+    cwd: &Path,
+) -> Result<AdditionalPermissionProfile, String> {
+    if let Some(file_system) = additional_permissions.file_system.as_mut() {
+        for entry in &mut file_system.entries {
+            *entry = materialize_cwd_dependent_entry(entry, cwd);
+        }
+    }
+    normalize_additional_permissions(additional_permissions)
 }
 
 pub fn merge_permission_profiles(
@@ -243,7 +263,14 @@ fn granted_file_system_entry_within_request(
     granted_entry: &FileSystemSandboxEntry,
     cwd: &Path,
 ) -> bool {
-    if !granted_entry.access.can_read() {
+    if !granted_entry.access.can_read()
+        || matches!(
+            &granted_entry.path,
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::SlashTmp,
+            } if !cfg!(unix)
+        )
+    {
         return false;
     }
 
@@ -301,11 +328,10 @@ fn deny_entry_constrains_accepted_grant(
             };
             match &deny_entry.path {
                 FileSystemPath::GlobPattern { pattern } => glob_static_prefix_path(pattern, cwd)
-                    .is_some_and(|prefix| paths_overlap(prefix.as_path(), grant_path.as_path())),
+                    .is_some_and(|prefix| paths_may_overlap(&prefix, &grant_path)),
                 FileSystemPath::Path { .. } | FileSystemPath::Special { .. } => {
-                    resolve_permission_path(&deny_entry.path, cwd).is_some_and(|deny_path| {
-                        paths_overlap(deny_path.as_path(), grant_path.as_path())
-                    })
+                    resolve_permission_path(&deny_entry.path, cwd)
+                        .is_some_and(|deny_path| paths_may_overlap(&deny_path, &grant_path))
                 }
             }
         })
@@ -332,8 +358,10 @@ fn glob_static_prefix_path(pattern: &str, cwd: &Path) -> Option<AbsolutePathBuf>
     AbsolutePathBuf::from_absolute_path(prefix).ok()
 }
 
-fn paths_overlap(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
+fn paths_may_overlap(left: &AbsolutePathBuf, right: &AbsolutePathBuf) -> bool {
+    let left = PathUri::from_abs_path(left);
+    let right = PathUri::from_abs_path(right);
+    left.overlaps(&right).unwrap_or(true)
 }
 
 fn access_covers(requested: FileSystemAccessMode, granted: FileSystemAccessMode) -> bool {
@@ -353,8 +381,9 @@ fn materialize_cwd_dependent_entry(
             value: FileSystemSpecialPath::ProjectRoots { .. },
         } => resolve_permission_path(&entry.path, cwd)
             .map(|path| FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path },
+                path: path.into(),
                 access: entry.access,
+                missing_path_behavior: entry.missing_path_behavior,
             })
             .unwrap_or_else(|| entry.clone()),
         FileSystemPath::GlobPattern { pattern } => FileSystemSandboxEntry {
@@ -364,6 +393,7 @@ fn materialize_cwd_dependent_entry(
                     .into_owned(),
             },
             access: entry.access,
+            missing_path_behavior: entry.missing_path_behavior,
         },
         FileSystemPath::Path { .. } | FileSystemPath::Special { .. } => entry.clone(),
     }
@@ -371,7 +401,7 @@ fn materialize_cwd_dependent_entry(
 
 fn resolve_permission_path(path: &FileSystemPath, cwd: &Path) -> Option<AbsolutePathBuf> {
     match path {
-        FileSystemPath::Path { path } => Some(path.clone()),
+        FileSystemPath::Path { path } => path.to_abs_path().ok(),
         FileSystemPath::GlobPattern { .. } => None,
         FileSystemPath::Special { value } => match value {
             FileSystemSpecialPath::Root => {
@@ -395,10 +425,14 @@ fn resolve_permission_path(path: &FileSystemPath, cwd: &Path) -> Option<Absolute
                     AbsolutePathBuf::from_absolute_path(PathBuf::from(tmpdir)).ok()
                 }
             }
-            FileSystemSpecialPath::SlashTmp => AbsolutePathBuf::from_absolute_path("/tmp")
-                .ok()
-                .filter(|path| path.as_path().is_dir()),
-            FileSystemSpecialPath::Minimal | FileSystemSpecialPath::Unknown { .. } => None,
+            FileSystemSpecialPath::SlashTmp if cfg!(unix) => {
+                AbsolutePathBuf::from_absolute_path("/tmp")
+                    .ok()
+                    .filter(|path| path.as_path().is_dir())
+            }
+            FileSystemSpecialPath::SlashTmp
+            | FileSystemSpecialPath::Minimal
+            | FileSystemSpecialPath::Unknown { .. } => None,
         },
     }
 }

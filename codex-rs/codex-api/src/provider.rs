@@ -99,7 +99,7 @@ pub fn should_retry_request_error(
             let _ = (route, body);
             responses_http_status_is_retryable(*status)
         }
-        TransportError::Timeout | TransportError::Network(_) => true,
+        TransportError::Timeout | TransportError::Network(_) | TransportError::Connection(_) => true,
         TransportError::RetryLimit
         | TransportError::RetryInterrupted(_)
         | TransportError::Build(_) => false,
@@ -159,10 +159,6 @@ impl Provider {
             compression: RequestCompression::None,
             timeout: None,
         }
-    }
-
-    pub fn is_azure_responses_endpoint(&self) -> bool {
-        is_azure_responses_provider(&self.name, Some(&self.base_url))
     }
 
     pub fn websocket_url_for_path(&self, path: &str) -> Result<Url, url::ParseError> {

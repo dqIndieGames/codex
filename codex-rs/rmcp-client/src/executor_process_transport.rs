@@ -37,27 +37,84 @@ use rmcp::service::RoleClient;
 use rmcp::service::RxJsonRpcMessage;
 use rmcp::service::TxJsonRpcMessage;
 use rmcp::transport::Transport;
-use serde_json::from_slice;
 use serde_json::to_vec;
 use tokio::runtime::Handle;
+use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
 static PROCESS_COUNTER: AtomicUsize = AtomicUsize::new(1);
+// Tool results can make valid MCP responses large, so keep the protocol
+// ceiling well above ordinary messages while still bounding hostile input.
+const MAX_MCP_STDOUT_LINE_BYTES: usize = 8 * 1024 * 1024;
+// Stderr is diagnostic only and does not need the protocol stream's allowance.
+const MAX_MCP_STDERR_LINE_BYTES: usize = 1024 * 1024;
 
-#[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct LineBuffer {
     bytes: BytesMut,
     /// Prefix already scanned and known not to contain a newline.
     scanned_len: usize,
+    /// Bytes after the last buffered newline.
+    pending_line_bytes: usize,
+    max_line_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineTooLong {
+    max_line_bytes: usize,
+}
+
+impl Default for LineBuffer {
+    fn default() -> Self {
+        Self::new(MAX_MCP_STDOUT_LINE_BYTES)
+    }
 }
 
 impl LineBuffer {
-    fn extend_from_slice(&mut self, bytes: &[u8]) {
-        self.bytes.extend_from_slice(bytes);
+    fn new(max_line_bytes: usize) -> Self {
+        Self {
+            bytes: BytesMut::new(),
+            scanned_len: 0,
+            pending_line_bytes: 0,
+            max_line_bytes,
+        }
+    }
+
+    fn extend_from_slice(&mut self, bytes: &[u8]) -> Result<(), LineTooLong> {
+        let mut remaining = bytes;
+        while let Some(newline_index) = memchr(b'\n', remaining) {
+            if newline_index > self.max_line_bytes.saturating_sub(self.pending_line_bytes) {
+                self.discard_pending_line();
+                return Err(LineTooLong {
+                    max_line_bytes: self.max_line_bytes,
+                });
+            }
+
+            let segment_len = newline_index + 1;
+            self.bytes.extend_from_slice(&remaining[..segment_len]);
+            self.pending_line_bytes = 0;
+            remaining = &remaining[segment_len..];
+        }
+        if remaining.len() > self.max_line_bytes.saturating_sub(self.pending_line_bytes) {
+            self.discard_pending_line();
+            return Err(LineTooLong {
+                max_line_bytes: self.max_line_bytes,
+            });
+        }
+
+        self.bytes.extend_from_slice(remaining);
+        self.pending_line_bytes += remaining.len();
+        Ok(())
+    }
+
+    fn discard_pending_line(&mut self) {
+        let complete_line_bytes = self.bytes.len().saturating_sub(self.pending_line_bytes);
+        self.bytes.truncate(complete_line_bytes);
+        self.scanned_len = self.scanned_len.min(complete_line_bytes);
+        self.pending_line_bytes = 0;
     }
 
     fn take_line(&mut self) -> Option<BytesMut> {
@@ -79,7 +136,14 @@ impl LineBuffer {
         }
 
         self.scanned_len = 0;
+        self.pending_line_bytes = 0;
         Some(self.bytes.split())
+    }
+
+    fn clear(&mut self) {
+        self.bytes = BytesMut::new();
+        self.scanned_len = 0;
+        self.pending_line_bytes = 0;
     }
 }
 
@@ -97,6 +161,10 @@ pub(super) struct ExecutorProcessTransport {
     /// `write` forwards stdin bytes. `terminate` stops the child when rmcp
     /// closes the transport.
     process: Arc<dyn ExecProcess>,
+
+    /// Prevents concurrent rmcp send futures from issuing overlapping stdin writes.
+    /// The single-slot semaphore gives mutex semantics while its permit can safely cross `.await`.
+    stdin_write_semaphore: Arc<Semaphore>,
 
     /// Pushed output/lifecycle stream for the process.
     ///
@@ -140,10 +208,11 @@ impl ExecutorProcessTransport {
         let events = process.subscribe_events();
         Self {
             process,
+            stdin_write_semaphore: Arc::new(Semaphore::new(1)),
             events,
             program_name,
             stdout: LineBuffer::default(),
-            stderr: LineBuffer::default(),
+            stderr: LineBuffer::new(MAX_MCP_STDERR_LINE_BYTES),
             closed: false,
             terminated: false,
             last_seq: 0,
@@ -167,7 +236,12 @@ impl Transport<RoleClient> for ExecutorProcessTransport {
         item: TxJsonRpcMessage<RoleClient>,
     ) -> impl Future<Output = std::result::Result<(), Self::Error>> + Send + 'static {
         let process = Arc::clone(&self.process);
+        let stdin_write_semaphore = Arc::clone(&self.stdin_write_semaphore);
         async move {
+            let _stdin_write_permit = stdin_write_semaphore
+                .acquire()
+                .await
+                .map_err(io::Error::other)?;
             // rmcp hands us a structured JSON-RPC message. Stdio transport on
             // the wire is JSON plus one newline delimiter.
             let mut bytes = to_vec(&item).map_err(io::Error::other)?;
@@ -280,7 +354,23 @@ impl ExecutorProcessTransport {
             .await
             .map_err(io::Error::other)?;
         for chunk in response.chunks {
+            let expected_seq = self.last_seq.saturating_add(1);
+            if chunk.seq > expected_seq {
+                return Err(self.close_for_lost_output(expected_seq, chunk.seq));
+            }
             self.push_process_output_if_new(chunk);
+            if self.closed {
+                return Ok(());
+            }
+        }
+        // Process reads include output chunks but not the sequenced `Exited`
+        // and `Closed` events. Account for those terminal events without
+        // allowing an evicted output chunk to be silently spliced into MCP.
+        let terminal_event_count = u64::from(response.exited) + u64::from(response.closed);
+        let next_output_seq = response.next_seq.saturating_sub(terminal_event_count);
+        let expected_seq = self.last_seq.saturating_add(1);
+        if next_output_seq > expected_seq {
+            return Err(self.close_for_lost_output(expected_seq, next_output_seq));
         }
         self.last_seq = self.last_seq.max(response.next_seq.saturating_sub(1));
         if let Some(message) = response.failure {
@@ -293,6 +383,18 @@ impl ExecutorProcessTransport {
             self.closed = true;
         }
         Ok(())
+    }
+
+    fn close_for_lost_output(&mut self, expected_seq: u64, received_seq: u64) -> io::Error {
+        self.stdout.clear();
+        self.stderr.clear();
+        self.closed = true;
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "remote MCP server output stream lost process events: expected sequence {expected_seq}, received {received_seq}"
+            ),
+        )
     }
 
     fn push_process_output_if_new(&mut self, chunk: ProcessOutputChunk) {
@@ -309,14 +411,31 @@ impl ExecutorProcessTransport {
             // accepted defensively because the executor process API has a
             // unified stream enum, but remote MCP starts with `tty=false`.
             ExecOutputStream::Stdout | ExecOutputStream::Pty => {
-                self.stdout.extend_from_slice(&bytes);
+                if let Err(error) = self.stdout.extend_from_slice(&bytes) {
+                    self.close_for_oversized_line("stdout", error);
+                }
             }
             // Stderr is intentionally out-of-band. It should help debug server
             // startup failures without entering rmcp framing.
             ExecOutputStream::Stderr => {
-                self.push_stderr(&bytes);
+                if let Err(error) = self.push_stderr(&bytes) {
+                    self.stdout.clear();
+                    self.close_for_oversized_line("stderr", error);
+                }
             }
         }
+    }
+
+    fn close_for_oversized_line(&mut self, stream_name: &str, error: LineTooLong) {
+        let max_line_bytes = error.max_line_bytes;
+        warn!(
+            "Remote MCP server {stream_name} line exceeds {max_line_bytes} bytes ({}); closing transport",
+            self.program_name
+        );
+        self.stderr.clear();
+        // Returning EOF makes rmcp drop the transport, whose Drop implementation
+        // terminates the executor-managed process.
+        self.closed = true;
     }
 
     fn take_stdout_message(&mut self, allow_partial: bool) -> Option<RxJsonRpcMessage<RoleClient>> {
@@ -331,7 +450,7 @@ impl ExecutorProcessTransport {
                 None => return None,
             };
             let line = Self::trim_trailing_carriage_return(line);
-            match from_slice::<RxJsonRpcMessage<RoleClient>>(&line) {
+            match serde_json::from_slice(&line) {
                 Ok(message) => return Some(message),
                 Err(error) => {
                     debug!(
@@ -343,10 +462,10 @@ impl ExecutorProcessTransport {
         }
     }
 
-    fn push_stderr(&mut self, bytes: &[u8]) {
+    fn push_stderr(&mut self, bytes: &[u8]) -> Result<(), LineTooLong> {
         // Keep stderr line-oriented in logs so a chatty MCP server does not
         // produce one log record per byte chunk.
-        self.stderr.extend_from_slice(bytes);
+        self.stderr.extend_from_slice(bytes)?;
         while let Some(line) = self.stderr.take_line() {
             let line = Self::trim_trailing_carriage_return(line);
             info!(
@@ -355,6 +474,7 @@ impl ExecutorProcessTransport {
                 String::from_utf8_lossy(&line)
             );
         }
+        Ok(())
     }
 
     fn flush_stderr(&mut self) {

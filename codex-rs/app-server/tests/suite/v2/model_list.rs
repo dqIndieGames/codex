@@ -4,11 +4,10 @@ use anyhow::Error;
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::TestAppServer;
-use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use app_test_support::write_models_cache;
+use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCError;
-use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::Model;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
@@ -16,8 +15,8 @@ use codex_app_server_protocol::ModelServiceTier;
 use codex_app_server_protocol::ModelUpgradeInfo;
 use codex_app_server_protocol::ReasoningEffortOption;
 use codex_app_server_protocol::RequestId;
-use codex_app_server_protocol::ThreadProviderRuntimeRefreshAllLoadedParams;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelsResponse;
@@ -26,43 +25,10 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
-use wiremock::Mock;
 use wiremock::MockServer;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::method;
-use wiremock::matchers::path_regex;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
-
-fn remote_model(slug: &str, display_name: &str) -> Result<ModelInfo> {
-    Ok(serde_json::from_value(json!({
-        "slug": slug,
-        "display_name": display_name,
-        "description": format!("Remote model {slug}"),
-        "default_reasoning_level": "max",
-        "supported_reasoning_levels": [
-            {"effort": "max", "description": "Maximum"}
-        ],
-        "shell_type": "shell_command",
-        "visibility": "list",
-        "minimal_client_version": [0, 1, 0],
-        "supported_in_api": true,
-        "priority": 0,
-        "upgrade": null,
-        "base_instructions": "base instructions",
-        "supports_reasoning_summaries": false,
-        "support_verbosity": false,
-        "default_verbosity": null,
-        "apply_patch_tool_type": null,
-        "truncation_policy": {"mode": "bytes", "limit": 10_000},
-        "supports_parallel_tool_calls": false,
-        "supports_image_detail_original": false,
-        "context_window": 272_000,
-        "max_context_window": 272_000,
-        "experimental_supported_tools": [],
-    }))?)
-}
 
 fn model_from_preset(preset: &ModelPreset) -> Model {
     Model {
@@ -74,10 +40,15 @@ fn model_from_preset(preset: &ModelPreset) -> Model {
             upgrade_copy: upgrade.upgrade_copy.clone(),
             model_link: upgrade.model_link.clone(),
             migration_markdown: upgrade.migration_markdown.clone(),
+            retirement_at: upgrade
+                .retirement_at
+                .as_ref()
+                .map(chrono::DateTime::timestamp),
         }),
         availability_nux: preset.availability_nux.clone().map(Into::into),
         display_name: preset.display_name.clone(),
         description: preset.description.clone(),
+        model_specialty: preset.model_specialty.clone(),
         hidden: !preset.show_in_picker,
         supported_reasoning_efforts: preset
             .supported_reasoning_efforts
@@ -94,6 +65,7 @@ fn model_from_preset(preset: &ModelPreset) -> Model {
         // cache report `supports_personality = false`.
         // todo(sayan): fix, maybe make roundtrip use ModelInfo only
         supports_personality: false,
+        multi_agent_version: preset.multi_agent_version.map(Into::into),
         additional_speed_tiers: preset.additional_speed_tiers.clone(),
         service_tiers: preset
             .service_tiers
@@ -133,29 +105,21 @@ async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
-        .build()
+        .build_initialized()
         .await?;
-
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
-
-    let request_id = mcp
-        .send_list_models_request(ModelListParams {
-            limit: Some(100),
-            cursor: None,
-            include_hidden: None,
-        })
-        .await?;
-
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
     let ModelListResponse {
         data: items,
         next_cursor,
-    } = to_response::<ModelListResponse>(response)?;
+    } = mcp
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams {
+                limit: Some(100),
+                cursor: None,
+                include_hidden: None,
+            },
+        })
+        .await?;
 
     let expected_models = expected_visible_models();
 
@@ -171,29 +135,21 @@ async fn list_models_includes_hidden_models() -> Result<()> {
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
-        .build()
+        .build_initialized()
         .await?;
-
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
-
-    let request_id = mcp
-        .send_list_models_request(ModelListParams {
-            limit: Some(100),
-            cursor: None,
-            include_hidden: Some(true),
-        })
-        .await?;
-
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
     let ModelListResponse {
         data: items,
         next_cursor,
-    } = to_response::<ModelListResponse>(response)?;
+    } = mcp
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams {
+                limit: Some(100),
+                cursor: None,
+                include_hidden: Some(true),
+            },
+        })
+        .await?;
 
     assert!(items.iter().any(|item| item.hidden));
     assert!(next_cursor.is_none());
@@ -203,16 +159,47 @@ async fn list_models_includes_hidden_models() -> Result<()> {
 #[tokio::test]
 async fn list_models_uses_chatgpt_remote_catalog_as_source_of_truth() -> Result<()> {
     let server = MockServer::start().await;
-    let mut remote_model = remote_model("chatgpt-remote-only", "ChatGPT Remote Only")?;
-    remote_model.supported_reasoning_levels = serde_json::from_value(json!([
-        {"effort": "max", "description": "Maximum"},
-        {"effort": "low", "description": "Low"},
-        {"effort": "focused", "description": "Focused"}
-    ]))?;
+    let remote_models = [json!("2030-01-01T00:00:00Z"), serde_json::Value::Null]
+        .into_iter()
+        .enumerate()
+        .map(|(priority, retirement_at)| {
+            serde_json::from_value::<ModelInfo>(json!({
+                "slug": format!("chatgpt-remote-only-{priority}"),
+                "display_name": "ChatGPT Remote Only",
+                "description": "Remote-only model for app-server model/list coverage",
+                "model_specialty": MODEL_SPECIALTY_CYBER,
+                "default_reasoning_level": "max",
+                "supported_reasoning_levels": [
+                    {"effort": "max", "description": "Maximum"},
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "focused", "description": "Focused"}
+                ],
+                "shell_type": "shell_command",
+                "visibility": "list",
+                "minimal_client_version": [0, 1, 0],
+                "supported_in_api": true,
+                "priority": priority,
+                "upgrade": {
+                    "model": "replacement-model",
+                    "migration_markdown": "Use the replacement model.",
+                    "retirement_at": retirement_at,
+                },
+                "support_verbosity": false,
+                "default_verbosity": null,
+                "apply_patch_tool_type": null,
+                "truncation_policy": {"mode": "bytes", "limit": 10_000},
+                "supports_image_detail_original": false,
+                "multi_agent_version": "v2",
+                "context_window": 272_000,
+                "max_context_window": 272_000,
+                "experimental_supported_tools": [],
+            }))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let models_mock = mount_models_once(
         &server,
         ModelsResponse {
-            models: vec![remote_model.clone()],
+            models: remote_models.clone(),
         },
     )
     .await;
@@ -240,10 +227,8 @@ openai_base_url = "{server_uri}/v1"
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build()
+        .build_initialized()
         .await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
-
     let request_id = mcp
         .send_list_models_request(ModelListParams {
             limit: Some(100),
@@ -251,18 +236,23 @@ openai_base_url = "{server_uri}/v1"
             include_hidden: None,
         })
         .await?;
-
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
+    let response = mcp
+        .read_stream_until_response_message(RequestId::Integer(request_id))
+        .await?;
+    assert_eq!(
+        response.result["data"][0]["upgradeInfo"]["retirementAt"],
+        json!(1_893_456_000)
+    );
+    assert_eq!(
+        response.result["data"][1]["upgradeInfo"]["retirementAt"],
+        serde_json::Value::Null
+    );
     let ModelListResponse {
         data: items,
         next_cursor,
-    } = to_response::<ModelListResponse>(response)?;
-    let mut expected_presets: Vec<ModelPreset> = vec![remote_model.into()];
+    } = serde_json::from_value(response.result)?;
+    let mut expected_presets: Vec<ModelPreset> =
+        remote_models.into_iter().map(Into::into).collect();
     ModelPreset::mark_default_by_picker_visibility(&mut expected_presets);
     let mut expected_items = expected_presets
         .iter()
@@ -294,173 +284,33 @@ openai_base_url = "{server_uri}/v1"
 }
 
 #[tokio::test]
-async fn list_models_follows_provider_runtime_refresh_to_provider_token_endpoint() -> Result<()> {
-    let old_server = MockServer::start().await;
-    let new_server = MockServer::start().await;
-    let old_model = remote_model("old-provider-model", "Old Provider Model")?;
-    let new_model = remote_model("new-provider-model", "New Provider Model")?;
-    Mock::given(method("GET"))
-        .and(path_regex(".*/models$"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/json")
-                .set_body_json(ModelsResponse {
-                    models: vec![old_model.clone()],
-                }),
-        )
-        .mount(&old_server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path_regex(".*/models$"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/json")
-                .set_body_json(ModelsResponse {
-                    models: vec![new_model.clone()],
-                }),
-        )
-        .mount(&new_server)
-        .await;
-
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        format!(
-            r#"
-model = "mock-model"
-approval_policy = "never"
-sandbox_mode = "read-only"
-model_provider = "mock_provider"
-
-[model_providers.mock_provider]
-name = "Mock provider for test"
-base_url = "{old_base_url}"
-experimental_bearer_token = "old-provider-token"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
-"#,
-            old_base_url = old_server.uri(),
-        ),
-    )?;
-
-    let mut mcp =
-        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
-
-    let request_id = mcp
-        .send_list_models_request(ModelListParams {
-            limit: Some(100),
-            cursor: None,
-            include_hidden: None,
-        })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let first: ModelListResponse = to_response(response)?;
-    assert!(first.data.iter().any(|model| model.model == old_model.slug));
-
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        format!(
-            r#"
-model = "mock-model"
-approval_policy = "never"
-sandbox_mode = "read-only"
-model_provider = "mock_provider"
-
-[model_providers.mock_provider]
-name = "Mock provider for test"
-base_url = "{new_base_url}"
-experimental_bearer_token = "new-provider-token"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
-"#,
-            new_base_url = new_server.uri(),
-        ),
-    )?;
-
-    let refresh_id = mcp
-        .send_raw_request(
-            "thread/providerRuntime/refreshAllLoaded",
-            Some(serde_json::to_value(
-                ThreadProviderRuntimeRefreshAllLoadedParams::default(),
-            )?),
-        )
-        .await?;
-    let _: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(refresh_id)),
-    )
-    .await??;
-
-    let request_id = mcp
-        .send_list_models_request(ModelListParams {
-            limit: Some(100),
-            cursor: None,
-            include_hidden: None,
-        })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let second: ModelListResponse = to_response(response)?;
-    assert!(
-        second
-            .data
-            .iter()
-            .any(|model| model.model == new_model.slug)
-    );
-    assert!(
-        !second
-            .data
-            .iter()
-            .any(|model| model.model == old_model.slug)
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn list_models_pagination_works() -> Result<()> {
     let codex_home = TempDir::new()?;
     write_models_cache(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
-        .build()
+        .build_initialized()
         .await?;
-
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let expected_models = expected_visible_models();
     let mut cursor = None;
     let mut items = Vec::new();
 
     for _ in 0..expected_models.len() {
-        let request_id = mcp
-            .send_list_models_request(ModelListParams {
-                limit: Some(1),
-                cursor: cursor.clone(),
-                include_hidden: None,
-            })
-            .await?;
-
-        let response: JSONRPCResponse = timeout(
-            DEFAULT_TIMEOUT,
-            mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-        )
-        .await??;
-
         let ModelListResponse {
             data: page_items,
             next_cursor,
-        } = to_response::<ModelListResponse>(response)?;
+        } = mcp
+            .request(|request_id| ClientRequest::ModelList {
+                request_id,
+                params: ModelListParams {
+                    limit: Some(1),
+                    cursor: cursor.clone(),
+                    include_hidden: None,
+                },
+            })
+            .await?;
 
         assert_eq!(page_items.len(), 1);
         items.extend(page_items);
@@ -486,10 +336,8 @@ async fn list_models_rejects_invalid_cursor() -> Result<()> {
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
-        .build()
+        .build_initialized()
         .await?;
-
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
         .send_list_models_request(ModelListParams {

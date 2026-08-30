@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
@@ -12,9 +11,12 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::ServerNotificationEnvelope;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::ServerResponse;
+use codex_diagnostics::Gauge;
+use codex_diagnostics::GaugeGuard;
 use codex_otel::span_w3c_trace_context;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::W3cTraceContext;
@@ -22,7 +24,6 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time::Duration;
 use tracing::Instrument;
 use tracing::Span;
 use tracing::warn;
@@ -38,9 +39,10 @@ pub(crate) use codex_app_server_transport::QueuedOutgoingMessage;
 #[cfg(test)]
 use codex_protocol::account::PlanType;
 
-const NOTIFICATION_COALESCING_WINDOW: Duration = Duration::from_millis(150);
-
 pub(crate) type ClientRequestResult = std::result::Result<Result, JSONRPCErrorError>;
+
+static IN_FLIGHT_REQUESTS: Gauge = Gauge::new("app.requests.in_flight");
+static PENDING_SERVER_REQUESTS: Gauge = Gauge::new("app.server_requests.pending");
 
 /// Stable identifier for a client request scoped to a transport connection.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -56,6 +58,7 @@ pub(crate) struct RequestContext {
     request_id: ConnectionRequestId,
     span: Span,
     parent_trace: Option<W3cTraceContext>,
+    _diagnostics_guard: Arc<GaugeGuard>,
 }
 
 impl RequestContext {
@@ -68,6 +71,7 @@ impl RequestContext {
             request_id,
             span,
             parent_trace,
+            _diagnostics_guard: Arc::new(IN_FLIGHT_REQUESTS.track()),
         }
     }
 
@@ -96,228 +100,11 @@ pub(crate) enum OutgoingEnvelope {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NotificationCoalescing {
-    Disabled,
-    Enabled,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum NotificationRecipients {
-    Broadcast,
-    Connections(Vec<ConnectionId>),
-}
-
-impl NotificationRecipients {
-    fn from_connection_ids(connection_ids: &[ConnectionId]) -> Self {
-        if connection_ids.is_empty() {
-            Self::Broadcast
-        } else {
-            Self::Connections(connection_ids.to_vec())
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum CoalescingNotificationKind {
-    CommandExecutionOutputDelta {
-        thread_id: String,
-        turn_id: String,
-        item_id: String,
-    },
-    FileChangeOutputDelta {
-        thread_id: String,
-        turn_id: String,
-        item_id: String,
-    },
-    ThreadTokenUsageUpdated {
-        thread_id: String,
-        turn_id: String,
-    },
-    TurnDiffUpdated {
-        thread_id: String,
-        turn_id: String,
-    },
-    TurnPlanUpdated {
-        thread_id: String,
-        turn_id: String,
-    },
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct CoalescingKey {
-    recipients: NotificationRecipients,
-    kind: CoalescingNotificationKind,
-}
-
-impl CoalescingKey {
-    fn from_notification(
-        connection_ids: &[ConnectionId],
-        notification: &ServerNotification,
-    ) -> Option<Self> {
-        let recipients = NotificationRecipients::from_connection_ids(connection_ids);
-        let kind = match notification {
-            ServerNotification::CommandExecutionOutputDelta(notification) => {
-                CoalescingNotificationKind::CommandExecutionOutputDelta {
-                    thread_id: notification.thread_id.clone(),
-                    turn_id: notification.turn_id.clone(),
-                    item_id: notification.item_id.clone(),
-                }
-            }
-            ServerNotification::FileChangeOutputDelta(notification) => {
-                CoalescingNotificationKind::FileChangeOutputDelta {
-                    thread_id: notification.thread_id.clone(),
-                    turn_id: notification.turn_id.clone(),
-                    item_id: notification.item_id.clone(),
-                }
-            }
-            ServerNotification::ThreadTokenUsageUpdated(notification) => {
-                CoalescingNotificationKind::ThreadTokenUsageUpdated {
-                    thread_id: notification.thread_id.clone(),
-                    turn_id: notification.turn_id.clone(),
-                }
-            }
-            ServerNotification::TurnDiffUpdated(notification) => {
-                CoalescingNotificationKind::TurnDiffUpdated {
-                    thread_id: notification.thread_id.clone(),
-                    turn_id: notification.turn_id.clone(),
-                }
-            }
-            ServerNotification::TurnPlanUpdated(notification) => {
-                CoalescingNotificationKind::TurnPlanUpdated {
-                    thread_id: notification.thread_id.clone(),
-                    turn_id: notification.turn_id.clone(),
-                }
-            }
-            _ => return None,
-        };
-        Some(Self { recipients, kind })
-    }
-}
-
-#[derive(Debug)]
-struct PendingCoalescedNotification {
-    connection_ids: Vec<ConnectionId>,
-    notification: ServerNotification,
-}
-
-impl PendingCoalescedNotification {
-    fn merge(&mut self, notification: ServerNotification) {
-        match (&mut self.notification, notification) {
-            (
-                ServerNotification::CommandExecutionOutputDelta(existing),
-                ServerNotification::CommandExecutionOutputDelta(next),
-            ) => existing.delta.push_str(&next.delta),
-            (
-                ServerNotification::FileChangeOutputDelta(existing),
-                ServerNotification::FileChangeOutputDelta(next),
-            ) => existing.delta.push_str(&next.delta),
-            (_, latest) => self.notification = latest,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct NotificationCoalescer {
-    pending: Arc<Mutex<HashMap<CoalescingKey, PendingCoalescedNotification>>>,
-    send_lock: Arc<Mutex<()>>,
-}
-
-impl Default for NotificationCoalescer {
-    fn default() -> Self {
-        Self {
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            send_lock: Arc::new(Mutex::new(())),
-        }
-    }
-}
-
-impl NotificationCoalescer {
-    async fn coalesce_or_send_later(
-        &self,
-        sender: mpsc::Sender<OutgoingEnvelope>,
-        connection_ids: &[ConnectionId],
-        notification: ServerNotification,
-    ) -> bool {
-        let Some(key) = CoalescingKey::from_notification(connection_ids, &notification) else {
-            return false;
-        };
-
-        let mut pending = self.pending.lock().await;
-        match pending.entry(key.clone()) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().merge(notification);
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(PendingCoalescedNotification {
-                    connection_ids: connection_ids.to_vec(),
-                    notification,
-                });
-                let pending_map = Arc::clone(&self.pending);
-                let send_lock = Arc::clone(&self.send_lock);
-                tokio::spawn(async move {
-                    tokio::time::sleep(NOTIFICATION_COALESCING_WINDOW).await;
-                    let _send_guard = send_lock.lock().await;
-                    let pending_notification = {
-                        let mut pending = pending_map.lock().await;
-                        pending.remove(&key)
-                    };
-                    if let Some(pending_notification) = pending_notification {
-                        send_outgoing_notification(
-                            &sender,
-                            pending_notification.connection_ids.as_slice(),
-                            pending_notification.notification,
-                        )
-                        .await;
-                    }
-                });
-            }
-        }
-        true
-    }
-
-    async fn flush_pending_for_recipients(
-        &self,
-        sender: &mpsc::Sender<OutgoingEnvelope>,
-        connection_ids: &[ConnectionId],
-    ) {
-        let recipients = NotificationRecipients::from_connection_ids(connection_ids);
-        let _send_guard = self.send_lock.lock().await;
-        let pending_notifications = self.take_pending_for_recipients(recipients).await;
-
-        for pending_notification in pending_notifications {
-            send_outgoing_notification(
-                sender,
-                pending_notification.connection_ids.as_slice(),
-                pending_notification.notification,
-            )
-            .await;
-        }
-    }
-
-    async fn take_pending_for_recipients(
-        &self,
-        recipients: NotificationRecipients,
-    ) -> Vec<PendingCoalescedNotification> {
-        let mut pending = self.pending.lock().await;
-        let keys = pending
-            .keys()
-            .filter(|key| key.recipients == recipients)
-            .cloned()
-            .collect::<Vec<_>>();
-        keys.into_iter()
-            .filter_map(|key| pending.remove(&key))
-            .collect::<Vec<_>>()
-    }
-}
-
 /// Sends messages to the client and manages request callbacks.
 pub(crate) struct OutgoingMessageSender {
     next_server_request_id: AtomicI64,
     sender: mpsc::Sender<OutgoingEnvelope>,
     request_id_to_callback: Mutex<HashMap<RequestId, PendingCallbackEntry>>,
-    notification_coalescing_enabled: bool,
-    notification_coalescer: NotificationCoalescer,
     /// Incoming requests that are still waiting on a final response or error.
     /// We keep them here because this is where responses, errors, and
     /// disconnect cleanup all get handled.
@@ -336,6 +123,7 @@ struct PendingCallbackEntry {
     callback: oneshot::Sender<ClientRequestResult>,
     thread_id: Option<ThreadId>,
     request: ServerRequest,
+    _diagnostics_guard: GaugeGuard,
 }
 
 impl ThreadScopedOutgoingMessageSender {
@@ -381,7 +169,7 @@ impl ThreadScopedOutgoingMessageSender {
     pub(crate) async fn send_server_notification(&self, notification: ServerNotification) {
         self.outgoing
             .analytics_events_client
-            .track_notification(notification.clone());
+            .track_notification(&notification);
         if self.connection_ids.is_empty() {
             return;
         }
@@ -427,63 +215,15 @@ impl ThreadScopedOutgoingMessageSender {
     }
 }
 
-async fn send_outgoing_notification(
-    sender: &mpsc::Sender<OutgoingEnvelope>,
-    connection_ids: &[ConnectionId],
-    notification: ServerNotification,
-) {
-    let outgoing_message = OutgoingMessage::AppServerNotification(notification);
-    if connection_ids.is_empty() {
-        if let Err(err) = sender
-            .send(OutgoingEnvelope::Broadcast {
-                message: outgoing_message,
-            })
-            .await
-        {
-            warn!("failed to send server notification to client: {err:?}");
-        }
-        return;
-    }
-    for connection_id in connection_ids {
-        if let Err(err) = sender
-            .send(OutgoingEnvelope::ToConnection {
-                connection_id: *connection_id,
-                message: outgoing_message.clone(),
-                write_complete_tx: None,
-            })
-            .await
-        {
-            warn!("failed to send server notification to client: {err:?}");
-        }
-    }
-}
-
 impl OutgoingMessageSender {
     pub(crate) fn new(
         sender: mpsc::Sender<OutgoingEnvelope>,
-        analytics_events_client: AnalyticsEventsClient,
-    ) -> Self {
-        Self::new_with_notification_coalescing(
-            sender,
-            NotificationCoalescing::Disabled,
-            analytics_events_client,
-        )
-    }
-
-    pub(crate) fn new_with_notification_coalescing(
-        sender: mpsc::Sender<OutgoingEnvelope>,
-        notification_coalescing: NotificationCoalescing,
         analytics_events_client: AnalyticsEventsClient,
     ) -> Self {
         Self {
             next_server_request_id: AtomicI64::new(0),
             sender,
             request_id_to_callback: Mutex::new(HashMap::new()),
-            notification_coalescing_enabled: matches!(
-                notification_coalescing,
-                NotificationCoalescing::Enabled
-            ),
-            notification_coalescer: NotificationCoalescer::default(),
             request_contexts: Mutex::new(HashMap::new()),
             analytics_events_client,
         }
@@ -571,16 +311,12 @@ impl OutgoingMessageSender {
                     callback: tx_approve,
                     thread_id,
                     request: request.clone(),
+                    _diagnostics_guard: PENDING_SERVER_REQUESTS.track(),
                 },
             );
         }
 
         let outgoing_message = OutgoingMessage::Request(request.clone());
-        if self.notification_coalescing_enabled {
-            self.notification_coalescer
-                .flush_pending_for_recipients(&self.sender, connection_ids.unwrap_or(&[]))
-                .await;
-        }
         let send_result = match connection_ids {
             None => {
                 self.sender
@@ -650,14 +386,15 @@ impl OutgoingMessageSender {
         match entry {
             Some((id, entry)) => {
                 let completed_at_ms = now_unix_timestamp_ms();
-                if let Ok(response) = entry.request.response_from_result(result.clone())
-                    && !matches!(response, ServerResponse::PermissionsRequestApproval { .. })
-                {
-                    self.analytics_events_client
-                        .track_server_response(completed_at_ms, response);
+                if let Ok(response) = entry.request.response_from_result(result.clone()) {
+                    tracing::info!("<- response: {response:?}");
+                    if !matches!(response, ServerResponse::PermissionsRequestApproval { .. }) {
+                        self.analytics_events_client
+                            .track_server_response(completed_at_ms, response);
+                    }
                 }
-                if let Err(err) = entry.callback.send(Ok(result)) {
-                    warn!("could not notify callback for {id:?} due to: {err:?}");
+                if entry.callback.send(Ok(result)).is_err() {
+                    warn!("could not notify callback for {id:?}: receiver dropped");
                 }
             }
             None => {
@@ -671,11 +408,12 @@ impl OutgoingMessageSender {
 
         match entry {
             Some((id, entry)) => {
-                warn!("client responded with error for {id:?}: {error:?}");
+                // Don't log error messages or data because they may contain credentials.
+                warn!(code = error.code, "client responded with error for {id:?}");
                 self.analytics_events_client
                     .track_server_request_aborted(now_unix_timestamp_ms(), id.clone());
-                if let Err(err) = entry.callback.send(Err(error)) {
-                    warn!("could not notify callback for {id:?} due to: {err:?}");
+                if entry.callback.send(Err(error)).is_err() {
+                    warn!("could not notify callback for {id:?}: receiver dropped");
                 }
             }
             None => {
@@ -708,10 +446,10 @@ impl OutgoingMessageSender {
             self.analytics_events_client
                 .track_server_request_aborted(now_unix_timestamp_ms(), entry.request.id().clone());
             if let Some(error) = error.as_ref()
-                && let Err(err) = entry.callback.send(Err(error.clone()))
+                && entry.callback.send(Err(error.clone())).is_err()
             {
                 let request_id = entry.request.id();
-                warn!("could not notify callback for {request_id:?} due to: {err:?}");
+                warn!("could not notify callback for {request_id:?}: receiver dropped");
             }
         }
     }
@@ -766,10 +504,10 @@ impl OutgoingMessageSender {
             self.analytics_events_client
                 .track_server_request_aborted(now_unix_timestamp_ms(), entry.request.id().clone());
             if let Some(error) = error.as_ref()
-                && let Err(err) = entry.callback.send(Err(error.clone()))
+                && entry.callback.send(Err(error.clone())).is_err()
             {
                 let request_id = entry.request.id();
-                warn!("could not notify callback for {request_id:?} due to: {err:?}",);
+                warn!("could not notify callback for {request_id:?}: receiver dropped");
             }
         }
     }
@@ -811,56 +549,47 @@ impl OutgoingMessageSender {
     ) {
         let connection_id = request_id.connection_id;
         let request_id_for_analytics = request_id.request_id.clone();
-        let serialized_response = response
-            .into_jsonrpc_parts_and_payload(request_id.request_id.clone())
-            .map(|(id, result, response)| {
-                if let Some(response) = response {
-                    match thread_originator {
-                        Some(thread_originator) => {
-                            self.analytics_events_client
-                                .track_response_with_thread_originator(
-                                    connection_id.0,
-                                    request_id_for_analytics,
-                                    response,
-                                    thread_originator,
-                                );
-                        }
-                        None => {
-                            self.analytics_events_client.track_response(
-                                connection_id.0,
-                                request_id_for_analytics,
-                                response,
-                            );
-                        }
-                    }
-                }
-                (id, result)
-            });
-        let request_context = self.take_request_context(&request_id).await;
-
-        match serialized_response {
-            Ok((id, result)) => {
-                let outgoing_message = OutgoingMessage::Response(OutgoingResponse { id, result });
-                self.send_outgoing_message_to_connection(
-                    request_context,
-                    connection_id,
-                    outgoing_message,
-                    "response",
-                )
-                .await;
+        match thread_originator {
+            Some(thread_originator) => {
+                self.analytics_events_client
+                    .track_response_with_thread_originator(
+                        connection_id.0,
+                        request_id_for_analytics,
+                        &response,
+                        thread_originator,
+                    );
             }
-            Err(err) => {
-                self.send_error_inner(
-                    request_context,
-                    request_id,
-                    internal_error(format!("failed to serialize response: {err}")),
-                )
-                .await;
+            None => {
+                self.analytics_events_client.track_response(
+                    connection_id.0,
+                    request_id_for_analytics,
+                    &response,
+                );
             }
         }
+        let response = Box::new(response);
+        let request_context = self.take_request_context(&request_id).await;
+        let outgoing_message = OutgoingMessage::Response(OutgoingResponse {
+            id: request_id.request_id,
+            result: response,
+        });
+        self.send_outgoing_message_to_connection(
+            request_context,
+            connection_id,
+            outgoing_message,
+            "response",
+        )
+        .await;
     }
 
     pub(crate) async fn send_server_notification(&self, notification: ServerNotification) {
+        if matches!(
+            notification,
+            ServerNotification::ThreadArchived(_) | ServerNotification::ThreadUnarchived(_)
+        ) {
+            self.analytics_events_client
+                .track_notification(&notification);
+        }
         self.send_server_notification_to_connections(&[], notification)
             .await;
     }
@@ -874,49 +603,41 @@ impl OutgoingMessageSender {
             targeted_connections = connection_ids.len(),
             "app-server event: {notification}"
         );
-        if self.notification_coalescing_enabled
-            && self
-                .notification_coalescer
-                .coalesce_or_send_later(self.sender.clone(), connection_ids, notification.clone())
+        let outgoing_message = timestamped_server_notification(notification);
+        if connection_ids.is_empty() {
+            if let Err(err) = self
+                .sender
+                .send(OutgoingEnvelope::Broadcast {
+                    message: outgoing_message,
+                })
                 .await
-        {
-            return;
-        }
-        if self.notification_coalescing_enabled {
-            let recipients = NotificationRecipients::from_connection_ids(connection_ids);
-            let _send_guard = self.notification_coalescer.send_lock.lock().await;
-            let pending_notifications = self
-                .notification_coalescer
-                .take_pending_for_recipients(recipients)
-                .await;
-
-            for pending_notification in pending_notifications {
-                send_outgoing_notification(
-                    &self.sender,
-                    pending_notification.connection_ids.as_slice(),
-                    pending_notification.notification,
-                )
-                .await;
+            {
+                warn!("failed to send server notification to client: {err:?}");
             }
-            send_outgoing_notification(&self.sender, connection_ids, notification).await;
             return;
         }
-        send_outgoing_notification(&self.sender, connection_ids, notification).await;
+        for connection_id in connection_ids {
+            if let Err(err) = self
+                .sender
+                .send(OutgoingEnvelope::ToConnection {
+                    connection_id: *connection_id,
+                    message: outgoing_message.clone(),
+                    write_complete_tx: None,
+                })
+                .await
+            {
+                warn!("failed to send server notification to client: {err:?}");
+            }
+        }
     }
 
     pub(crate) async fn send_server_notification_to_connection_and_wait(
         &self,
         connection_id: ConnectionId,
         notification: ServerNotification,
-    ) {
+    ) -> bool {
         tracing::trace!("app-server event: {notification}");
-        if self.notification_coalescing_enabled {
-            let connection_ids = [connection_id];
-            self.notification_coalescer
-                .flush_pending_for_recipients(&self.sender, &connection_ids)
-                .await;
-        }
-        let outgoing_message = OutgoingMessage::AppServerNotification(notification);
+        let outgoing_message = timestamped_server_notification(notification);
         let (write_complete_tx, write_complete_rx) = oneshot::channel();
         if let Err(err) = self
             .sender
@@ -929,7 +650,7 @@ impl OutgoingMessageSender {
         {
             warn!("failed to send server notification to client: {err:?}");
         }
-        let _ = write_complete_rx.await;
+        write_complete_rx.await.is_ok()
     }
 
     pub(crate) async fn send_error(
@@ -984,12 +705,6 @@ impl OutgoingMessageSender {
         message: OutgoingMessage,
         message_kind: &'static str,
     ) {
-        if self.notification_coalescing_enabled {
-            let connection_ids = [connection_id];
-            self.notification_coalescer
-                .flush_pending_for_recipients(&self.sender, &connection_ids)
-                .await;
-        }
         let send_fut = self.sender.send(OutgoingEnvelope::ToConnection {
             connection_id,
             message,
@@ -1016,6 +731,13 @@ fn now_unix_timestamp_ms() -> u64 {
         .unwrap_or_default()
 }
 
+fn timestamped_server_notification(notification: ServerNotification) -> OutgoingMessage {
+    OutgoingMessage::AppServerNotification(ServerNotificationEnvelope {
+        notification,
+        emitted_at_ms: Some(now_unix_timestamp_ms().try_into().unwrap_or_default()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1026,11 +748,9 @@ mod tests {
     use codex_app_server_protocol::ApplyPatchApprovalParams;
     use codex_app_server_protocol::AuthMode;
     use codex_app_server_protocol::CommandExecutionApprovalDecision;
-    use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
     use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
     use codex_app_server_protocol::ConfigWarningNotification;
     use codex_app_server_protocol::DynamicToolCallParams;
-    use codex_app_server_protocol::FileChangeOutputDeltaNotification;
     use codex_app_server_protocol::FileChangeRequestApprovalParams;
     use codex_app_server_protocol::GuardianWarningNotification;
     use codex_app_server_protocol::ModelRerouteReason;
@@ -1040,18 +760,8 @@ mod tests {
     use codex_app_server_protocol::RateLimitSnapshot;
     use codex_app_server_protocol::RateLimitWindow;
     use codex_app_server_protocol::ServerResponse;
-    use codex_app_server_protocol::ThreadTokenUsage;
-    use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
-    use codex_app_server_protocol::TokenUsageBreakdown;
     use codex_app_server_protocol::ToolRequestUserInputParams;
-    use codex_app_server_protocol::Turn;
-    use codex_app_server_protocol::TurnCompletedNotification;
-    use codex_app_server_protocol::TurnDiffUpdatedNotification;
     use codex_app_server_protocol::TurnModerationMetadataNotification;
-    use codex_app_server_protocol::TurnPlanStep;
-    use codex_app_server_protocol::TurnPlanStepStatus;
-    use codex_app_server_protocol::TurnPlanUpdatedNotification;
-    use codex_app_server_protocol::TurnStatus;
     use codex_protocol::ThreadId;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -1068,9 +778,14 @@ mod tests {
                 login_id: Some(Uuid::nil().to_string()),
                 success: true,
                 error: None,
+                onboarding_entrypoint: None,
             });
 
-        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
+        let jsonrpc_notification =
+            OutgoingMessage::AppServerNotification(ServerNotificationEnvelope {
+                notification,
+                emitted_at_ms: Some(1_234),
+            });
         assert_eq!(
             json!({
                 "method": "account/login/completed",
@@ -1078,7 +793,9 @@ mod tests {
                     "loginId": Uuid::nil().to_string(),
                     "success": true,
                     "error": null,
+                    "onboardingEntrypoint": null,
                 },
+                "emittedAtMs": 1_234,
             }),
             serde_json::to_value(jsonrpc_notification)
                 .expect("ensure the strum macros serialize the method field correctly"),
@@ -1093,9 +810,9 @@ mod tests {
                 login_id: Some(Uuid::nil().to_string()),
                 success: true,
                 error: None,
+                onboarding_entrypoint: None,
             });
 
-        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
         assert_eq!(
             json!({
                 "method": "account/login/completed",
@@ -1103,9 +820,10 @@ mod tests {
                     "loginId": Uuid::nil().to_string(),
                     "success": true,
                     "error": null,
+                    "onboardingEntrypoint": null,
                 },
             }),
-            serde_json::to_value(jsonrpc_notification)
+            serde_json::to_value(notification)
                 .expect("ensure the notification serializes correctly"),
             "ensure the notification serializes correctly"
         );
@@ -1126,12 +844,12 @@ mod tests {
                     secondary: None,
                     credits: None,
                     individual_limit: None,
-                    plan_type: Some(PlanType::Plus),
+                    spend_control_reached: None,
+                    plan_type: Some(PlanType::SelfServeBusinessProLite),
                     rate_limit_reached_type: None,
                 },
             });
 
-        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
         assert_eq!(
             json!({
                 "method": "account/rateLimits/updated",
@@ -1147,12 +865,13 @@ mod tests {
                         "secondary": null,
                         "credits": null,
                         "individualLimit": null,
-                        "planType": "plus",
+                        "spendControlReached": null,
+                        "planType": "self_serve_business_prolite",
                         "rateLimitReachedType": null
                     }
                 },
             }),
-            serde_json::to_value(jsonrpc_notification)
+            serde_json::to_value(notification)
                 .expect("ensure the notification serializes correctly"),
             "ensure the notification serializes correctly"
         );
@@ -1161,20 +880,19 @@ mod tests {
     #[test]
     fn verify_account_updated_notification_serialization() {
         let notification = ServerNotification::AccountUpdated(AccountUpdatedNotification {
-            auth_mode: Some(AuthMode::ApiKey),
-            plan_type: None,
+            auth_mode: Some(AuthMode::Chatgpt),
+            plan_type: Some(PlanType::SelfServeBusinessProLite),
         });
 
-        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
         assert_eq!(
             json!({
                 "method": "account/updated",
                 "params": {
-                    "authMode": "apikey",
-                    "planType": null
+                    "authMode": "chatgpt",
+                    "planType": "self_serve_business_prolite"
                 },
             }),
-            serde_json::to_value(jsonrpc_notification)
+            serde_json::to_value(notification)
                 .expect("ensure the notification serializes correctly"),
             "ensure the notification serializes correctly"
         );
@@ -1189,7 +907,6 @@ mod tests {
             range: None,
         });
 
-        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
         assert_eq!(
             json!( {
                 "method": "configWarning",
@@ -1198,7 +915,7 @@ mod tests {
                     "details": "error loading config: bad config",
                 },
             }),
-            serde_json::to_value(jsonrpc_notification)
+            serde_json::to_value(notification)
                 .expect("ensure the notification serializes correctly"),
             "ensure the notification serializes correctly"
         );
@@ -1211,7 +928,6 @@ mod tests {
             message: "Automatic approval review denied the requested action.".to_string(),
         });
 
-        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
         assert_eq!(
             json!({
                 "method": "guardianWarning",
@@ -1220,7 +936,7 @@ mod tests {
                     "message": "Automatic approval review denied the requested action.",
                 },
             }),
-            serde_json::to_value(jsonrpc_notification)
+            serde_json::to_value(notification)
                 .expect("ensure the notification serializes correctly"),
             "ensure the notification serializes correctly"
         );
@@ -1236,7 +952,6 @@ mod tests {
             reason: ModelRerouteReason::HighRiskCyberActivity,
         });
 
-        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
         assert_eq!(
             json!({
                 "method": "model/rerouted",
@@ -1248,7 +963,7 @@ mod tests {
                     "reason": "highRiskCyberActivity",
                 },
             }),
-            serde_json::to_value(jsonrpc_notification)
+            serde_json::to_value(notification)
                 .expect("ensure the notification serializes correctly"),
             "ensure the notification serializes correctly"
         );
@@ -1262,7 +977,6 @@ mod tests {
             verifications: vec![ModelVerification::TrustedAccessForCyber],
         });
 
-        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
         assert_eq!(
             json!({
                 "method": "model/verification",
@@ -1272,7 +986,7 @@ mod tests {
                     "verifications": ["trustedAccessForCyber"],
                 },
             }),
-            serde_json::to_value(jsonrpc_notification)
+            serde_json::to_value(notification)
                 .expect("ensure the notification serializes correctly"),
             "ensure the notification serializes correctly"
         );
@@ -1287,7 +1001,6 @@ mod tests {
                 metadata: json!({"presentation": "inline"}),
             });
 
-        let jsonrpc_notification = OutgoingMessage::AppServerNotification(notification);
         assert_eq!(
             json!({
                 "method": "turn/moderationMetadata",
@@ -1297,7 +1010,7 @@ mod tests {
                     "metadata": {"presentation": "inline"},
                 },
             }),
-            serde_json::to_value(jsonrpc_notification)
+            serde_json::to_value(notification)
                 .expect("ensure the notification serializes correctly"),
             "ensure the notification serializes correctly"
         );
@@ -1308,6 +1021,7 @@ mod tests {
         let request = ServerRequest::CommandExecutionRequestApproval {
             request_id: RequestId::Integer(7),
             params: CommandExecutionRequestApprovalParams {
+                kind: Default::default(),
                 thread_id: "thread-1".to_string(),
                 turn_id: "turn-1".to_string(),
                 item_id: "item-1".to_string(),
@@ -1380,7 +1094,10 @@ mod tests {
                     panic!("expected response message");
                 };
                 assert_eq!(response.id, request_id.request_id);
-                assert_eq!(response.result, json!({}));
+                assert_eq!(
+                    serde_json::to_value(response.result).expect("result should serialize"),
+                    json!({})
+                );
             }
             other => panic!("expected targeted response envelope, got: {other:?}"),
         }
@@ -1453,425 +1170,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notification_coalescing_default_sends_deltas_immediately() {
-        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
+    async fn send_server_notification_to_connections_reuses_timestamp() {
+        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(2);
         let outgoing =
             OutgoingMessageSender::new(tx, codex_analytics::AnalyticsEventsClient::disabled());
 
         outgoing
-            .send_server_notification(ServerNotification::CommandExecutionOutputDelta(
-                CommandExecutionOutputDeltaNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "item-1".to_string(),
-                    delta: "hello".to_string(),
-                },
-            ))
-            .await;
-        outgoing
-            .send_server_notification(ServerNotification::CommandExecutionOutputDelta(
-                CommandExecutionOutputDeltaNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "item-1".to_string(),
-                    delta: " world".to_string(),
-                },
-            ))
-            .await;
-
-        let first = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("first delta should be sent immediately")
-            .expect("channel should contain the first delta");
-        let second = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("second delta should be sent immediately")
-            .expect("channel should contain the second delta");
-
-        assert!(matches!(
-            first,
-            OutgoingEnvelope::Broadcast {
-                message: OutgoingMessage::AppServerNotification(
-                    ServerNotification::CommandExecutionOutputDelta(_)
-                )
-            }
-        ));
-        assert!(matches!(
-            second,
-            OutgoingEnvelope::Broadcast {
-                message: OutgoingMessage::AppServerNotification(
-                    ServerNotification::CommandExecutionOutputDelta(_)
-                )
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn notification_coalescing_merges_command_output_deltas() {
-        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
-        let outgoing = OutgoingMessageSender::new_with_notification_coalescing(
-            tx,
-            NotificationCoalescing::Enabled,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        );
-
-        outgoing
-            .send_server_notification(ServerNotification::CommandExecutionOutputDelta(
-                CommandExecutionOutputDeltaNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "item-1".to_string(),
-                    delta: "hello".to_string(),
-                },
-            ))
-            .await;
-        outgoing
-            .send_server_notification(ServerNotification::CommandExecutionOutputDelta(
-                CommandExecutionOutputDeltaNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "item-1".to_string(),
-                    delta: " world".to_string(),
-                },
-            ))
-            .await;
-
-        let early = timeout(Duration::from_millis(25), rx.recv()).await;
-        assert!(
-            early.is_err(),
-            "coalesced delta should wait for the batch window"
-        );
-
-        let envelope = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("merged delta should be sent after the batch window")
-            .expect("channel should contain the merged delta");
-        let OutgoingEnvelope::Broadcast {
-            message:
-                OutgoingMessage::AppServerNotification(ServerNotification::CommandExecutionOutputDelta(
-                    notification,
-                )),
-        } = envelope
-        else {
-            panic!("expected merged command output delta envelope");
-        };
-        assert_eq!(notification.delta, "hello world");
-
-        let extra = timeout(Duration::from_millis(25), rx.recv()).await;
-        assert!(
-            extra.is_err(),
-            "merged deltas should produce one outgoing message"
-        );
-    }
-
-    #[tokio::test]
-    async fn notification_coalescing_flushes_pending_delta_before_completion() {
-        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
-        let outgoing = OutgoingMessageSender::new_with_notification_coalescing(
-            tx,
-            NotificationCoalescing::Enabled,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        );
-
-        outgoing
-            .send_server_notification(ServerNotification::CommandExecutionOutputDelta(
-                CommandExecutionOutputDeltaNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "item-1".to_string(),
-                    delta: "last output".to_string(),
-                },
-            ))
-            .await;
-        outgoing
-            .send_server_notification(ServerNotification::TurnCompleted(
-                TurnCompletedNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn: completed_turn("turn-1"),
-                },
-            ))
-            .await;
-
-        let first = recv_broadcast_notification(&mut rx).await;
-        let ServerNotification::CommandExecutionOutputDelta(delta) = first else {
-            panic!("expected pending output delta to flush first");
-        };
-        assert_eq!(delta.delta, "last output");
-
-        let second = recv_broadcast_notification(&mut rx).await;
-        assert!(matches!(second, ServerNotification::TurnCompleted(_)));
-    }
-
-    #[tokio::test]
-    async fn notification_coalescing_flushes_pending_targeted_delta_before_error() {
-        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
-        let outgoing = OutgoingMessageSender::new_with_notification_coalescing(
-            tx,
-            NotificationCoalescing::Enabled,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        );
-        let connection_id = ConnectionId(7);
-
-        outgoing
             .send_server_notification_to_connections(
-                &[connection_id],
-                ServerNotification::CommandExecutionOutputDelta(
-                    CommandExecutionOutputDeltaNotification {
-                        thread_id: "thread-1".to_string(),
-                        turn_id: "turn-1".to_string(),
-                        item_id: "item-1".to_string(),
-                        delta: "targeted output".to_string(),
-                    },
-                ),
-            )
-            .await;
-        outgoing
-            .send_error(
-                ConnectionRequestId {
-                    connection_id,
-                    request_id: RequestId::Integer(8),
-                },
-                JSONRPCErrorError {
-                    code: INTERNAL_ERROR_CODE,
-                    message: "boom".to_string(),
-                    data: None,
-                },
+                &[ConnectionId(1), ConnectionId(2)],
+                ServerNotification::ConfigWarning(ConfigWarningNotification {
+                    summary: "test".to_string(),
+                    details: None,
+                    path: None,
+                    range: None,
+                }),
             )
             .await;
 
-        let first = recv_targeted_message(&mut rx, connection_id).await;
-        let OutgoingMessage::AppServerNotification(
-            ServerNotification::CommandExecutionOutputDelta(delta),
-        ) = first
-        else {
-            panic!("expected pending targeted output delta to flush first");
-        };
-        assert_eq!(delta.delta, "targeted output");
+        let timestamps = [
+            rx.recv()
+                .await
+                .expect("first connection should receive notification"),
+            rx.recv()
+                .await
+                .expect("second connection should receive notification"),
+        ]
+        .map(|envelope| match envelope {
+            OutgoingEnvelope::ToConnection {
+                message: OutgoingMessage::AppServerNotification(envelope),
+                ..
+            } => envelope.emitted_at_ms,
+            _ => panic!("expected targeted server notification"),
+        });
 
-        let second = recv_targeted_message(&mut rx, connection_id).await;
-        assert!(matches!(second, OutgoingMessage::Error(_)));
-    }
-
-    #[tokio::test]
-    async fn notification_coalescing_merges_each_supported_notification_kind() {
-        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(8);
-        let outgoing = OutgoingMessageSender::new_with_notification_coalescing(
-            tx,
-            NotificationCoalescing::Enabled,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        );
-
-        outgoing
-            .send_server_notification(ServerNotification::FileChangeOutputDelta(
-                FileChangeOutputDeltaNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "patch-1".to_string(),
-                    delta: "diff".to_string(),
-                },
-            ))
-            .await;
-        outgoing
-            .send_server_notification(ServerNotification::FileChangeOutputDelta(
-                FileChangeOutputDeltaNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: "patch-1".to_string(),
-                    delta: " chunk".to_string(),
-                },
-            ))
-            .await;
-        outgoing
-            .send_server_notification(ServerNotification::ThreadTokenUsageUpdated(
-                ThreadTokenUsageUpdatedNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    token_usage: thread_token_usage(/*total_tokens*/ 1),
-                },
-            ))
-            .await;
-        outgoing
-            .send_server_notification(ServerNotification::ThreadTokenUsageUpdated(
-                ThreadTokenUsageUpdatedNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    token_usage: thread_token_usage(/*total_tokens*/ 2),
-                },
-            ))
-            .await;
-        outgoing
-            .send_server_notification(ServerNotification::TurnDiffUpdated(
-                TurnDiffUpdatedNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    diff: "old diff".to_string(),
-                },
-            ))
-            .await;
-        outgoing
-            .send_server_notification(ServerNotification::TurnDiffUpdated(
-                TurnDiffUpdatedNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    diff: "new diff".to_string(),
-                },
-            ))
-            .await;
-        outgoing
-            .send_server_notification(ServerNotification::TurnPlanUpdated(
-                TurnPlanUpdatedNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    explanation: Some("old plan".to_string()),
-                    plan: vec![TurnPlanStep {
-                        step: "step".to_string(),
-                        status: TurnPlanStepStatus::Pending,
-                    }],
-                },
-            ))
-            .await;
-        outgoing
-            .send_server_notification(ServerNotification::TurnPlanUpdated(
-                TurnPlanUpdatedNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    explanation: Some("new plan".to_string()),
-                    plan: vec![TurnPlanStep {
-                        step: "step".to_string(),
-                        status: TurnPlanStepStatus::Completed,
-                    }],
-                },
-            ))
-            .await;
-
-        let notifications = recv_broadcast_notifications(&mut rx, /*count*/ 4).await;
-
-        let file_delta = notifications
-            .iter()
-            .find_map(|notification| match notification {
-                ServerNotification::FileChangeOutputDelta(notification) => Some(notification),
-                _ => None,
-            });
-        assert_eq!(
-            file_delta.expect("file delta should be emitted").delta,
-            "diff chunk"
-        );
-
-        let token_usage = notifications
-            .iter()
-            .find_map(|notification| match notification {
-                ServerNotification::ThreadTokenUsageUpdated(notification) => {
-                    Some(&notification.token_usage)
-                }
-                _ => None,
-            });
-        assert_eq!(
-            token_usage
-                .expect("token usage should be emitted")
-                .total
-                .total_tokens,
-            2
-        );
-
-        let diff = notifications
-            .iter()
-            .find_map(|notification| match notification {
-                ServerNotification::TurnDiffUpdated(notification) => {
-                    Some(notification.diff.as_str())
-                }
-                _ => None,
-            });
-        assert_eq!(diff, Some("new diff"));
-
-        let plan = notifications
-            .iter()
-            .find_map(|notification| match notification {
-                ServerNotification::TurnPlanUpdated(notification) => Some(notification),
-                _ => None,
-            });
-        let plan = plan.expect("plan should be emitted");
-        assert_eq!(plan.explanation.as_deref(), Some("new plan"));
-        assert_eq!(plan.plan[0].status, TurnPlanStepStatus::Completed);
-
-        let extra = timeout(Duration::from_millis(25), rx.recv()).await;
-        assert!(
-            extra.is_err(),
-            "coalescing should emit only one notification per key"
-        );
-    }
-
-    fn completed_turn(id: &str) -> Turn {
-        Turn {
-            id: id.to_string(),
-            items: Vec::new(),
-            status: TurnStatus::Completed,
-            error: None,
-            started_at: None,
-            completed_at: None,
-            duration_ms: None,
-        }
-    }
-
-    fn thread_token_usage(total_tokens: i64) -> ThreadTokenUsage {
-        let breakdown = TokenUsageBreakdown {
-            total_tokens,
-            input_tokens: total_tokens,
-            cached_input_tokens: 0,
-            output_tokens: 0,
-            reasoning_output_tokens: 0,
-        };
-        ThreadTokenUsage {
-            total: breakdown.clone(),
-            last: breakdown,
-            model_context_window: Some(100),
-        }
-    }
-
-    async fn recv_broadcast_notifications(
-        rx: &mut mpsc::Receiver<OutgoingEnvelope>,
-        count: usize,
-    ) -> Vec<ServerNotification> {
-        let mut notifications = Vec::with_capacity(count);
-        for _ in 0..count {
-            notifications.push(recv_broadcast_notification(rx).await);
-        }
-        notifications
-    }
-
-    async fn recv_broadcast_notification(
-        rx: &mut mpsc::Receiver<OutgoingEnvelope>,
-    ) -> ServerNotification {
-        let envelope = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("notification should arrive before timeout")
-            .expect("channel should contain an envelope");
-        let OutgoingEnvelope::Broadcast {
-            message: OutgoingMessage::AppServerNotification(notification),
-        } = envelope
-        else {
-            panic!("expected broadcast app-server notification envelope");
-        };
-        notification
-    }
-
-    async fn recv_targeted_message(
-        rx: &mut mpsc::Receiver<OutgoingEnvelope>,
-        expected_connection_id: ConnectionId,
-    ) -> OutgoingMessage {
-        let envelope = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("message should arrive before timeout")
-            .expect("channel should contain an envelope");
-        let OutgoingEnvelope::ToConnection {
-            connection_id,
-            message,
-            ..
-        } = envelope
-        else {
-            panic!("expected targeted envelope");
-        };
-        assert_eq!(connection_id, expected_connection_id);
-        message
+        assert_eq!(timestamps[0], timestamps[1]);
     }
 
     #[tokio::test]
@@ -1907,7 +1239,14 @@ mod tests {
             panic!("expected targeted server notification envelope");
         };
         assert_eq!(connection_id, ConnectionId(42));
-        assert!(matches!(message, OutgoingMessage::AppServerNotification(_)));
+        let OutgoingMessage::AppServerNotification(envelope) = message else {
+            panic!("expected app-server notification");
+        };
+        assert!(
+            envelope
+                .emitted_at_ms
+                .is_some_and(|emitted_at_ms| emitted_at_ms > 0)
+        );
         write_complete_tx
             .expect("write completion sender should be attached")
             .send(())
@@ -2018,6 +1357,7 @@ mod tests {
                     turn_id: "turn-1".to_string(),
                     item_id: "call-1".to_string(),
                     questions: vec![],
+                    is_blocking: true,
                     auto_resolution_ms: None,
                 },
             ))
@@ -2081,6 +1421,7 @@ mod tests {
                     turn_id: "turn-1".to_string(),
                     item_id: "call-1".to_string(),
                     questions: vec![],
+                    is_blocking: true,
                     auto_resolution_ms: None,
                 },
             ))

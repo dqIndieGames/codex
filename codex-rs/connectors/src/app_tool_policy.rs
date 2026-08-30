@@ -4,6 +4,8 @@ use codex_config::types::AppToolApproval;
 use codex_config::types::AppsConfigToml;
 use serde::Deserialize;
 
+use crate::AppInfo;
+
 /// The effective enablement and approval policy for one app tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppToolPolicy {
@@ -53,6 +55,29 @@ impl<'a> AppToolPolicyEvaluator<'a> {
             input.tool_name,
         );
         app_tool_policy_from_apps_config(self.apps_config.as_ref(), input, managed_approval)
+    }
+
+    /// Returns the effective local and managed enablement for one connector.
+    pub fn app_enabled(&self, connector_id: &str) -> bool {
+        self.apps_config
+            .as_ref()
+            .map(|apps_config| app_is_enabled(apps_config, Some(connector_id)))
+            .unwrap_or(true)
+    }
+
+    /// Applies app policy without overriding source state for unconfigured apps.
+    pub fn apply_app_enabled_state(&self, mut apps: Vec<AppInfo>) -> Vec<AppInfo> {
+        let Some(apps_config) = self.apps_config.as_ref() else {
+            return apps;
+        };
+
+        for app in &mut apps {
+            if apps_config.default.is_some() || apps_config.apps.contains_key(app.id.as_str()) {
+                app.is_enabled = self.app_enabled(app.id.as_str());
+            }
+        }
+
+        apps
     }
 
     fn from_parts(

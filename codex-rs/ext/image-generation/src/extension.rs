@@ -1,7 +1,4 @@
 use std::sync::Arc;
-use std::sync::RwLock;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 
 use codex_core::config::Config;
 use codex_extension_api::ConfigContributor;
@@ -9,11 +6,13 @@ use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadLifecycleContributor;
+use codex_extension_api::ThreadOriginator;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolCall;
 use codex_extension_api::ToolContributor;
 use codex_extension_api::ToolExecutor;
 use codex_login::AuthManager;
+use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
@@ -29,56 +28,10 @@ struct ImageGenerationExtension {
 type SaveRootResolver = dyn Fn(&Config) -> Option<AbsolutePathBuf> + Send + Sync;
 
 #[derive(Clone)]
-pub(crate) struct ImageGenerationExtensionConfig {
+struct ImageGenerationExtensionConfig {
     available: bool,
-    pub(crate) provider: ModelProviderInfo,
-    pub(crate) save_root: Option<AbsolutePathBuf>,
-}
-
-pub(crate) struct ImageGenerationExtensionRuntime {
-    auth_manager: Arc<AuthManager>,
-    state: RwLock<ImageGenerationExtensionConfig>,
-    generation: AtomicU64,
-}
-
-impl ImageGenerationExtensionRuntime {
-    fn new(auth_manager: Arc<AuthManager>, config: ImageGenerationExtensionConfig) -> Self {
-        Self {
-            auth_manager,
-            state: RwLock::new(config),
-            generation: AtomicU64::new(0),
-        }
-    }
-
-    fn update(&self, config: ImageGenerationExtensionConfig) {
-        *self
-            .state
-            .write()
-            .expect("image generation runtime lock poisoned") = config;
-        self.generation.fetch_add(1, Ordering::AcqRel);
-    }
-
-    pub(crate) fn snapshot(&self) -> ImageGenerationExtensionRuntimeSnapshot {
-        ImageGenerationExtensionRuntimeSnapshot {
-            config: self
-                .state
-                .read()
-                .expect("image generation runtime lock poisoned")
-                .clone(),
-            generation: self.generation.load(Ordering::Acquire),
-            auth_manager: self.auth_manager.clone(),
-        }
-    }
-
-    pub(crate) fn matches_generation(&self, generation: u64) -> bool {
-        self.generation.load(Ordering::Acquire) == generation
-    }
-}
-
-pub(crate) struct ImageGenerationExtensionRuntimeSnapshot {
-    pub(crate) config: ImageGenerationExtensionConfig,
-    pub(crate) generation: u64,
-    pub(crate) auth_manager: Arc<AuthManager>,
+    provider: ModelProviderInfo,
+    save_root: Option<AbsolutePathBuf>,
 }
 
 impl ImageGenerationExtensionConfig {
@@ -103,12 +56,9 @@ impl ThreadLifecycleContributor<Config> for ImageGenerationExtension {
         Box::pin(async move {
             input
                 .thread_store
-                .insert(ImageGenerationExtensionRuntime::new(
-                    self.auth_manager.clone(),
-                    ImageGenerationExtensionConfig::from_config(
-                        input.config,
-                        self.resolve_save_root.as_ref(),
-                    ),
+                .insert(ImageGenerationExtensionConfig::from_config(
+                    input.config,
+                    self.resolve_save_root.as_ref(),
                 ));
         })
     }
@@ -123,20 +73,10 @@ impl ConfigContributor<Config> for ImageGenerationExtension {
         _previous_config: &Config,
         new_config: &Config,
     ) {
-        thread_store
-            .get_or_init(|| {
-                ImageGenerationExtensionRuntime::new(
-                    self.auth_manager.clone(),
-                    ImageGenerationExtensionConfig::from_config(
-                        new_config,
-                        self.resolve_save_root.as_ref(),
-                    ),
-                )
-            })
-            .update(ImageGenerationExtensionConfig::from_config(
-                new_config,
-                self.resolve_save_root.as_ref(),
-            ));
+        thread_store.insert(ImageGenerationExtensionConfig::from_config(
+            new_config,
+            self.resolve_save_root.as_ref(),
+        ));
     }
 }
 
@@ -146,18 +86,21 @@ impl ToolContributor for ImageGenerationExtension {
         &self,
         _session_store: &ExtensionData,
         thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
-        let Some(runtime) = thread_store.get::<ImageGenerationExtensionRuntime>() else {
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+        let Some(config) = thread_store.get::<ImageGenerationExtensionConfig>() else {
             return Vec::new();
         };
-        let snapshot = runtime.snapshot();
-        let config = snapshot.config;
         if !config.available {
             return Vec::new();
         }
 
         vec![Arc::new(ImageGenerationTool::new(
-            CodexImagesBackend::new(runtime),
+            CodexImagesBackend::new(
+                create_model_provider(config.provider.clone(), Some(self.auth_manager.clone())),
+                thread_store
+                    .get::<ThreadOriginator>()
+                    .map(|originator| originator.0.clone()),
+            ),
             config.save_root.clone(),
             thread_store.level_id().to_string(),
         ))]

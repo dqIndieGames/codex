@@ -189,6 +189,61 @@ fn app_enablement_uses_defaults_and_per_app_overrides() {
         ],
         [true, false, false]
     );
+
+    let evaluator = AppToolPolicyEvaluator::from_parts(
+        Some(apps_config),
+        /*requirements_apps_config*/ None,
+    );
+    assert_eq!(
+        evaluator.apply_app_enabled_state(vec![
+            app("calendar", /*enabled*/ false),
+            app("drive", /*enabled*/ true),
+        ]),
+        vec![
+            app("calendar", /*enabled*/ true),
+            app("drive", /*enabled*/ false),
+        ]
+    );
+}
+
+#[test]
+fn app_enablement_preserves_source_state_and_honors_local_and_managed_overrides() {
+    let apps_config = AppsConfigToml {
+        default: None,
+        apps: HashMap::from([
+            (
+                "calendar".to_string(),
+                AppConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "drive".to_string(),
+                AppConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+            ),
+        ]),
+    };
+    let requirements = app_enabled_requirement("drive", /*enabled*/ false);
+    let evaluator = AppToolPolicyEvaluator::from_parts(Some(apps_config), Some(&requirements));
+
+    assert_eq!(
+        evaluator.apply_app_enabled_state(vec![
+            app("calendar", /*enabled*/ false),
+            app("drive", /*enabled*/ true),
+            app("slack", /*enabled*/ false),
+            app("gmail", /*enabled*/ true),
+        ]),
+        vec![
+            app("calendar", /*enabled*/ true),
+            app("drive", /*enabled*/ false),
+            app("slack", /*enabled*/ false),
+            app("gmail", /*enabled*/ true),
+        ]
+    );
 }
 
 #[test]
@@ -657,6 +712,26 @@ fn input<'a>(tool_name: &'a str, tool_title: Option<&'a str>) -> AppToolPolicyIn
     }
 }
 
+fn app(id: &str, enabled: bool) -> AppInfo {
+    AppInfo {
+        id: id.to_string(),
+        name: id.to_string(),
+        description: None,
+        logo_url: None,
+        logo_url_dark: None,
+        icon_assets: None,
+        icon_dark_assets: None,
+        distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        install_url: None,
+        is_accessible: true,
+        is_enabled: enabled,
+        plugin_display_names: Vec::new(),
+    }
+}
+
 fn policy_from_apps_config(
     apps_config: Option<&AppsConfigToml>,
     connector_id: Option<&str>,
@@ -712,7 +787,9 @@ fn policy_from_config_parts(
         let config_toml_path =
             AbsolutePathBuf::try_from(std::env::temp_dir().join(CONFIG_TOML_FILE))
                 .expect("absolute config path");
-        config_layer_stack.with_user_config(&config_toml_path, user_config)
+        config_layer_stack
+            .with_user_config(&config_toml_path, user_config)
+            .expect("apps user config should be valid")
     } else {
         config_layer_stack
     };

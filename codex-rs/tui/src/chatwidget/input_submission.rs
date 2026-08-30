@@ -3,6 +3,18 @@
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
+        self.bottom_pane.set_task_mentions_enabled(enabled);
+    }
+
+    pub(crate) fn on_task_search_result(
+        &mut self,
+        query: &str,
+        matches: Vec<crate::task_mentions::TaskMention>,
+    ) {
+        self.bottom_pane.on_task_search_result(query, matches);
+    }
+
     pub(super) fn user_message_from_submission(
         &mut self,
         text: String,
@@ -24,12 +36,10 @@ impl ChatWidget {
     fn submit_shell_command(&mut self, command: &str) -> QueueDrain {
         let cmd = command.trim();
         if cmd.is_empty() {
-            self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                history_cell::new_info_event(
-                    USER_SHELL_COMMAND_HELP_TITLE.to_string(),
-                    Some(USER_SHELL_COMMAND_HELP_HINT.to_string()),
-                ),
-            )));
+            self.add_to_history(history_cell::new_info_event(
+                USER_SHELL_COMMAND_HELP_TITLE.to_string(),
+                Some(USER_SHELL_COMMAND_HELP_HINT.to_string()),
+            ));
             QueueDrain::Continue
         } else {
             self.submit_op(AppCommand::run_user_shell_command(cmd.to_string()));
@@ -101,6 +111,9 @@ impl ChatWidget {
         history_record: UserMessageHistoryRecord,
         shell_escape_policy: ShellEscapePolicy,
     ) -> (bool, Option<AppCommand>) {
+        if self.misalignment_policy_violation {
+            return (false, None);
+        }
         if !self.is_session_configured() {
             tracing::warn!("cannot submit user message before session is configured; queueing");
             self.input_queue
@@ -142,8 +155,12 @@ impl ChatWidget {
             local_images,
             remote_image_urls,
             text_elements,
-            mention_bindings,
+            mut mention_bindings,
         } = user_message;
+        if !self.bottom_pane.task_mentions_enabled() {
+            mention_bindings
+                .retain(|binding| crate::task_mentions::valid_thread_path(&binding.path).is_none());
+        }
 
         let render_in_history = !self.turn_lifecycle.agent_turn_running;
         let mut items: Vec<UserInput> = Vec::new();
@@ -203,14 +220,12 @@ impl ChatWidget {
                     .strip_prefix("skill://")
                     .unwrap_or(binding.path.as_str());
                 let path = Path::new(path);
-                if let Some(skill) = skills
-                    .iter()
-                    .find(|skill| skill.path_to_skills_md.as_path() == path)
-                    && selected_skill_paths.insert(skill.path_to_skills_md.clone())
+                if let Some(skill) = skills.iter().find(|skill| skill.path.as_path() == path)
+                    && selected_skill_paths.insert(skill.path.clone())
                 {
                     items.push(UserInput::Skill {
                         name: skill.name.clone(),
-                        path: skill.path_to_skills_md.to_path_buf(),
+                        path: skill.path.to_path_buf(),
                     });
                 }
             }
@@ -218,13 +233,13 @@ impl ChatWidget {
             let skill_mentions = find_skill_mentions_with_tool_mentions(&mentions, skills);
             for skill in skill_mentions {
                 if bound_names.contains(skill.name.as_str())
-                    || !selected_skill_paths.insert(skill.path_to_skills_md.clone())
+                    || !selected_skill_paths.insert(skill.path.clone())
                 {
                     continue;
                 }
                 items.push(UserInput::Skill {
                     name: skill.name.clone(),
-                    path: skill.path_to_skills_md.to_path_buf(),
+                    path: skill.path.to_path_buf(),
                 });
             }
         }
@@ -311,6 +326,7 @@ impl ChatWidget {
         }
 
         self.maybe_apply_ide_context(&mut items);
+        crate::task_mentions::apply_task_references(&mut items, &mention_bindings, self.thread_id);
 
         let collaboration_mode = if self.collaboration_modes_enabled() {
             self.active_collaboration_mask
@@ -350,6 +366,30 @@ impl ChatWidget {
             collaboration_mode,
             personality,
         );
+        let submitted_message = UserMessage {
+            text,
+            local_images,
+            remote_image_urls,
+            text_elements,
+            mention_bindings,
+        };
+
+        // App-event submissions are handled serially, and turn/start can wait on remote work.
+        // Queue the optimistic prompt first so the user's input is visible while that happens.
+        // Direct submissions do not share that queue, so keep their existing failure behavior.
+        if render_in_history {
+            // Do not let a transient manual-recap progress cell become permanent terminal
+            // scrollback when the new user prompt flushes the active history cell.
+            self.clear_recap_loading();
+        }
+        let render_before_submit =
+            render_in_history && matches!(&self.codex_op_target, CodexOpTarget::AppEvent);
+        if render_before_submit {
+            self.on_user_message_display(user_message_display_for_history(
+                submitted_message.clone(),
+                &history_record,
+            ));
+        }
 
         if !self.submit_op(op.clone()) {
             return (false, None);
@@ -360,7 +400,8 @@ impl ChatWidget {
 
         // Persist the submitted text to cross-session message history. Mentions are encoded into
         // placeholder syntax so recall can reconstruct the mention bindings in a future session.
-        let encoded_mentions = mention_bindings
+        let encoded_mentions = submitted_message
+            .mention_bindings
             .iter()
             .map(|binding| LinkedMention {
                 sigil: binding.sigil,
@@ -368,19 +409,26 @@ impl ChatWidget {
                 path: binding.path.clone(),
             })
             .collect::<Vec<_>>();
-        let history_text = match &history_record {
-            UserMessageHistoryRecord::UserMessageText if !text.is_empty() => {
-                Some(encode_history_mentions(&text, &encoded_mentions))
+        let history = match &history_record {
+            UserMessageHistoryRecord::UserMessageText if !submitted_message.text.is_empty() => {
+                Some((
+                    &submitted_message.text,
+                    submitted_message.text_elements.as_slice(),
+                ))
             }
             UserMessageHistoryRecord::Override(history) if !history.text.is_empty() => {
-                Some(encode_history_mentions(&history.text, &encoded_mentions))
+                Some((&history.text, history.text_elements.as_slice()))
             }
             UserMessageHistoryRecord::UserMessageText | UserMessageHistoryRecord::Override(_) => {
                 None
             }
         };
-        if let Some(history_text) = history_text {
-            self.append_message_history_entry(history_text);
+        if let Some((text, elements)) = history {
+            self.append_message_history_entry(encode_history_mentions_at_elements(
+                text,
+                &encoded_mentions,
+                elements,
+            ));
         }
 
         if let Some(pending_steer) = pending_steer {
@@ -390,30 +438,13 @@ impl ChatWidget {
         }
 
         if render_in_history {
-            self.record_cancel_edit_candidate(UserMessage {
-                text: text.clone(),
-                local_images: local_images.clone(),
-                remote_image_urls: remote_image_urls.clone(),
-                text_elements: text_elements.clone(),
-                mention_bindings: mention_bindings.clone(),
-            });
-        }
-
-        // Show replayable user content in conversation history.
-        let display_user_message = render_in_history.then(|| {
-            user_message_display_for_history(
-                UserMessage {
-                    text,
-                    local_images,
-                    remote_image_urls,
-                    text_elements,
-                    mention_bindings,
-                },
-                &history_record,
-            )
-        });
-        if let Some(display) = display_user_message {
-            self.on_user_message_display(display);
+            self.safety_buffering_prompt = Some(submitted_message.clone());
+            if !render_before_submit {
+                self.on_user_message_display(user_message_display_for_history(
+                    submitted_message,
+                    &history_record,
+                ));
+            }
         }
 
         self.transcript.needs_final_message_separator = false;

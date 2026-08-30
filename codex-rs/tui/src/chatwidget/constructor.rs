@@ -36,10 +36,8 @@ impl ChatWidget {
         let mut config = config;
         config.model = model.clone();
         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
-        let mut rng = rand::rng();
-        let placeholder = PLACEHOLDERS[rng.random_range(0..PLACEHOLDERS.len())].to_string();
-        let side_placeholder =
-            SIDE_PLACEHOLDERS[rng.random_range(0..SIDE_PLACEHOLDERS.len())].to_string();
+        let placeholder = PLACEHOLDER.to_string();
+        let side_placeholder = SIDE_PLACEHOLDER.to_string();
 
         let model_override = model.as_deref();
         let model_for_header = model
@@ -82,14 +80,19 @@ impl ChatWidget {
             .map(|keymap| keymap.chat.clone())
             .unwrap_or_else(|| default_keymap.chat.clone());
         let queued_message_edit_hint_binding = queued_message_edit_hint_binding(
-            &chat_keymap.edit_queued_message,
+            runtime_keymap.as_ref().unwrap_or(&default_keymap),
             current_terminal_info,
+        );
+        let pet_http_client = codex_http_client::RouteAwareClientPool::new(
+            config.http_client_factory(),
+            codex_http_client::ClientRouteClass::Other,
         );
         pets::start_configured_pet_load_if_needed(
             &config,
             /*ambient_pet_missing*/ true,
             frame_requester.clone(),
             app_event_tx.clone(),
+            pet_http_client.clone(),
         );
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
@@ -123,6 +126,7 @@ impl ChatWidget {
             runtime_model_provider_base_url,
             remote_connection: None,
             token_info: None,
+            token_usage_pending: false,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
             refreshing_status_outputs: Vec::new(),
             next_status_refresh_request_id: 0,
@@ -130,6 +134,8 @@ impl ChatWidget {
             completed_token_activity_output: None,
             next_token_activity_request_id: 0,
             pending_rate_limit_reset_request_id: None,
+            pending_rate_limit_reset_idempotency_key: None,
+            rate_limit_reset_picker_request_id: None,
             pending_rate_limit_reset_hint_request_id: None,
             pending_usage_menu_rate_limit_request_id: None,
             pending_rate_limit_reset_hint: None,
@@ -137,6 +143,7 @@ impl ChatWidget {
             next_rate_limit_reset_request_id: 0,
             plan_type: initial_plan_type,
             codex_rate_limit_reached_type: None,
+            codex_spend_control_reached: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             warning_display_state: WarningDisplayState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -176,10 +183,12 @@ impl ChatWidget {
             newly_installed_marketplace_tab_id: None,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
-            full_reasoning_buffer: String::new(),
+            reasoning_header: None,
+            reasoning_summary_parts: Vec::new(),
             status_state: StatusState::default(),
             review: ReviewState::default(),
             active_hook_cell: None,
+            pet_http_client,
             ambient_pet: None,
             pet_picker_preview_state: crate::pets::PetPickerPreviewState::default(),
             pet_picker_preview_pet: None,
@@ -189,17 +198,20 @@ impl ChatWidget {
             #[cfg(test)]
             pet_image_support_override: None,
             thread_id: None,
-            dismissed_plan_mode_nudge_scopes: HashSet::new(),
             thread_name: None,
+            pending_automatic_thread_names: HashSet::new(),
             thread_rename_block_message: None,
             active_side_conversation: false,
+            blocks_direct_input: false,
+            misalignment_policy_violation: false,
             normal_placeholder_text: placeholder,
             side_placeholder_text: side_placeholder,
             forked_from: None,
             interrupted_turn_notice_mode: InterruptedTurnNoticeMode::Default,
             input_queue: InputQueueState::default(),
-            cancel_edit: CancelEditState::default(),
+            safety_buffering_prompt: None,
             chat_keymap,
+            permission_shortcut_pending: false,
             queued_message_edit_hint_binding,
             show_welcome_banner: is_first_run,
             startup_tooltip_override,
@@ -222,6 +234,7 @@ impl ChatWidget {
             last_terminal_title_requires_action: false,
             terminal_title_setup_original_items: None,
             terminal_title_animation_origin: Instant::now(),
+            terminal_title_next_refresh: None,
             status_line_project_root_name_cache: None,
             status_line_branch: None,
             status_line_branch_cwd: None,
@@ -236,6 +249,7 @@ impl ChatWidget {
             next_status_line_workspace_headline_request_id: 0,
             status_line_workspace_headline_last_requested_at: None,
             status_line_workspace_messages_disabled: false,
+            thread_usage: thread_usage::ThreadUsageState::default(),
             current_goal_status_indicator: None,
             current_goal_status: None,
             external_editor_state: ExternalEditorState::Closed,

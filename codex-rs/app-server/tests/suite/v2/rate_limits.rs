@@ -1,13 +1,11 @@
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::TestAppServer;
-use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::JSONRPCError;
-use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::RateLimitReachedType;
 use codex_app_server_protocol::RateLimitResetCredit;
@@ -26,6 +24,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::path::Path;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::time::timeout;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -46,9 +45,8 @@ async fn get_account_rate_limits_requires_auth() -> Result<()> {
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp.send_get_account_rate_limits_request().await?;
 
@@ -75,9 +73,8 @@ async fn get_account_rate_limits_requires_chatgpt_auth() -> Result<()> {
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
-        .build()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     login_with_api_key(&mut mcp, "sk-test-key").await?;
 
@@ -99,8 +96,14 @@ async fn get_account_rate_limits_requires_chatgpt_auth() -> Result<()> {
     Ok(())
 }
 
+#[test_case("enterprise_cbp_automation", AccountPlanType::EnterpriseCbpAutomation; "enterprise_automation")]
+#[test_case("edu_plus", AccountPlanType::EduPlus; "edu_plus")]
+#[test_case("edu_pro", AccountPlanType::EduPro; "edu_pro")]
 #[tokio::test]
-async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
+async fn get_account_rate_limits_returns_snapshot(
+    plan_type: &str,
+    expected_plan: AccountPlanType,
+) -> Result<()> {
     let codex_home = TempDir::new()?;
     write_chatgpt_auth(
         codex_home.path(),
@@ -131,7 +134,7 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
             .expect("parse second reset credit grant timestamp")
             .timestamp();
     let response_body = json!({
-        "plan_type": "pro",
+        "plan_type": plan_type,
         "rate_limit": {
             "allowed": true,
             "limit_reached": false,
@@ -225,19 +228,13 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp.send_get_account_rate_limits_request().await?;
 
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let received: GetAccountRateLimitsResponse = to_response(response)?;
+    let received: GetAccountRateLimitsResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     let expected = GetAccountRateLimitsResponse {
         rate_limits: RateLimitSnapshot {
@@ -260,7 +257,8 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
                 remaining_percent: 68,
                 resets_at: secondary_reset_timestamp,
             }),
-            plan_type: Some(AccountPlanType::Pro),
+            spend_control_reached: Some(false),
+            plan_type: Some(expected_plan),
             rate_limit_reached_type: Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached),
         },
         rate_limits_by_limit_id: Some(
@@ -287,7 +285,8 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
                             remaining_percent: 68,
                             resets_at: secondary_reset_timestamp,
                         }),
-                        plan_type: Some(AccountPlanType::Pro),
+                        spend_control_reached: Some(false),
+                        plan_type: Some(expected_plan),
                         rate_limit_reached_type: Some(
                             RateLimitReachedType::WorkspaceMemberUsageLimitReached,
                         ),
@@ -306,7 +305,8 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
                         secondary: None,
                         credits: None,
                         individual_limit: None,
-                        plan_type: Some(AccountPlanType::Pro),
+                        spend_control_reached: None,
+                        plan_type: Some(expected_plan),
                         rate_limit_reached_type: None,
                     },
                 ),
@@ -387,17 +387,12 @@ async fn get_account_rate_limits_preserves_count_when_reset_credit_details_fail(
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp.send_get_account_rate_limits_request().await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let received: GetAccountRateLimitsResponse = to_response(response)?;
+    let received: GetAccountRateLimitsResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     assert_eq!(
         received.rate_limit_reset_credits,
@@ -418,9 +413,8 @@ async fn send_add_credits_nudge_email_requires_auth() -> Result<()> {
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
         .send_add_credits_nudge_email_request(SendAddCreditsNudgeEmailParams {
@@ -451,9 +445,8 @@ async fn send_add_credits_nudge_email_requires_chatgpt_auth() -> Result<()> {
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
-        .build()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     login_with_api_key(&mut mcp, "sk-test-key").await?;
 
@@ -510,9 +503,8 @@ async fn send_add_credits_nudge_email_posts_expected_body() -> Result<()> {
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
         .send_add_credits_nudge_email_request(SendAddCreditsNudgeEmailParams {
@@ -520,12 +512,8 @@ async fn send_add_credits_nudge_email_posts_expected_body() -> Result<()> {
         })
         .await?;
 
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let received: SendAddCreditsNudgeEmailResponse = to_response(response)?;
+    let received: SendAddCreditsNudgeEmailResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     assert_eq!(received.status, AddCreditsNudgeEmailStatus::Sent);
 
@@ -558,9 +546,8 @@ async fn send_add_credits_nudge_email_maps_cooldown() -> Result<()> {
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
         .send_add_credits_nudge_email_request(SendAddCreditsNudgeEmailParams {
@@ -568,12 +555,8 @@ async fn send_add_credits_nudge_email_maps_cooldown() -> Result<()> {
         })
         .await?;
 
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let received: SendAddCreditsNudgeEmailResponse = to_response(response)?;
+    let received: SendAddCreditsNudgeEmailResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     assert_eq!(received.status, AddCreditsNudgeEmailStatus::CooldownActive);
 
@@ -606,9 +589,8 @@ async fn send_add_credits_nudge_email_surfaces_backend_failure() -> Result<()> {
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
         .send_add_credits_nudge_email_request(SendAddCreditsNudgeEmailParams {
@@ -639,12 +621,8 @@ async fn send_add_credits_nudge_email_surfaces_backend_failure() -> Result<()> {
 
 async fn login_with_api_key(mcp: &mut TestAppServer, api_key: &str) -> Result<()> {
     let request_id = mcp.send_login_account_api_key_request(api_key).await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let login: LoginAccountResponse = to_response(response)?;
+    let login: LoginAccountResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
     assert_eq!(login, LoginAccountResponse::ApiKey {});
 
     Ok(())

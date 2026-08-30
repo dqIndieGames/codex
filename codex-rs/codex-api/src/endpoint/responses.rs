@@ -25,9 +25,33 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing::instrument;
 
+/// Responses-compatible inference routes supported by Codex backend.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResponsesEndpoint {
+    /// Regular user-owned model inference.
+    #[default]
+    Responses,
+    /// Full Guardian approval-review agent inference.
+    Guardian,
+    /// Lightweight asynchronous Guardian risk classification.
+    GuardianClassifier,
+}
+
+impl ResponsesEndpoint {
+    /// Returns the provider-relative path for this inference surface.
+    pub const fn path(self) -> &'static str {
+        match self {
+            Self::Responses => "/responses",
+            Self::Guardian => "/guardian",
+            Self::GuardianClassifier => "/guardian-classifier",
+        }
+    }
+}
+
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
+    endpoint: ResponsesEndpoint,
 }
 
 #[derive(Default)]
@@ -53,7 +77,14 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: EndpointSession::new_with_provider_source(transport, provider_source, auth),
             sse_telemetry: None,
+            endpoint: ResponsesEndpoint::Responses,
         }
+    }
+
+    /// Selects a Responses-compatible backend route for subsequent requests.
+    pub fn with_endpoint(mut self, endpoint: ResponsesEndpoint) -> Self {
+        self.endpoint = endpoint;
+        self
     }
 
     pub fn with_telemetry(
@@ -64,6 +95,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: self.session.with_request_telemetry(request),
             sse_telemetry: sse,
+            endpoint: self.endpoint,
         }
     }
 
@@ -74,7 +106,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         fields(
             transport = "responses_http",
             http.method = "POST",
-            api.path = "responses"
+            api.path = self.endpoint.path()
         )
     )]
     pub async fn stream_request(
@@ -117,10 +149,6 @@ impl<T: HttpTransport> ResponsesClient<T> {
             .await
     }
 
-    fn path() -> &'static str {
-        "responses"
-    }
-
     #[instrument(
         name = "responses.stream",
         level = "info",
@@ -128,7 +156,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         fields(
             transport = "responses_http",
             http.method = "POST",
-            api.path = "responses",
+            api.path = self.endpoint.path(),
             turn.has_state = turn_state.is_some()
         )
     )]
@@ -161,7 +189,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
             .session
             .stream_encoded_json_with(
                 Method::POST,
-                Self::path(),
+                self.endpoint.path(),
                 extra_headers,
                 Some(body),
                 |req| {

@@ -54,7 +54,7 @@ struct RevokeTokenRequest<'a> {
 
 pub(super) async fn revoke_auth_tokens(
     auth_dot_json: Option<&AuthDotJson>,
-    auth_route_config: Option<&AuthRouteConfig>,
+    auth_route_config: &AuthRouteConfig,
 ) -> Result<(), std::io::Error> {
     let Some((token, kind)) = auth_dot_json.and_then(revocable_token) else {
         return Ok(());
@@ -155,6 +155,9 @@ fn derive_revoke_token_endpoint(refresh_endpoint: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_http_client::ClientRouteClass;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
     use core_test_support::skip_if_no_network;
     use wiremock::Mock;
     use wiremock::MockServer;
@@ -181,8 +184,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = HttpClient::new(reqwest::Client::new());
         let endpoint = format!("{}/oauth/revoke", server.uri());
+        let client = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+            .build_client(&endpoint, ClientRouteClass::Auth)
+            .expect("test HTTP client should build");
         let error = revoke_oauth_token(
             &client,
             endpoint.as_str(),
@@ -195,8 +200,8 @@ mod tests {
 
         let reqwest_error = error
             .get_ref()
-            .and_then(|error| error.downcast_ref::<reqwest::Error>())
-            .expect("timeout error should preserve reqwest error");
+            .and_then(|error| error.downcast_ref::<codex_http_client::HttpError>())
+            .expect("timeout error should preserve HTTP client error");
         assert!(reqwest_error.is_timeout());
     }
 }

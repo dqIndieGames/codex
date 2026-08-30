@@ -1,8 +1,9 @@
 //! Cross-process serialization for MCP OAuth stores shared by multiple credentials.
 //!
 //! File and Secrets each keep credentials for multiple MCP servers in one aggregate document.
-//! Their lock therefore protects the complete read-modify-write operation. Direct keyring entries
-//! are already stored independently per credential and do not use this lock.
+//! Writers hold an exclusive lock across the complete read-modify-write operation. Readers share
+//! the same lock so concurrent MCP startup and status checks do not serialize behind one another.
+//! Direct keyring entries are already stored independently per credential and do not use this lock.
 
 use std::fs;
 use std::fs::File;
@@ -13,7 +14,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::Result;
 use codex_utils_home_dir::find_codex_home;
 
 const OAUTH_LOCK_DIR: &str = "mcp-oauth-locks";
@@ -51,8 +51,38 @@ pub(super) struct OAuthStoreLock {
     _file: File,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum OAuthStoreLockMode {
+    Shared,
+    Exclusive,
+}
+
 impl OAuthStoreLock {
-    pub(super) fn acquire(store: OAuthStore) -> Result<Self> {
+    pub(super) fn acquire_for_write(store: OAuthStore) -> Result<Self, OAuthStoreLockFailure> {
+        Self::acquire_with_timeout(
+            store,
+            STORE_LOCK_ACQUIRE_TIMEOUT,
+            OAuthStoreLockMode::Exclusive,
+        )
+    }
+
+    pub(super) fn acquire_for_read(store: OAuthStore) -> Result<Self, OAuthStoreLockFailure> {
+        Self::acquire_with_timeout(
+            store,
+            STORE_LOCK_ACQUIRE_TIMEOUT,
+            OAuthStoreLockMode::Shared,
+        )
+    }
+
+    pub(super) fn try_acquire_for_read(store: OAuthStore) -> Result<Self, OAuthStoreLockFailure> {
+        Self::acquire_with_timeout(store, Duration::ZERO, OAuthStoreLockMode::Shared)
+    }
+
+    fn acquire_with_timeout(
+        store: OAuthStore,
+        acquire_timeout: Duration,
+        mode: OAuthStoreLockMode,
+    ) -> Result<Self, OAuthStoreLockFailure> {
         // This lock intentionally follows the existing local File/Secrets credential-store
         // authority. Those stores are CODEX_HOME-backed today: if CODEX_HOME is unset they use
         // the default home (`~/.codex`), and if an embedder has no local home/filesystem authority
@@ -60,14 +90,15 @@ impl OAuthStoreLock {
         // provide its own matching lock authority instead of using this local path.
         let codex_home = find_codex_home()
             .map_err(|source| OAuthStoreLockFailure::CodexHome { store, source })?;
-        Self::acquire_in(&codex_home, store, STORE_LOCK_ACQUIRE_TIMEOUT)
+        Self::acquire_in_with_mode(&codex_home, store, acquire_timeout, mode)
     }
 
-    pub(super) fn acquire_in(
+    fn acquire_in_with_mode(
         codex_home: &Path,
         store: OAuthStore,
         acquire_timeout: Duration,
-    ) -> Result<Self> {
+        mode: OAuthStoreLockMode,
+    ) -> Result<Self, OAuthStoreLockFailure> {
         let path = oauth_store_lock_path(codex_home, store);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| OAuthStoreLockFailure::CreateDir {
@@ -92,15 +123,18 @@ impl OAuthStoreLock {
         let mut reported_contention = false;
 
         loop {
-            match file.try_lock() {
+            let result = match mode {
+                OAuthStoreLockMode::Shared => file.try_lock_shared(),
+                OAuthStoreLockMode::Exclusive => file.try_lock(),
+            };
+            match result {
                 Ok(()) => return Ok(Self { _file: file }),
                 Err(std::fs::TryLockError::WouldBlock) if started.elapsed() >= acquire_timeout => {
                     return Err(OAuthStoreLockFailure::Timeout {
                         store,
                         path,
                         acquire_timeout,
-                    }
-                    .into());
+                    });
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if !reported_contention {
@@ -119,16 +153,13 @@ impl OAuthStoreLock {
                         store,
                         path,
                         source: io::Error::from(error),
-                    }
-                    .into());
+                    });
                 }
             }
         }
     }
 }
 
-/// Marks aggregate-store coordination failures in an [`anyhow::Error`] chain.
-///
 /// Auto may fall back when the configured keyring backend is unavailable, but it must surface a
 /// lock failure. Falling back while another process owns the aggregate-store lock could leave the
 /// newer credential in File while a stale Secrets entry remains preferred.

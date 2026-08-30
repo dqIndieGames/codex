@@ -1,5 +1,3 @@
-use std::path::Path;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use tracing::error;
@@ -18,6 +16,9 @@ pub const FIXED_RETRY_DELAY: Duration = Duration::from_secs(5);
 /// Example:
 ///
 /// ```rust
+/// let provider_id = "openai";
+/// let request_id = "req-123";
+///
 /// codex_core::feedback_tags!(model = "gpt-5", cached = true);
 /// codex_core::feedback_tags!(provider = provider_id, request_id = request_id);
 /// ```
@@ -84,19 +85,15 @@ pub fn fixed_retry_delay() -> Duration {
     FIXED_RETRY_DELAY
 }
 
+pub(crate) fn backoff(_retries: u64) -> Duration {
+    FIXED_RETRY_DELAY
+}
+
 pub(crate) fn error_or_panic(message: impl std::string::ToString) {
     if cfg!(debug_assertions) {
         panic!("{}", message.to_string());
     } else {
         error!("{}", message.to_string());
-    }
-}
-
-pub fn resolve_path(base: &Path, path: &PathBuf) -> PathBuf {
-    if path.is_absolute() {
-        path.clone()
-    } else {
-        base.join(path)
     }
 }
 

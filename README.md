@@ -1,63 +1,81 @@
-# Codex Relay Edition
-
+<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
-  <strong>Chinese documentation:</strong>
-  <a href="./README.zh-CN.md">Read the Chinese README and relay edition guide</a>
+  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
 </p>
+</br>
+If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
+</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
+</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
 
-Codex Relay Edition is a modified Codex CLI build for relay-provider workflows. Its core experience is simple: when requests fail, Codex keeps retrying automatically so you do not have to keep clicking continue; when a relay provider, sub2api gateway, proxy pool, or account pool starts acting up, Codex can refresh and switch provider details at runtime so it can try to route around the stuck path.
+---
 
-For users who rely on sub2api or similar relay gateways, the worst part is often not a single `503`. The real pain is when requests stay stuck to an already failing account, route, or client fingerprint, so every manual continue lands on the same failure again. This fork focuses on automatic retry, runtime refresh, and sticky fingerprint rotation to reduce the "infinite 503 until I manually intervene" loop and let Codex keep working for longer unattended sessions.
+## Quickstart
 
-It is adapted from OpenAI Codex CLI, but it is not an official OpenAI release. If you only need the official upstream Codex CLI, use [`openai/codex`](https://github.com/openai/codex).
+### Installing and running Codex CLI
 
-## Community
+Run the following on Mac or Linux to install Codex CLI:
 
-This project is shared with and acknowledges the [LINUX DO](https://linux.do/) community.
-
-## Key Changes
-
-- Built for relay provider and sub2api usage: point Codex at your own `base_url`, bearer token, account pool, or proxy route.
-- More tolerant of transient upstream failures: when Codex hits `429`, `503`, `server_is_overloaded`, `slow_down`, `select model` capacity errors, or similar relay-side failures, it favors retrying and showing current state instead of stopping quickly.
-- Route and fingerprint recovery after repeated failures: reduces the chance that one failing account, route, or client fingerprint keeps trapping every follow-up request.
-- local2 visibility remains: CLI, TUI, version display, session history, and selected runtime behavior still make it clear this is the local modified build, not the official upstream build.
-- Codex Provider Refresh: switch the active provider `base_url` and token without closing `codex.exe`.
-
-## Codex Provider Refresh
-
-Provider Refresh is a small Windows helper for this relay-focused workflow. Its job is direct: when Codex is already running and you want to replace the current provider `base_url` or token with another relay configuration, you do not need to close every `codex.exe` process and start over.
-
-Tool path:
-
-```text
-scripts/windows_app_server_refresh_tray.py
+```shell
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
 ```
 
-<p align="center">
-  <img src=".github/codex-provider-refresh-gui.png" alt="Real Codex Provider Refresh Python GUI screenshot" width="96%" />
-</p>
+Run the following on Windows to install Codex CLI:
 
-The screenshot above is captured from a real Python Tk GUI window. It uses a temporary demo configuration and does not read the user's real config; the provider, base URL, and token shown in the image are demo values, and the token is masked.
+```shell
+powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+```
 
-## Usage
+The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
 
-1. Configure your provider, `base_url`, and token in the local Codex config according to your relay gateway requirements.
-2. Start this modified Codex build normally.
-3. If the relay becomes overloaded, the account pool needs to switch, or the token / route needs to change, use Provider Refresh to refresh the current provider.
-4. For official Codex basics, command usage, and contribution flow, continue to use the official documentation and upstream repository.
+```shell
+curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
+```
 
-## Relationship To Upstream
+```powershell
+$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
+```
 
-This repository keeps the baseline Codex CLI capabilities, but its default presentation and practical focus are relay-provider usage. It is for users who need relay providers, sub2api gateways, proxy pools, account pools, runtime refresh, and more tolerant retry behavior; it is not for users who want a completely unmodified official build.
+Codex CLI can also be installed via the following package managers:
 
-Official entry points:
+```shell
+# Install using npm
+npm install -g @openai/codex
+```
 
-- Official documentation: <https://developers.openai.com/codex>
-- Official upstream: <https://github.com/openai/codex>
+```shell
+# Install using Homebrew
+brew install --cask codex
+```
 
-## Notes
+Then simply run `codex` to get started.
 
-- This is a fork / modified build, not an official OpenAI release channel.
-- README screenshots only show demo providers and masked tokens. Do not put real tokens, cookies, sessions, or account information in README screenshots.
-- The README introduces the repository positioning and user-facing entry points; a README wording change does not by itself imply a new runtime implementation change.
-- This repository remains under the [Apache-2.0 License](LICENSE).
+<details>
+<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+
+Each GitHub Release contains many executables, but in practice, you likely want one of these:
+
+- macOS
+  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
+  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
+- Linux
+  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
+  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+
+Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+
+</details>
+
+### Using Codex with your ChatGPT plan
+
+Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+
+You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+
+## Docs
+
+- [**Codex Documentation**](https://developers.openai.com/codex)
+- [**Contributing**](./docs/contributing.md)
+- [**Installing & building**](./docs/install.md)
+- [**Open source fund**](./docs/open-source-fund.md)
+
+This repository is licensed under the [Apache-2.0 License](LICENSE).

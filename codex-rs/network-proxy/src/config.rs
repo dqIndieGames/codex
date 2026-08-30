@@ -14,19 +14,7 @@ use tracing::warn;
 use url::Url;
 
 use crate::mitm_hook::MitmHookConfig;
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct NetworkProxyConfig {
-    #[serde(default)]
-    pub network: NetworkProxySettings,
-}
-
-impl NetworkProxyConfig {
-    pub fn set_credential_broker_enabled(&mut self, enabled: bool) {
-        self.network.credential_broker = enabled;
-        self.network.mitm |= enabled;
-    }
-}
+use crate::policy::normalize_host;
 
 /// Variant order encodes effective precedence for duplicate patterns:
 /// `None < Allow < Deny`, so deny wins over allow when entries conflict.
@@ -125,7 +113,7 @@ pub struct NetworkUnixSocketPermissions {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct NetworkProxySettings {
+pub struct NetworkProxyConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default = "default_proxy_url")]
@@ -150,13 +138,16 @@ pub struct NetworkProxySettings {
     pub mitm: bool,
     #[serde(default)]
     pub credential_broker: bool,
+    /// Trusted OpenAI endpoint derived from local configuration, never sent to remote executors.
+    #[serde(skip)]
+    pub credential_broker_openai_host: Option<String>,
     #[serde(default)]
     pub dangerously_allow_plaintext_credential_injection: bool,
     #[serde(default)]
     pub mitm_hooks: Vec<MitmHookConfig>,
 }
 
-impl Default for NetworkProxySettings {
+impl Default for NetworkProxyConfig {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -173,13 +164,23 @@ impl Default for NetworkProxySettings {
             allow_local_binding: false,
             mitm: false,
             credential_broker: false,
+            credential_broker_openai_host: None,
             dangerously_allow_plaintext_credential_injection: false,
             mitm_hooks: Vec::new(),
         }
     }
 }
 
-impl NetworkProxySettings {
+impl NetworkProxyConfig {
+    pub fn set_credential_broker_enabled(&mut self, enabled: bool) {
+        self.credential_broker = enabled;
+        self.mitm |= enabled;
+    }
+
+    pub fn set_credential_broker_openai_base_url(&mut self, base_url: Option<&str>) {
+        self.credential_broker_openai_host = base_url.and_then(trusted_credential_broker_host);
+    }
+
     pub fn allowed_domains(&self) -> Option<Vec<String>> {
         self.domain_entries(NetworkDomainPermission::Allow)
     }
@@ -284,6 +285,15 @@ impl NetworkProxySettings {
     }
 }
 
+pub(crate) fn trusted_credential_broker_host(base_url: &str) -> Option<String> {
+    Url::parse(base_url)
+        .ok()
+        .filter(|url| {
+            url.scheme() == "https" && url.username().is_empty() && url.password().is_none()
+        })
+        .and_then(|url| url.host_str().map(normalize_host))
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkMode {
@@ -340,7 +350,7 @@ fn clamp_non_loopback(
 pub(crate) fn clamp_bind_addrs(
     http_addr: SocketAddr,
     socks_addr: SocketAddr,
-    cfg: &NetworkProxySettings,
+    cfg: &NetworkProxyConfig,
 ) -> (SocketAddr, SocketAddr) {
     let http_addr = clamp_non_loopback(
         http_addr,
@@ -416,7 +426,7 @@ impl ValidatedUnixSocketPath {
 }
 
 pub(crate) fn validate_unix_socket_allowlist_paths(cfg: &NetworkProxyConfig) -> Result<()> {
-    for (index, socket_path) in cfg.network.allow_unix_sockets().iter().enumerate() {
+    for (index, socket_path) in cfg.allow_unix_sockets().iter().enumerate() {
         ValidatedUnixSocketPath::parse(socket_path)
             .with_context(|| format!("invalid network.allow_unix_sockets[{index}]"))?;
     }
@@ -426,16 +436,36 @@ pub(crate) fn validate_unix_socket_allowlist_paths(cfg: &NetworkProxyConfig) -> 
 pub fn resolve_runtime(cfg: &NetworkProxyConfig) -> Result<RuntimeConfig> {
     validate_unix_socket_allowlist_paths(cfg)?;
 
-    let http_addr = resolve_addr(&cfg.network.proxy_url, /*default_port*/ 3128)
-        .with_context(|| format!("invalid network.proxy_url: {}", cfg.network.proxy_url))?;
-    let socks_addr = resolve_addr(&cfg.network.socks_url, /*default_port*/ 8081)
-        .with_context(|| format!("invalid network.socks_url: {}", cfg.network.socks_url))?;
-    let (http_addr, socks_addr) = clamp_bind_addrs(http_addr, socks_addr, &cfg.network);
+    let http_addr = resolve_addr(&cfg.proxy_url, /*default_port*/ 3128)
+        .with_context(|| format!("invalid network.proxy_url: {}", cfg.proxy_url))?;
+    let socks_addr = resolve_addr(&cfg.socks_url, /*default_port*/ 8081)
+        .with_context(|| format!("invalid network.socks_url: {}", cfg.socks_url))?;
+    let (http_addr, socks_addr) = clamp_bind_addrs(http_addr, socks_addr, cfg);
 
     Ok(RuntimeConfig {
         http_addr,
         socks_addr,
     })
+}
+
+/// Returns the sorted loopback ports used by the configured managed proxy listeners.
+pub fn managed_proxy_ports(cfg: &NetworkProxyConfig) -> Result<Vec<u16>> {
+    let runtime = resolve_runtime(cfg)?;
+    if runtime.http_addr.port() == 0 {
+        bail!("network.proxy_url must use a fixed non-zero port for managed proxy provisioning");
+    }
+    let mut ports = vec![runtime.http_addr.port()];
+    if cfg.enable_socks5 {
+        if runtime.socks_addr.port() == 0 {
+            bail!(
+                "network.socks_url must use a fixed non-zero port for managed proxy provisioning"
+            );
+        }
+        ports.push(runtime.socks_addr.port());
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    Ok(ports)
 }
 
 fn resolve_addr(url: &str, default_port: u16) -> Result<SocketAddr> {
@@ -575,8 +605,8 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    fn settings_with_unix_sockets(unix_sockets: &[&str]) -> NetworkProxySettings {
-        let mut settings = NetworkProxySettings::default();
+    fn settings_with_unix_sockets(unix_sockets: &[&str]) -> NetworkProxyConfig {
+        let mut settings = NetworkProxyConfig::default();
         if !unix_sockets.is_empty() {
             settings.set_allow_unix_sockets(
                 unix_sockets
@@ -591,8 +621,8 @@ mod tests {
     #[test]
     fn network_proxy_settings_default_matches_local_use_baseline() {
         assert_eq!(
-            NetworkProxySettings::default(),
-            NetworkProxySettings {
+            NetworkProxyConfig::default(),
+            NetworkProxyConfig {
                 enabled: false,
                 proxy_url: "http://127.0.0.1:3128".to_string(),
                 enable_socks5: true,
@@ -607,6 +637,7 @@ mod tests {
                 allow_local_binding: false,
                 mitm: false,
                 credential_broker: false,
+                credential_broker_openai_host: None,
                 dangerously_allow_plaintext_credential_injection: false,
                 mitm_hooks: Vec::new(),
             }
@@ -614,26 +645,72 @@ mod tests {
     }
 
     #[test]
-    fn partial_network_config_uses_struct_defaults_for_missing_fields() {
-        let config: NetworkProxyConfig = serde_json::from_str(
-            r#"{
-                "network": {
-                    "enabled": true
-                }
-            }"#,
-        )
-        .unwrap();
-        let expected = NetworkProxySettings {
-            enabled: true,
-            ..NetworkProxySettings::default()
+    fn credential_broker_only_accepts_trusted_https_openai_endpoints() {
+        let mut config = NetworkProxyConfig::default();
+
+        for (base_url, expected_host) in [
+            (
+                Some("https://gateway.example.com/v1"),
+                Some("gateway.example.com"),
+            ),
+            (
+                Some("https://gateway.example.com./v1"),
+                Some("gateway.example.com"),
+            ),
+            (Some("https://[2001:db8::1]/v1"), Some("2001:db8::1")),
+            (Some("http://gateway.example.com/v1"), None),
+            (Some("https://user@gateway.example.com/v1"), None),
+            (Some("not-a-url"), None),
+            (None, None),
+        ] {
+            config.set_credential_broker_openai_base_url(base_url);
+            assert_eq!(
+                config.credential_broker_openai_host.as_deref(),
+                expected_host
+            );
+        }
+    }
+
+    #[test]
+    fn managed_proxy_ports_reject_ephemeral_ports() {
+        let mut config = NetworkProxyConfig {
+            proxy_url: "http://127.0.0.1:0".to_string(),
+            ..Default::default()
         };
 
-        assert_eq!(config.network, expected);
+        assert_eq!(
+            managed_proxy_ports(&config).unwrap_err().to_string(),
+            "network.proxy_url must use a fixed non-zero port for managed proxy provisioning"
+        );
+
+        config.proxy_url = "http://127.0.0.1:3128".to_string();
+        config.socks_url = "socks5h://127.0.0.1:48081".to_string();
+        assert_eq!(managed_proxy_ports(&config).unwrap(), vec![3128, 48081]);
+
+        config.socks_url = "socks5h://127.0.0.1:0".to_string();
+        assert_eq!(
+            managed_proxy_ports(&config).unwrap_err().to_string(),
+            "network.socks_url must use a fixed non-zero port for managed proxy provisioning"
+        );
+
+        config.enable_socks5 = false;
+        assert_eq!(managed_proxy_ports(&config).unwrap(), vec![3128]);
+    }
+
+    #[test]
+    fn network_proxy_config_uses_struct_defaults_for_missing_fields() {
+        let config: NetworkProxyConfig = serde_json::from_str(r#"{ "enabled": true }"#).unwrap();
+        let expected = NetworkProxyConfig {
+            enabled: true,
+            ..NetworkProxyConfig::default()
+        };
+
+        assert_eq!(config, expected);
     }
 
     #[test]
     fn set_allowed_domains_preserves_existing_deny_for_same_pattern() {
-        let mut settings = NetworkProxySettings::default();
+        let mut settings = NetworkProxyConfig::default();
         settings.set_denied_domains(vec!["example.com".to_string()]);
 
         settings.set_allowed_domains(vec!["example.com".to_string()]);
@@ -647,36 +724,34 @@ mod tests {
 
     #[test]
     fn network_domain_permissions_serialize_to_effective_map_shape() {
-        let mut settings = NetworkProxySettings::default();
+        let mut settings = NetworkProxyConfig::default();
         settings.set_denied_domains(vec!["example.com".to_string()]);
         settings.set_allowed_domains(vec!["example.com".to_string()]);
-        let config = NetworkProxyConfig { network: settings };
+        let config = settings;
 
         let value = serde_json::to_value(&config).unwrap();
 
         assert_eq!(
             value,
             serde_json::json!({
-                "network": {
-                    "enabled": false,
-                    "proxy_url": "http://127.0.0.1:3128",
-                    "enable_socks5": true,
-                    "socks_url": "http://127.0.0.1:8081",
-                    "enable_socks5_udp": true,
-                    "allow_upstream_proxy": true,
-                    "dangerously_allow_non_loopback_proxy": false,
-                    "dangerously_allow_all_unix_sockets": false,
-                    "mode": "full",
-                    "domains": {
-                        "example.com": "deny",
-                    },
-                    "unix_sockets": null,
-                    "allow_local_binding": false,
-                    "mitm": false,
-                    "credential_broker": false,
-                    "dangerously_allow_plaintext_credential_injection": false,
-                    "mitm_hooks": [],
-                }
+                "enabled": false,
+                "proxy_url": "http://127.0.0.1:3128",
+                "enable_socks5": true,
+                "socks_url": "http://127.0.0.1:8081",
+                "enable_socks5_udp": true,
+                "allow_upstream_proxy": true,
+                "dangerously_allow_non_loopback_proxy": false,
+                "dangerously_allow_all_unix_sockets": false,
+                "mode": "full",
+                "domains": {
+                    "example.com": "deny",
+                },
+                "unix_sockets": null,
+                "allow_local_binding": false,
+                "mitm": false,
+                "credential_broker": false,
+                "dangerously_allow_plaintext_credential_injection": false,
+                "mitm_hooks": [],
             })
         );
     }
@@ -815,7 +890,7 @@ mod tests {
 
     #[test]
     fn clamp_bind_addrs_allows_non_loopback_when_enabled() {
-        let cfg = NetworkProxySettings {
+        let cfg = NetworkProxyConfig {
             dangerously_allow_non_loopback_proxy: true,
             ..Default::default()
         };
@@ -846,7 +921,7 @@ mod tests {
 
     #[test]
     fn clamp_bind_addrs_forces_loopback_when_all_unix_sockets_enabled() {
-        let cfg = NetworkProxySettings {
+        let cfg = NetworkProxyConfig {
             dangerously_allow_non_loopback_proxy: true,
             dangerously_allow_all_unix_sockets: true,
             ..Default::default()
@@ -862,9 +937,7 @@ mod tests {
 
     #[test]
     fn resolve_runtime_rejects_relative_allow_unix_sockets_entries() {
-        let cfg = NetworkProxyConfig {
-            network: settings_with_unix_sockets(&["relative.sock"]),
-        };
+        let cfg = settings_with_unix_sockets(&["relative.sock"]);
 
         let err = match resolve_runtime(&cfg) {
             Ok(runtime) => panic!(
@@ -881,9 +954,7 @@ mod tests {
 
     #[test]
     fn resolve_runtime_accepts_unix_style_absolute_allow_unix_sockets_entries() {
-        let cfg = NetworkProxyConfig {
-            network: settings_with_unix_sockets(&["/private/tmp/example.sock"]),
-        };
+        let cfg = settings_with_unix_sockets(&["/private/tmp/example.sock"]);
 
         assert!(
             resolve_runtime(&cfg).is_ok(),

@@ -1,48 +1,24 @@
 use super::*;
 use crate::config::CONFIG_TOML_FILE;
 use crate::config::ConfigBuilder;
-use codex_config::AppRequirementToml;
-use codex_config::AppsRequirementsToml;
-use codex_config::ConfigLayerStack;
-use codex_config::ConfigRequirements;
-use codex_config::ConfigRequirementsToml;
+use crate::plugins::plugins_manager_for_config;
 use codex_config::test_support::CloudConfigBundleFixture;
 use codex_config::types::ApprovalsReviewer;
 use codex_connectors::merge::plugin_connector_to_app_info;
 use codex_connectors::metadata::connector_install_url;
 use codex_connectors::metadata::sanitize_name;
 use codex_features::Feature;
+use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::ToolInfo;
 use pretty_assertions::assert_eq;
 use rmcp::model::JsonObject;
-use rmcp::model::Meta;
+use rmcp::model::MetaObject;
 use rmcp::model::Tool;
-use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::tempdir;
-
-fn app(id: &str) -> AppInfo {
-    AppInfo {
-        id: id.to_string(),
-        name: id.to_string(),
-        description: None,
-        logo_url: None,
-        logo_url_dark: None,
-        icon_assets: None,
-        icon_dark_assets: None,
-        distribution_channel: None,
-        install_url: None,
-        branding: None,
-        app_metadata: None,
-        labels: None,
-        is_accessible: false,
-        is_enabled: true,
-        plugin_display_names: Vec::new(),
-    }
-}
 
 fn plugin_names(names: &[&str]) -> Vec<String> {
     names.iter().map(ToString::to_string).collect()
@@ -71,6 +47,7 @@ fn codex_app_tool(
         callable_namespace: tool_namespace,
         namespace_description: None,
         tool: test_tool_definition(tool_name),
+        openai_file_input_optional_fields: Default::default(),
         connector_id: Some(connector_id.to_string()),
         connector_name: connector_name.map(ToOwned::to_owned),
         plugin_display_names: plugin_names(plugin_display_names),
@@ -115,6 +92,7 @@ fn accessible_connectors_from_mcp_tools_carries_plugin_display_names() {
             callable_namespace: "sample".to_string(),
             namespace_description: None,
             tool: test_tool_definition("echo"),
+            openai_file_input_optional_fields: Default::default(),
             connector_id: None,
             connector_name: None,
             plugin_display_names: plugin_names(&["ignored"]),
@@ -148,7 +126,7 @@ fn accessible_connectors_from_mcp_tools_carries_plugin_display_names() {
 #[test]
 fn synthetic_links_are_exposed_to_the_agent_but_not_accessible_in_app_list() {
     let mut synthetic_tool = codex_app_tool("gmail_batch_read_email", "gmail", Some("Gmail"), &[]);
-    synthetic_tool.tool.meta = Some(Meta(
+    synthetic_tool.tool.meta = Some(MetaObject(
         serde_json::json!({
             "resource_name": "gmail.batch_read_email",
             "_codex_apps": {
@@ -297,6 +275,7 @@ fn accessible_connectors_from_mcp_tools_preserves_description() {
             "Create a calendar event",
             Arc::new(JsonObject::default()),
         ),
+        openai_file_input_optional_fields: Default::default(),
         connector_id: Some("calendar".to_string()),
         connector_name: Some("Calendar".to_string()),
         plugin_display_names: Vec::new(),
@@ -367,23 +346,43 @@ approvals_reviewer = "{app}"
             .expect("config should build");
 
         assert_eq!(
-            mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("calendar")),
+            mcp_approvals_reviewer_from_layers(
+                &config.config_layer_stack,
+                config.approvals_reviewer,
+                config.model.as_deref(),
+                CODEX_APPS_MCP_SERVER_NAME,
+                Some("calendar")
+            ),
             expected_app
         );
         assert_eq!(
-            mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("drive")),
+            mcp_approvals_reviewer_from_layers(
+                &config.config_layer_stack,
+                config.approvals_reviewer,
+                config.model.as_deref(),
+                CODEX_APPS_MCP_SERVER_NAME,
+                Some("drive")
+            ),
             expected_default
         );
         assert_eq!(
-            mcp_approvals_reviewer(
-                &config,
+            mcp_approvals_reviewer_from_layers(
+                &config.config_layer_stack,
+                config.approvals_reviewer,
+                config.model.as_deref(),
                 CODEX_APPS_MCP_SERVER_NAME,
                 /*connector_id*/ None
             ),
             expected_default
         );
         assert_eq!(
-            mcp_approvals_reviewer(&config, "custom_server", Some("calendar")),
+            mcp_approvals_reviewer_from_layers(
+                &config.config_layer_stack,
+                config.approvals_reviewer,
+                config.model.as_deref(),
+                "custom_server",
+                Some("calendar")
+            ),
             expected_global
         );
     }
@@ -414,7 +413,13 @@ approvals_reviewer = "user"
         .expect("config should build");
 
     assert_eq!(
-        mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("calendar")),
+        mcp_approvals_reviewer_from_layers(
+            &config.config_layer_stack,
+            config.approvals_reviewer,
+            config.model.as_deref(),
+            CODEX_APPS_MCP_SERVER_NAME,
+            Some("calendar")
+        ),
         ApprovalsReviewer::AutoReview
     );
 }
@@ -444,46 +449,14 @@ approvals_reviewer = "user"
         .expect("config should build");
 
     assert_eq!(
-        mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("calendar")),
+        mcp_approvals_reviewer_from_layers(
+            &config.config_layer_stack,
+            config.approvals_reviewer,
+            config.model.as_deref(),
+            CODEX_APPS_MCP_SERVER_NAME,
+            Some("calendar")
+        ),
         ApprovalsReviewer::AutoReview
-    );
-}
-
-#[tokio::test]
-async fn with_app_enabled_state_preserves_unrelated_disabled_connector() {
-    let codex_home = tempdir().expect("tempdir should succeed");
-    let mut config = ConfigBuilder::default()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .build()
-        .await
-        .expect("config should build");
-
-    let requirements = ConfigRequirementsToml {
-        apps: Some(AppsRequirementsToml {
-            apps: BTreeMap::from([(
-                "connector_drive".to_string(),
-                AppRequirementToml {
-                    enabled: Some(false),
-                    tools: None,
-                },
-            )]),
-        }),
-        ..Default::default()
-    };
-    config.config_layer_stack =
-        ConfigLayerStack::new(Vec::new(), ConfigRequirements::default(), requirements)
-            .expect("requirements stack");
-
-    let mut slack = app("connector_slack");
-    slack.is_enabled = false;
-
-    let mut drive = app("connector_drive");
-    drive.is_enabled = false;
-
-    assert_eq!(
-        with_app_enabled_state(vec![slack.clone(), app("connector_drive")], &config),
-        vec![slack, drive]
     );
 }
 
@@ -565,7 +538,8 @@ discoverables = [
         .await
         .expect("config should load");
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
-    let plugins_manager = PluginsManager::new(config.codex_home.to_path_buf());
+    let plugins_manager =
+        plugins_manager_for_config(&config, AuthManager::from_auth_for_testing(auth.clone()));
 
     let discoverable_tools = list_tool_suggest_discoverable_tools_with_auth(
         &config,
@@ -603,7 +577,8 @@ apps = true
         .expect("config should load");
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let loaded_plugin_app_connector_ids = vec!["asdk_app_databricks_workspace".to_string()];
-    let plugins_manager = PluginsManager::new(config.codex_home.to_path_buf());
+    let plugins_manager =
+        plugins_manager_for_config(&config, AuthManager::from_auth_for_testing(auth.clone()));
 
     let discoverable_tools = list_tool_suggest_discoverable_tools_with_auth(
         &config,

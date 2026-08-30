@@ -3,9 +3,9 @@
 use std::fs;
 use std::path::Path;
 
+use codex_core::TurnInputRequest;
 use codex_core::shell::default_user_shell;
 use codex_features::Feature;
-use codex_prompts::APPLY_PATCH_TOOL_INSTRUCTIONS;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
@@ -17,7 +17,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::TempDirExt;
 use core_test_support::responses::ev_completed;
@@ -26,6 +26,7 @@ use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::responses::strip_metadata_from_json;
+use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::local_selections;
@@ -55,10 +56,10 @@ fn text_user_input_parts(texts: Vec<String>) -> serde_json::Value {
     })
 }
 
-fn assert_eq_without_metadata(left: serde_json::Value, right: serde_json::Value) {
+fn assert_eq_without_metadata_or_item_ids(left: serde_json::Value, right: serde_json::Value) {
     assert_eq!(
-        strip_metadata_from_json(left),
-        strip_metadata_from_json(right)
+        strip_response_item_ids_from_json(strip_metadata_from_json(left)),
+        strip_response_item_ids_from_json(strip_metadata_from_json(right))
     );
 }
 
@@ -153,7 +154,7 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
         })
         .build(&server)
         .await?;
-    let base_instructions = thread_manager
+    let model_info = thread_manager
         .get_models_manager()
         .get_model_info(
             config
@@ -162,42 +163,26 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
                 .expect("test config should have a model"),
             &config.to_models_manager_config(),
         )
-        .await
-        .base_instructions;
+        .await;
+    let base_instructions = model_info.get_model_instructions(config.personality);
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello 1".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello 1".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello 2".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello 2".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
-    let mut expected_tools_names = if cfg!(windows) {
-        vec!["shell_command"]
-    } else {
-        vec!["exec_command", "write_stdin"]
-    };
+    let mut expected_tools_names = vec!["exec_command", "write_stdin"];
     expected_tools_names.extend([
         "update_plan",
         "request_user_input",
@@ -208,23 +193,11 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
     ]);
     let body0 = req1.single_request().body_json();
 
-    let expected_instructions = if expected_tools_names.contains(&"apply_patch") {
-        base_instructions
-    } else {
-        [base_instructions, APPLY_PATCH_TOOL_INSTRUCTIONS.to_string()].join("\n")
-    };
-
-    assert_eq!(
-        body0["instructions"],
-        serde_json::json!(expected_instructions),
-    );
+    assert_eq!(body0["instructions"], serde_json::json!(base_instructions),);
     assert_tool_names(&body0, &expected_tools_names);
 
     let body1 = req2.single_request().body_json();
-    assert_eq!(
-        body1["instructions"],
-        serde_json::json!(expected_instructions),
-    );
+    assert_eq!(body1["instructions"], serde_json::json!(base_instructions),);
     assert_tool_names(&body1, &expected_tools_names);
 
     Ok(())
@@ -260,30 +233,18 @@ async fn gpt_5_tools_without_apply_patch_append_apply_patch_instructions() -> an
         .await?;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello 1".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello 1".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
 
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello 2".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello 2".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
 
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -339,30 +300,18 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
         .await?;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello 1".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello 1".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello 2".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello 2".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
@@ -392,15 +341,18 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
         Some("input_text"),
         "expected environment context bundled after UI message in cached contextual message"
     );
-    assert_eq_without_metadata(input1[2].clone(), text_user_input("hello 1".to_string()));
+    assert_eq_without_metadata_or_item_ids(
+        input1[2].clone(),
+        text_user_input("hello 1".to_string()),
+    );
 
     let body2 = req2.single_request().body_json();
     let input2 = body2["input"].as_array().expect("input array");
-    assert_eq_without_metadata(
+    assert_eq_without_metadata_or_item_ids(
         serde_json::Value::Array(input2[..input1.len()].to_vec()),
         serde_json::Value::Array(input1.to_vec()),
     );
-    assert_eq_without_metadata(
+    assert_eq_without_metadata_or_item_ids(
         input2[input1.len()].clone(),
         text_user_input("hello 2".to_string()),
     );
@@ -438,16 +390,10 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() -> an
 
     // First turn
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello 1".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello 1".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
@@ -463,7 +409,7 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() -> an
         .expect("workspace profile should have legacy projection");
     core_test_support::submit_thread_settings(
         &codex,
-        codex_protocol::protocol::ThreadSettingsOverrides {
+        ThreadSettingsOverrides {
             approval_policy: Some(AskForApproval::Never),
             sandbox_policy: Some(sandbox_policy),
             permission_profile: Some(permission_profile),
@@ -476,16 +422,10 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() -> an
 
     // Second turn after overrides
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello 2".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello 2".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
@@ -533,7 +473,7 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() -> an
     expected_body2.push(expected_permissions_msg_2);
     expected_body2.push(expected_env_msg_2);
     expected_body2.push(expected_user_message_2);
-    assert_eq_without_metadata(
+    assert_eq_without_metadata_or_item_ids(
         body2["input"].clone(),
         serde_json::Value::Array(expected_body2),
     );
@@ -565,7 +505,7 @@ async fn override_before_first_turn_emits_environment_context() -> anyhow::Resul
 
     core_test_support::submit_thread_settings(
         &codex,
-        codex_protocol::protocol::ThreadSettingsOverrides {
+        ThreadSettingsOverrides {
             approval_policy: Some(AskForApproval::Never),
             model: Some("gpt-5.4".to_string()),
             effort: Some(Some(ReasoningEffort::Low)),
@@ -576,16 +516,10 @@ async fn override_before_first_turn_emits_environment_context() -> anyhow::Resul
     .await?;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "first message".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "first message".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
 
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -660,16 +594,10 @@ async fn override_before_first_turn_emits_environment_context() -> anyhow::Resul
 
     let permissions_texts: Vec<&str> = input
         .iter()
-        .filter_map(|msg| {
-            let role = msg["role"].as_str()?;
-            if role != "developer" {
-                return None;
-            }
-            msg["content"]
-                .as_array()
-                .and_then(|content| content.first())
-                .and_then(|item| item["text"].as_str())
-        })
+        .filter(|msg| msg["role"].as_str() == Some("developer"))
+        .filter_map(|msg| msg["content"].as_array())
+        .flatten()
+        .filter_map(|item| item["text"].as_str())
         .collect();
     assert!(
         permissions_texts.iter().any(|text| {
@@ -730,16 +658,10 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
 
     // First turn
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello 1".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello 1".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
@@ -755,15 +677,12 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(permission_profile, new_cwd.path());
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: "hello 2".into(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 environments: Some(local_selections(new_cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
@@ -772,8 +691,8 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
                 effort: Some(Some(ReasoningEffort::High)),
                 summary: Some(ReasoningSummary::Detailed),
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
@@ -798,10 +717,6 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
     let expected_permissions_msg = body1["input"][0].clone();
     let body1_input = body1["input"].as_array().expect("input array");
     let expected_settings_update_msg = body2["input"][body1_input.len()].clone();
-    assert_ne!(
-        expected_settings_update_msg, expected_permissions_msg,
-        "expected updated permissions message after per-turn override"
-    );
     assert_eq!(
         expected_settings_update_msg["role"].as_str(),
         Some("developer")
@@ -812,7 +727,16 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
         }),
         "expected model switch section after model override: {expected_settings_update_msg:?}"
     );
-    let expected_env_msg_2 = body2["input"][body1_input.len() + 1].clone();
+    let expected_permissions_update_msg = body2["input"][body1_input.len() + 1].clone();
+    assert_ne!(
+        expected_permissions_update_msg, expected_permissions_msg,
+        "expected updated permissions message after per-turn override"
+    );
+    assert_eq!(
+        expected_permissions_update_msg["role"].as_str(),
+        Some("developer")
+    );
+    let expected_env_msg_2 = body2["input"][body1_input.len() + 2].clone();
     assert_eq!(expected_env_msg_2["role"].as_str(), Some("user"));
     let env_text = expected_env_msg_2["content"][0]["text"]
         .as_str()
@@ -821,9 +745,10 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
     assert_default_env_context(env_text, &expected_cwd);
     let mut expected_body2 = body1_input.to_vec();
     expected_body2.push(expected_settings_update_msg);
+    expected_body2.push(expected_permissions_update_msg);
     expected_body2.push(expected_env_msg_2);
     expected_body2.push(expected_user_message_2);
-    assert_eq_without_metadata(
+    assert_eq_without_metadata_or_item_ids(
         body2["input"].clone(),
         serde_json::Value::Array(expected_body2),
     );
@@ -871,58 +796,52 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() -> a
     let default_summary = config.model_reasoning_summary;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: "hello 1".into(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 environments: Some(local_selections(default_cwd.clone())),
                 approval_policy: Some(default_approval_policy),
                 sandbox_policy: Some(default_sandbox_policy.clone()),
                 summary: Some(default_summary.unwrap_or(ReasoningSummary::Auto)),
-                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
-                    mode: codex_protocol::config_types::ModeKind::Default,
-                    settings: codex_protocol::config_types::Settings {
+                collaboration_mode: Some(CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
                         model: default_model.clone(),
                         reasoning_effort: default_effort.clone(),
                         developer_instructions: None,
                     },
                 }),
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: "hello 2".into(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 environments: Some(local_selections(default_cwd.clone())),
                 approval_policy: Some(default_approval_policy),
                 sandbox_policy: Some(default_sandbox_policy.clone()),
                 summary: Some(default_summary.unwrap_or(ReasoningSummary::Auto)),
-                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
-                    mode: codex_protocol::config_types::ModeKind::Default,
-                    settings: codex_protocol::config_types::Settings {
+                collaboration_mode: Some(CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
                         model: default_model.clone(),
                         reasoning_effort: default_effort,
                         developer_instructions: None,
                     },
                 }),
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
@@ -955,7 +874,7 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() -> a
         expected_contextual_user_msg_1.clone(),
         expected_user_message_1.clone(),
     ]);
-    assert_eq_without_metadata(body1["input"].clone(), expected_input_1);
+    assert_eq_without_metadata_or_item_ids(body1["input"].clone(), expected_input_1);
 
     let expected_user_message_2 = text_user_input("hello 2".to_string());
     let expected_input_2 = serde_json::Value::Array(vec![
@@ -964,7 +883,7 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() -> a
         expected_user_message_1,
         expected_user_message_2,
     ]);
-    assert_eq_without_metadata(body2["input"].clone(), expected_input_2);
+    assert_eq_without_metadata_or_item_ids(body2["input"].clone(), expected_input_2);
 
     Ok(())
 }
@@ -1010,61 +929,55 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
     let default_summary = config.model_reasoning_summary;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: "hello 1".into(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 environments: Some(local_selections(default_cwd.clone())),
                 approval_policy: Some(default_approval_policy),
                 sandbox_policy: Some(default_sandbox_policy.clone()),
                 summary: Some(default_summary.unwrap_or(ReasoningSummary::Auto)),
-                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
-                    mode: codex_protocol::config_types::ModeKind::Default,
-                    settings: codex_protocol::config_types::Settings {
+                collaboration_mode: Some(CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
                         model: default_model,
                         reasoning_effort: default_effort,
                         developer_instructions: None,
                     },
                 }),
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, default_cwd.as_path());
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: "hello 2".into(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 environments: Some(local_selections(default_cwd.clone())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
                 summary: Some(ReasoningSummary::Detailed),
-                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
-                    mode: codex_protocol::config_types::ModeKind::Default,
-                    settings: codex_protocol::config_types::Settings {
+                collaboration_mode: Some(CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
                         model: "o3".to_string(),
                         reasoning_effort: Some(ReasoningEffort::High),
                         developer_instructions: None,
                     },
                 }),
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
@@ -1094,14 +1007,10 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
         expected_contextual_user_msg_1.clone(),
         expected_user_message_1.clone(),
     ]);
-    assert_eq_without_metadata(body1["input"].clone(), expected_input_1);
+    assert_eq_without_metadata_or_item_ids(body1["input"].clone(), expected_input_1);
 
     let body1_input = body1["input"].as_array().expect("input array");
     let expected_settings_update_msg = body2["input"][body1_input.len()].clone();
-    assert_ne!(
-        expected_settings_update_msg, expected_permissions_msg,
-        "expected updated permissions message after policy change"
-    );
     assert_eq!(
         expected_settings_update_msg["role"].as_str(),
         Some("developer")
@@ -1112,7 +1021,16 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
         }),
         "expected model switch section after model override: {expected_settings_update_msg:?}"
     );
-    let expected_env_update_msg = body2["input"][body1_input.len() + 1].clone();
+    let expected_permissions_update_msg = body2["input"][body1_input.len() + 1].clone();
+    assert_ne!(
+        expected_permissions_update_msg, expected_permissions_msg,
+        "expected updated permissions message after policy change"
+    );
+    assert_eq!(
+        expected_permissions_update_msg["role"].as_str(),
+        Some("developer")
+    );
+    let expected_env_update_msg = body2["input"][body1_input.len() + 2].clone();
     assert_eq!(expected_env_update_msg["role"].as_str(), Some("user"));
     let expected_env_update_text = expected_env_update_msg["content"][0]["text"]
         .as_str()
@@ -1130,10 +1048,11 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
         expected_contextual_user_msg_1,
         expected_user_message_1,
         expected_settings_update_msg,
+        expected_permissions_update_msg,
         expected_env_update_msg,
         expected_user_message_2,
     ]);
-    assert_eq_without_metadata(body2["input"].clone(), expected_input_2);
+    assert_eq_without_metadata_or_item_ids(body2["input"].clone(), expected_input_2);
 
     Ok(())
 }
