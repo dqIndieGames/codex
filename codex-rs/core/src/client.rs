@@ -753,7 +753,7 @@ impl ModelClient {
             let request = self.build_responses_request(
                 prompt,
                 model_info,
-                settings.effort,
+                settings.effort.clone(),
                 settings.summary,
                 settings.service_tier.clone(),
                 responses_metadata,
