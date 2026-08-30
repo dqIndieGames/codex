@@ -1022,11 +1022,11 @@ impl ThreadRequestProcessor {
         let status = thread
             .refresh_provider_runtime()
             .await
-            .map_err(|err| match err {
-                CodexErr::InvalidRequest(message) => {
+            .map_err(|err| match err.details() {
+                CodexErrorDetails::InvalidRequest(message) => {
                     invalid_request(format!("failed to refresh provider runtime: {message}"))
                 }
-                err => internal_error(format!("failed to refresh provider runtime: {err}")),
+                _ => internal_error(format!("failed to refresh provider runtime: {err}")),
             })?;
         let status = match status {
             codex_core::ProviderRuntimeRefreshStatus::Applied => {
