@@ -36,6 +36,7 @@ use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::Span;
 use tracing::debug;
@@ -271,6 +272,8 @@ impl ResponsesWebsocketConnection {
             connection_reused,
         };
         let request_text = serialize_websocket_request(&request)?;
+        let cancellation_token = CancellationToken::new();
+        let cancellation_for_task = cancellation_token.clone();
 
         let current_span = Span::current();
         tokio::spawn(
@@ -289,6 +292,7 @@ impl ResponsesWebsocketConnection {
                 }
                 let mut guard = tokio::select! {
                     biased;
+                    _ = cancellation_for_task.cancelled() => return,
                     _ = tx_event.closed() => return,
                     guard = stream.lock() => guard,
                 };
@@ -316,6 +320,9 @@ impl ResponsesWebsocketConnection {
                             turn_state.as_deref(),
                             &timing_log_context,
                         ) => result,
+                        _ = cancellation_for_task.cancelled() => Err(ApiError::Stream(
+                            "response event consumer dropped".to_string(),
+                        )),
                         _ = tx_event.closed() => Err(ApiError::Stream(
                             "response event consumer dropped".to_string(),
                         )),
@@ -337,6 +344,7 @@ impl ResponsesWebsocketConnection {
         Ok(ResponseStream {
             rx_event,
             upstream_request_id: None,
+            cancellation_token,
         })
     }
 }

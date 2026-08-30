@@ -20,6 +20,29 @@ use serde::Deserialize;
 use serde_json::Value;
 
 pub fn map_api_error(err: ApiError) -> CodexErr {
+    map_api_error_with_mode(err, HttpErrorMode::Default)
+}
+
+pub fn map_responses_request_api_error(err: ApiError) -> CodexErr {
+    map_api_error_with_mode(err, HttpErrorMode::RequestLayer)
+}
+
+pub fn map_responses_stream_api_error(err: ApiError) -> CodexErr {
+    map_api_error_with_mode(err, HttpErrorMode::StreamLayer)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpErrorMode {
+    Default,
+    RequestLayer,
+    StreamLayer,
+}
+
+fn retryable_stream(message: String) -> CodexErr {
+    CodexErr::Stream(message)
+}
+
+fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
     match err {
         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
@@ -53,7 +76,10 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                 identity_error_code: None,
             })
         }
-        ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
+        ApiError::InvalidRequest { message } => match mode {
+            HttpErrorMode::Default => CodexErr::InvalidRequest(message),
+            HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => retryable_stream(message),
+        },
         ApiError::CyberPolicy { message } => {
             CodexErr::new(CodexErrorDetails::CyberPolicy { message })
         }
@@ -125,9 +151,19 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                     } else if body_text
                         .contains("The image data you provided does not represent a valid image")
                     {
-                        CodexErr::InvalidImageRequest()
+                        match mode {
+                            HttpErrorMode::Default => CodexErr::InvalidImageRequest(),
+                            HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
+                                retryable_stream(body_text)
+                            }
+                        }
                     } else {
-                        CodexErr::InvalidRequest(body_text)
+                        match mode {
+                            HttpErrorMode::Default => CodexErr::InvalidRequest(body_text),
+                            HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
+                                retryable_stream(body_text)
+                            }
+                        }
                     }
                 } else if status == http::StatusCode::INTERNAL_SERVER_ERROR {
                     CodexErr::InternalServerError
@@ -163,10 +199,15 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                         }
                     }
 
-                    CodexErr::RetryLimit(RetryLimitReachedError {
-                        status,
-                        request_id: extract_request_tracking_id(headers.as_ref()),
-                    })
+                    match mode {
+                        HttpErrorMode::Default => CodexErr::RetryLimit(RetryLimitReachedError {
+                            status,
+                            request_id: extract_request_tracking_id(headers.as_ref()),
+                        }),
+                        HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
+                            retryable_stream(body_text)
+                        }
+                    }
                 } else {
                     CodexErr::UnexpectedStatus(UnexpectedResponseError {
                         status,

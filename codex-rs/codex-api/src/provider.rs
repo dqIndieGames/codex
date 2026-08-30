@@ -173,6 +173,10 @@ impl Provider {
         let _ = url.set_scheme(scheme);
         Ok(url)
     }
+
+    pub fn is_azure_responses_endpoint(&self) -> bool {
+        is_azure_responses_provider(&self.name, Some(self.base_url.as_str()))
+    }
 }
 
 pub fn is_azure_responses_provider(name: &str, base_url: Option<&str>) -> bool {

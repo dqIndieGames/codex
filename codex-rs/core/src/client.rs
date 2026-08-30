@@ -67,6 +67,8 @@ use codex_api::WebsocketTelemetry;
 use codex_api::auth_header_telemetry;
 use codex_api::build_session_headers;
 use codex_api::create_text_param_for_request;
+use codex_api::map_responses_request_api_error;
+use codex_api::map_responses_stream_api_error;
 use codex_api::response_create_client_metadata;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
@@ -895,7 +897,7 @@ impl ModelClient {
                     continue;
                 }
                 Err(err) => {
-                    let mapped = self.current_provider().map_api_error(err);
+                    let mapped = map_responses_request_api_error(err);
                     trace_attempt.record_result(Err(&mapped));
                     if mapped.is_retryable() {
                         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1934,7 +1936,7 @@ impl ModelClientSession {
                 Err(err) => {
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
-                    let err = self.client.current_provider().map_api_error(err);
+                    let err = map_responses_request_api_error(err);
                     inference_trace_attempt.record_failed(
                         &err,
                         response_debug_context.request_id.as_deref(),
@@ -2065,7 +2067,7 @@ impl ModelClientSession {
                     );
                     continue;
                 }
-                Err(err) => return Err(provider.map_api_error(err)),
+                Err(err) => return Err(map_responses_stream_api_error(err)),
             }
 
             let (incremental_request, previous_response_id_from_untraced_warmup) =
@@ -2120,7 +2122,7 @@ impl ModelClientSession {
 
             let websocket_connection =
                 self.websocket_session.connection.as_ref().ok_or_else(|| {
-                    self.client.current_provider().map_api_error(ApiError::Stream(
+                    map_responses_stream_api_error(ApiError::Stream(
                         "websocket connection is unavailable".to_string(),
                     ))
                 })?;
@@ -2140,7 +2142,7 @@ impl ModelClientSession {
             self.websocket_session.last_response_from_untraced_warmup = warmup;
             let stream_result = stream_result.map_err(|err| {
                 let response_debug_context = extract_response_debug_context_from_api_error(&err);
-                let err = self.client.current_provider().map_api_error(err);
+                let err = map_responses_stream_api_error(err);
                 inference_trace_attempt.record_failed(
                     &err,
                     response_debug_context.request_id.as_deref(),
@@ -2398,10 +2400,12 @@ fn map_response_stream(
     let codex_api::ResponseStream {
         rx_event,
         upstream_request_id,
+        cancellation_token,
     } = api_stream;
     let api_stream = codex_api::ResponseStream {
         rx_event,
         upstream_request_id: None,
+        cancellation_token,
     };
     map_response_events(
         upstream_request_id,
@@ -2417,7 +2421,7 @@ fn map_response_events<S>(
     api_stream: S,
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
-    provider: SharedModelProvider,
+    _provider: SharedModelProvider,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>)
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
@@ -2530,7 +2534,7 @@ where
                     if let Some(upstream_request_id) = upstream_request_id {
                         feedback_tags!(last_model_request_id = upstream_request_id);
                     }
-                    let mapped = provider.map_api_error(err);
+                    let mapped = map_responses_stream_api_error(err);
                     inference_trace_attempt.record_failed(
                         &mapped,
                         upstream_request_id,
