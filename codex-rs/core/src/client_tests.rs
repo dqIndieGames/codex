@@ -236,7 +236,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
 }
 
 fn test_model_provider() -> SharedModelProvider {
-    test_model_client(SessionSource::Cli).state.provider.clone()
+    test_model_client(SessionSource::Cli).current_provider()
 }
 
 fn test_responses_metadata_for_client(
@@ -1208,14 +1208,20 @@ fn guardian_reviewer_uses_dedicated_endpoint_only_with_codex_backend_auth() {
         ResponsesEndpoint::Responses
     );
 
-    Arc::get_mut(&mut model_client.state)
-        .expect("test client should have unique session state")
-        .provider = create_model_provider(
-        ModelProviderInfo::create_openai_provider(Some("https://proxy.example.com/v1".to_owned())),
-        Some(AuthManager::from_auth_for_testing(
-            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
-        )),
-    );
+    let state = Arc::get_mut(&mut model_client.state)
+        .expect("test client should have unique session state");
+    let runtime_generation = state.provider.load_full().runtime_generation;
+    state.provider.store(Arc::new(super::ModelProviderHandle {
+        provider: create_model_provider(
+            ModelProviderInfo::create_openai_provider(Some(
+                "https://proxy.example.com/v1".to_owned(),
+            )),
+            Some(AuthManager::from_auth_for_testing(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            )),
+        ),
+        runtime_generation,
+    }));
     assert_eq!(
         model_client.responses_endpoint(
             Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),

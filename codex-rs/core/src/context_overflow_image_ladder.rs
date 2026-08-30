@@ -220,6 +220,7 @@ fn placeholder_except_last(items: &mut [ResponseItem], keep_last: usize) -> usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_protocol::ResponseItemId;
     use codex_protocol::models::FunctionCallOutputBody;
     use codex_protocol::models::FunctionCallOutputPayload;
 
@@ -241,7 +242,7 @@ mod tests {
         urls.iter()
             .enumerate()
             .map(|(idx, url)| ResponseItem::Message {
-                id: Some(format!("msg-{idx}")),
+                id: Some(ResponseItemId::from_server(format!("msg-{idx}"))),
                 role: "user".to_string(),
                 content: vec![original_image(url)],
                 phase: None,
@@ -351,7 +352,7 @@ mod tests {
     #[test]
     fn no_op_when_too_few_images_then_cascade_reaches_eviction() {
         let mut items = vec![ResponseItem::Message {
-            id: Some("msg-0".to_string()),
+            id: Some(ResponseItemId::from_server("msg-0".to_string())),
             role: "user".to_string(),
             content: vec![high_image("only-high")],
             phase: None,
@@ -368,7 +369,7 @@ mod tests {
     fn cascade_skips_quality_tiers_when_nothing_is_original() {
         let mut items = (0..6)
             .map(|idx| ResponseItem::Message {
-                id: Some(format!("msg-{idx}")),
+                id: Some(ResponseItemId::from_server(format!("msg-{idx}"))),
                 role: "user".to_string(),
                 content: vec![high_image(&format!("img-{idx}"))],
                 phase: None,
@@ -389,7 +390,9 @@ mod tests {
     fn tool_output_images_are_included() {
         let mut items = vec![ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-1".to_string(),
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload {
                 body: FunctionCallOutputBody::ContentItems(vec![
                     FunctionCallOutputContentItem::InputImage {
@@ -407,7 +410,9 @@ mod tests {
         assert_eq!(changed, 0);
         items.push(ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-2".to_string(),
+            call_id: Some("call-2".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload {
                 body: FunctionCallOutputBody::ContentItems(vec![
                     FunctionCallOutputContentItem::InputImage {

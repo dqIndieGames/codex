@@ -4627,6 +4627,7 @@ wire_api = "responses"
         &session,
         &BaseInstructions {
             text: "base".to_string(),
+            provenance: None,
         },
         &turn,
     )
@@ -4638,7 +4639,11 @@ wire_api = "responses"
         Some("https://new-provider.example/v1")
     );
     assert_eq!(
-        config.model_provider.experimental_bearer_token.as_deref(),
+        config
+            .model_provider
+            .experimental_bearer_token
+            .as_deref()
+            .map(String::as_str),
         Some("new-token")
     );
     assert_eq!(
