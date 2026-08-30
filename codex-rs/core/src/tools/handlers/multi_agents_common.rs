@@ -183,11 +183,57 @@ pub(crate) fn build_agent_spawn_config(
     Ok(config)
 }
 
+pub(crate) async fn build_latest_agent_spawn_config(
+    session: &Session,
+    base_instructions: &BaseInstructions,
+    turn: &TurnContext,
+) -> Result<Config, FunctionCallError> {
+    let mut config = overlay_latest_agent_turn_context(session, turn).await?;
+    config.base_instructions = Some(base_instructions.text.clone());
+    config.base_instructions_provenance = base_instructions.provenance.clone();
+    Ok(config)
+}
+
 pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
     let mut config = build_agent_shared_config(turn)?;
     // For resume, keep base instructions sourced from rollout/session metadata.
     config.base_instructions = None;
     config.base_instructions_provenance = None;
+    Ok(config)
+}
+
+pub(crate) async fn build_latest_agent_resume_config(
+    session: &Session,
+    turn: &TurnContext,
+) -> Result<Config, FunctionCallError> {
+    let mut config = overlay_latest_agent_turn_context(session, turn).await?;
+    config.base_instructions = None;
+    config.base_instructions_provenance = None;
+    Ok(config)
+}
+
+async fn overlay_latest_agent_turn_context(
+    session: &Session,
+    turn: &TurnContext,
+) -> Result<Config, FunctionCallError> {
+    let mut config = session.latest_agent_base_config().await;
+    config.model = Some(turn.model_info().slug.clone());
+    config.model_reasoning_effort = turn
+        .reasoning_effort()
+        .or(turn.model_info().default_reasoning_level.as_ref())
+        .cloned();
+    config.model_reasoning_summary = Some(turn.reasoning_summary());
+    config.developer_instructions = turn.developer_instructions.clone();
+    if turn.multi_agent_version == MultiAgentVersion::V2
+        && let Some(developer_instructions) = turn
+            .config
+            .multi_agent_v2
+            .subagent_developer_instructions
+            .clone()
+    {
+        config.developer_instructions = Some(developer_instructions);
+    }
+    apply_spawn_agent_runtime_overrides(&mut config, turn)?;
     Ok(config)
 }
 

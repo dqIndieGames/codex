@@ -881,7 +881,7 @@ impl ModelClient {
                 .await
             {
                 Ok(output_items) => {
-                    trace_attempt.record_result(Ok(output_items.as_slice()));
+                    trace_attempt.record_result(Ok::<_, CodexErr>(output_items.as_slice()));
                     return Ok(output_items);
                 }
                 Err(ApiError::Transport(TransportError::RetryInterrupted(_))) => {
@@ -1287,7 +1287,8 @@ impl ModelClient {
     }
 
     fn uses_codex_backend(&self, auth: Option<&CodexAuth>) -> bool {
-        let provider = self.current_provider().info();
+        let current_provider = self.current_provider();
+        let provider = current_provider.info();
         auth.is_some_and(CodexAuth::uses_codex_backend)
             && provider.is_openai()
             && provider.requires_openai_auth
@@ -1385,6 +1386,7 @@ impl ModelClient {
             start.elapsed(),
             status,
             error_message.as_deref(),
+            /*emit_log_trace*/ false,
             auth_context.auth_header_attached,
             auth_context.auth_header_name,
             auth_context.retry_after_unauthorized,
@@ -1786,7 +1788,7 @@ impl ModelClientSession {
         )
     )]
     async fn stream_responses_api(
-        &self,
+        &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -3008,7 +3010,7 @@ impl WebsocketTelemetry for ApiTelemetry {
         duration: Duration,
     ) {
         self.session_telemetry
-            .record_websocket_event(result, duration);
+            .record_websocket_event(result, duration, /*emit_log_trace*/ false);
     }
 }
 

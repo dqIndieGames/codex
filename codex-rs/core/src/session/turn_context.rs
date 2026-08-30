@@ -2,6 +2,7 @@ use super::step_settings::ResolvedStepSettings;
 use super::token_budget::has_explicit_settings;
 use super::token_budget::resolve_token_budget;
 use super::*;
+use crate::config::Config;
 use crate::config::TokenBudgetConfig;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -1107,6 +1108,20 @@ impl Session {
         let session_configuration = self.default_turn_configuration().await;
         self.new_startup_prewarm_turn_from_configuration(sub_id, session_configuration)
             .await
+    }
+
+    pub(crate) async fn latest_agent_base_config(&self) -> Config {
+        self.apply_pending_provider_runtime_refresh_if_requested()
+            .await;
+        let session_configuration = self.default_turn_configuration().await;
+        let turn_environments = self.services.turn_environments.snapshot().await;
+        let cwd = turn_environments
+            .primary()
+            .and_then(|turn_environment| turn_environment.cwd().to_abs_path().ok())
+            .unwrap_or_else(|| session_configuration.cwd().clone());
+        let mut config = self.build_effective_session_config(&session_configuration);
+        config.cwd = cwd;
+        config
     }
 
     async fn default_turn_configuration(&self) -> SessionConfiguration {

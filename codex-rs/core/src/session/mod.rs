@@ -4173,14 +4173,10 @@ impl Session {
             let mut state = self.state.lock().await;
             let mut applied_tier = state.image_ladder_tier(turn_key);
             let report = state.history.with_raw_items_mut(|items| {
-                let report = crate::context_overflow_image_ladder::apply_next_image_ladder_tier(
+                crate::context_overflow_image_ladder::apply_next_image_ladder_tier(
                     items,
                     &mut applied_tier,
-                );
-                if report.is_some() {
-                    crate::image_preparation::prepare_response_items(items);
-                }
-                report
+                )
             });
             state.set_image_ladder_tier(turn_key, applied_tier);
             report?
