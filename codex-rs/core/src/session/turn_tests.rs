@@ -2,6 +2,7 @@ use super::*;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnItemContributor;
 use codex_protocol::ResponseItemId;
+use codex_protocol::error::CodexErr;
 use codex_protocol::items::AgentMessageContent;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
@@ -85,4 +86,48 @@ async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
         last_agent_message.as_deref(),
         Some("plan contributed assistant text")
     );
+}
+
+#[test]
+fn retries_empty_completed_only_after_tools_and_within_cap() {
+    assert!(should_retry_empty_completed_after_tools(
+        /*had_tools_this_turn*/ true,
+        /*needs_follow_up*/ false,
+        /*last_agent_message*/ None,
+        /*empty_complete_retries*/ 0,
+    ));
+    assert!(should_retry_empty_completed_after_tools(
+        true, false, None, 2
+    ));
+    assert!(!should_retry_empty_completed_after_tools(
+        true, false, None, 3
+    ));
+    assert!(!should_retry_empty_completed_after_tools(
+        /*had_tools_this_turn*/ false,
+        false,
+        None,
+        0,
+    ));
+    assert!(!should_retry_empty_completed_after_tools(
+        true,
+        /*needs_follow_up*/ true,
+        None,
+        0,
+    ));
+    assert!(!should_retry_empty_completed_after_tools(
+        true,
+        false,
+        Some("closing message"),
+        0,
+    ));
+}
+
+#[test]
+fn empty_completed_after_tools_stream_error_is_retryable() {
+    let err = empty_completed_after_tools_stream_error();
+    assert!(is_empty_completed_after_tools_stream(&err));
+    assert!(err.is_retryable());
+    assert!(!is_empty_completed_after_tools_stream(&CodexErr::Stream(
+        "stream closed before response.completed".into(),
+    )));
 }
