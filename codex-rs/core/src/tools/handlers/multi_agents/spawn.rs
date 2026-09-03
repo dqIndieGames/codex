@@ -95,9 +95,6 @@ async fn handle_spawn_agent(
         turn.as_ref(),
     )
     .await?;
-    if let Some(service_tier) = args.service_tier.as_ref() {
-        config.service_tier = Some(service_tier.clone());
-    }
     if args.fork_context {
         reject_full_fork_agent_type_override(role_name)?;
     }

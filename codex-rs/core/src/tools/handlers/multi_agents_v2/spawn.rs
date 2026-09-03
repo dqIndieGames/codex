@@ -128,9 +128,6 @@ async fn handle_spawn_agent(
         turn.as_ref(),
     )
     .await?;
-    if let Some(service_tier) = args.service_tier.as_ref() {
-        config.service_tier = Some(service_tier.clone());
-    }
     let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
     apply_requested_spawn_agent_model_overrides(
         &session,

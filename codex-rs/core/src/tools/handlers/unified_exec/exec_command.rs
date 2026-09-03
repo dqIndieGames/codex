@@ -71,12 +71,6 @@ enum ExecCommandLifetime {
     OneShot,
 }
 
-#[derive(Clone, Copy)]
-enum ExecCommandLifetime {
-    Interactive,
-    OneShot,
-}
-
 pub struct ExecCommandHandler {
     options: ExecCommandHandlerOptions,
     lifetime: ExecCommandLifetime,
