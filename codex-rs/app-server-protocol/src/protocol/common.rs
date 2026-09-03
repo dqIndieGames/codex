@@ -862,6 +862,11 @@ client_request_definitions! {
         serialization: None,
         response: v2::PluginInstalledResponse,
     },
+    PluginReconcile => "plugin/reconcile" {
+        params: v2::PluginReconcileParams,
+        serialization: None,
+        response: v2::PluginReconcileResponse,
+    },
     PluginRead => "plugin/read" {
         params: v2::PluginReadParams,
         serialization: None,
@@ -1922,6 +1927,8 @@ server_notification_definitions! {
     ContextCompacted => "thread/compacted" (v2::ContextCompactedNotification),
     ModelRerouted => "model/rerouted" (v2::ModelReroutedNotification),
     ModelVerification => "model/verification" (v2::ModelVerificationNotification),
+    AuthRecoveryStarted => "modelProvider/authRecoveryStarted" (v2::AuthRecoveryNotification),
+    AuthRecoveryCompleted => "modelProvider/authRecoveryCompleted" (v2::AuthRecoveryNotification),
     #[experimental("turn/moderationMetadata")]
     TurnModerationMetadata => "turn/moderationMetadata" (v2::TurnModerationMetadataNotification),
     ModelSafetyBufferingUpdated => "model/safetyBuffering/updated" (v2::ModelSafetyBufferingUpdatedNotification),
@@ -3155,6 +3162,8 @@ mod tests {
                     project_id: None,
                     history_mode: Default::default(),
                     model_provider: "openai".to_string(),
+                    model: None,
+                    reasoning_effort: None,
                     created_at: 1,
                     updated_at: 2,
                     recency_at: Some(3),
@@ -3210,6 +3219,8 @@ mod tests {
                         "projectId": null,
                         "historyMode": "legacy",
                         "modelProvider": "openai",
+                        "model": null,
+                        "reasoningEffort": null,
                         "createdAt": 1,
                         "updatedAt": 2,
                         "recencyAt": 3,

@@ -295,6 +295,7 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::ImagesShrunk(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::WorldState(_) => None,
     }
 }

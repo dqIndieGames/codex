@@ -148,13 +148,7 @@ async fn handle_spawn_agent(
                 .clone_from(&turn.developer_instructions);
         }
     }
-    apply_spawn_agent_service_tier(
-        &session,
-        &mut config,
-        turn.config.service_tier.as_deref(),
-        args.service_tier.as_deref(),
-    )
-    .await?;
+    apply_spawn_agent_service_tier(&session, &mut config).await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
 
     // Remember an applied configured default so cold reload reapplies its restrictions.
@@ -209,7 +203,11 @@ async fn handle_spawn_agent(
                 .as_ref()
                 .and_then(|messages| messages.multi_agent.as_ref())
                 .and_then(|messages| messages.role.as_ref());
-            Some(resolve_usage_hints(&config.multi_agent_v2, child_catalog))
+            Some(resolve_usage_hints(
+                &config.multi_agent_v2,
+                child_catalog,
+                !config.update_plan_enabled && config.model_catalog.is_none(),
+            ))
         } else {
             None
         };
@@ -292,7 +290,6 @@ struct SpawnAgentArgs {
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
-    service_tier: Option<String>,
     fork_turns: Option<String>,
     fork_context: Option<bool>,
 }

@@ -668,7 +668,10 @@ impl RealtimeWebsocketEvents {
             | RealtimeEvent::ConversationItemDone { .. }
             | RealtimeEvent::NoopRequested(_)
             | RealtimeEvent::ConversationItemAdded(_)
-            | RealtimeEvent::Error(_) => {}
+            | RealtimeEvent::Error(_)
+            | RealtimeEvent::HistoryItemStarted(_)
+            | RealtimeEvent::HistoryTranscriptDelta { .. }
+            | RealtimeEvent::HistoryItemCompleted(_) => {}
         }
         truncate_active_transcript(&mut active_transcript.entries);
     }

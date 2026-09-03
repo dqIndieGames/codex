@@ -1,4 +1,5 @@
 use super::*;
+use codex_app_server_protocol::AuthRecoveryNotification;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use pretty_assertions::assert_eq;
@@ -624,6 +625,7 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
         phase: Some(MessagePhase::FinalAnswer),
         memory_citation: None,
         delivery: None,
+        questions: None,
     };
     chat.handle_server_notification(
         ServerNotification::ItemCompleted(ItemCompletedNotification {
@@ -730,6 +732,32 @@ async fn live_app_server_warning_notification_renders_message() {
         ),
         "expected warning guidance, got {rendered}"
     );
+
+    let notification = AuthRecoveryNotification {
+        thread_id: "thread-1".to_string(),
+        turn_id: "turn-1".to_string(),
+        provider: "example".to_string(),
+        message: "Session expired. Sign in again.".to_string(),
+    };
+    let mut recovery_messages = String::new();
+    for notification in [
+        ServerNotification::AuthRecoveryStarted(notification.clone()),
+        ServerNotification::AuthRecoveryCompleted(AuthRecoveryNotification {
+            message: "Signed in successfully.".to_string(),
+            ..notification
+        }),
+    ] {
+        chat.handle_server_notification(notification, /*replay_kind*/ None);
+
+        let [cell] = drain_insert_history(&mut rx)
+            .try_into()
+            .expect("expected one authentication recovery history cell");
+        recovery_messages.push_str(&lines_to_single_string(&cell));
+    }
+    insta::assert_snapshot!(recovery_messages, @r"
+• Session expired. Sign in again.
+✓ Signed in successfully.
+");
 }
 
 #[tokio::test]
@@ -1275,6 +1303,7 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
         phase: Some(MessagePhase::FinalAnswer),
         memory_citation: None,
         delivery: None,
+        questions: None,
     }];
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {

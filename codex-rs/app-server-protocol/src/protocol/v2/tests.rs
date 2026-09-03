@@ -313,6 +313,8 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             project_id: None,
             history_mode: Default::default(),
             model_provider: "openai".to_string(),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 1,
             recency_at: Some(1),
@@ -1331,23 +1333,44 @@ fn fs_copy_params_round_trip_with_recursive_directory_copy() {
 
 #[test]
 fn thread_shell_command_params_round_trip() {
-    let params = ThreadShellCommandParams {
-        thread_id: "thr_123".to_string(),
-        command: "printf 'hello world\\n'".to_string(),
-    };
+    for timeout_ms in [None, Some(0), Some(28_800_000)] {
+        let params = ThreadShellCommandParams {
+            thread_id: "thr_123".to_string(),
+            command: "printf 'hello world\\n'".to_string(),
+            timeout_ms,
+        };
 
-    let value = serde_json::to_value(&params).expect("serialize thread/shellCommand params");
+        let value = serde_json::to_value(&params).expect("serialize thread/shellCommand params");
+        assert_eq!(
+            value,
+            json!({
+                "threadId": "thr_123",
+                "command": "printf 'hello world\\n'",
+                "timeoutMs": timeout_ms,
+            })
+        );
+
+        let decoded = serde_json::from_value::<ThreadShellCommandParams>(value)
+            .expect("deserialize thread/shellCommand params");
+        assert_eq!(decoded, params);
+    }
+}
+
+#[test]
+fn thread_shell_command_params_without_timeout_remain_valid() {
+    let decoded = serde_json::from_value::<ThreadShellCommandParams>(json!({
+        "threadId": "thr_123",
+        "command": "echo hello",
+    }))
+    .expect("deserialize thread/shellCommand params without timeoutMs");
     assert_eq!(
-        value,
-        json!({
-            "threadId": "thr_123",
-            "command": "printf 'hello world\\n'",
-        })
+        decoded,
+        ThreadShellCommandParams {
+            thread_id: "thr_123".to_string(),
+            command: "echo hello".to_string(),
+            timeout_ms: None,
+        }
     );
-
-    let decoded = serde_json::from_value::<ThreadShellCommandParams>(value)
-        .expect("deserialize thread/shellCommand params");
-    assert_eq!(decoded, params);
 }
 
 #[test]
@@ -3073,6 +3096,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         phase: None,
         memory_citation: None,
         delivery: None,
+        questions: None,
     });
 
     assert_eq!(
@@ -3083,6 +3107,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             phase: None,
             memory_citation: None,
             delivery: None,
+            questions: None,
         }
     );
 
@@ -3102,6 +3127,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             rollout_ids: vec!["rollout-1".to_string()],
         }),
         delivery: None,
+        questions: None,
     });
 
     assert_eq!(
@@ -3120,8 +3146,41 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
                 thread_ids: vec!["rollout-1".to_string()],
             }),
             delivery: None,
+            questions: None,
         }
     );
+
+    let async_item = ThreadItem::from(TurnItem::AgentMessage(AgentMessageItem {
+        id: "async-1".to_string(),
+        content: vec![AgentMessageContent::Text {
+            text: "Which?".to_string(),
+        }],
+        phase: Some(MessagePhase::FinalAnswer),
+        memory_citation: None,
+        delivery: Some(AgentMessageDelivery::Async),
+        questions: Some(vec![AsyncUserInputQuestion {
+            title: "Which?".to_string(),
+            options: None,
+        }]),
+    }));
+    assert_eq!(
+        serde_json::to_value(&async_item).unwrap(),
+        json!({
+            "type": "agentMessage", "id": "async-1", "text": "Which?", "phase": "final_answer",
+            "memoryCitation": null, "delivery": "async", "questions": [{"title": "Which?", "options": null}]
+        })
+    );
+    let old_item: ThreadItem = serde_json::from_value(json!({
+        "type": "agentMessage", "id": "old-1", "text": "An old message"
+    }))
+    .unwrap();
+    assert!(matches!(
+        old_item,
+        ThreadItem::AgentMessage {
+            questions: None,
+            ..
+        }
+    ));
 
     let reasoning_item = TurnItem::Reasoning(ReasoningItem {
         id: "reasoning-1".to_string(),

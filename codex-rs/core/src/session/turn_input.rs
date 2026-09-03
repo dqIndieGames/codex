@@ -129,6 +129,11 @@ impl PreparedTurnInputSettings {
             cyber_access_program,
         } = self.start_options;
         let emit_thread_settings_applied = self.thread_settings_update.is_some();
+        let _settings_guard = if emit_thread_settings_applied {
+            Some(thread_settings::acquire_persistence_lock(session).await)
+        } else {
+            None
+        };
         let mut updates = self.thread_settings_update.unwrap_or_default();
         updates.service_tier_for_turn = service_tier;
 
@@ -619,13 +624,17 @@ impl Session {
             input => pending_turn_input(input.clone()),
         };
         pending_input.push(input);
-        if let Some(incoming_root_turn_id) = incoming_root_turn_id
-            && active_task.turn_context.turn_metadata_state.root_turn_id() != incoming_root_turn_id
+        if active_task
+            .turn_context
+            .turn_metadata_state
+            .root_turn_id()
+            .is_none()
+            && let Some(Some(incoming_root_turn_id)) = incoming_root_turn_id
         {
             active_task
                 .turn_context
                 .turn_metadata_state
-                .mark_root_turn_ambiguous();
+                .set_root_turn_id(incoming_root_turn_id);
         }
         self.input_queue
             .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(

@@ -77,6 +77,7 @@ impl ModelReplayPlanner {
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::ImagesShrunk(_)
+            | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::WorldState(_) => return,
         };

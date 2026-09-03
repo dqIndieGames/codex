@@ -2086,6 +2086,8 @@ impl ThreadRequestProcessor {
         );
         if let Ok(loaded_thread) = self.thread_manager.get_thread(thread_uuid).await {
             thread.session_id = loaded_thread.session_configured().session_id.to_string();
+            let config_snapshot = loaded_thread.config_snapshot().await;
+            apply_live_model_settings(&mut thread, &config_snapshot);
         }
         self.attach_thread_name(thread_uuid, &mut thread).await;
         thread.status = resolve_thread_status(
@@ -2521,11 +2523,25 @@ impl ThreadRequestProcessor {
         request_id: &ConnectionRequestId,
         params: ThreadShellCommandParams,
     ) -> Result<ThreadShellCommandResponse, JSONRPCErrorError> {
-        let ThreadShellCommandParams { thread_id, command } = params;
+        let ThreadShellCommandParams {
+            thread_id,
+            command,
+            timeout_ms,
+        } = params;
         let command = command.trim().to_string();
         if command.is_empty() {
             return Err(invalid_request("command must not be empty"));
         }
+
+        let timeout_ms = timeout_ms
+            .map(|timeout_ms| {
+                u64::try_from(timeout_ms).map_err(|_| {
+                    invalid_params(format!(
+                        "thread/shellCommand timeoutMs must be non-negative, got {timeout_ms}"
+                    ))
+                })
+            })
+            .transpose()?;
 
         let (_, thread) = self.load_thread(&thread_id).await?;
         ensure_direct_input_allowed(thread.as_ref()).await?;
@@ -2544,7 +2560,10 @@ impl ThreadRequestProcessor {
         self.submit_core_op(
             request_id,
             thread.as_ref(),
-            Op::RunUserShellCommand { command },
+            Op::RunUserShellCommand {
+                command,
+                timeout_ms,
+            },
         )
         .await
         .map_err(|err| internal_error(format!("failed to start shell command: {err}")))?;
@@ -3059,6 +3078,7 @@ impl ThreadRequestProcessor {
         } else {
             fallback_thread
         };
+        apply_live_model_settings(&mut thread, &config_snapshot);
         self.apply_thread_read_store_fields(thread_id, &mut thread, include_turns, loaded_thread)
             .await?;
         Ok(thread)
@@ -3817,7 +3837,21 @@ impl ThreadRequestProcessor {
             };
         }
 
-        let history_cwd = thread_history.session_cwd();
+        // Copied or referenced history can contain another thread's settings. Only snapshots
+        // explicitly owned by this thread can override its startup cwd.
+        let history_cwd = if let InitialHistory::Resumed(resumed) = &thread_history {
+            resumed.history.iter().rev().find_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+                    if event.thread_id == Some(resumed.conversation_id) =>
+                {
+                    Some(event.thread_settings.cwd.to_path_buf())
+                }
+                _ => None,
+            })
+        } else {
+            None
+        };
+        let history_cwd = history_cwd.or_else(|| thread_history.session_cwd());
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
@@ -4359,6 +4393,7 @@ impl ThreadRequestProcessor {
             );
             thread_summary.session_id = existing_thread.session_configured().session_id.to_string();
             thread_summary.thread_source = config_snapshot.thread_source.clone().map(Into::into);
+            apply_live_model_settings(&mut thread_summary, &config_snapshot);
             thread_summary.can_accept_direct_input = Some(can_accept_direct_input(
                 existing_thread.multi_agent_version(),
                 &config_snapshot.session_source,
@@ -4723,6 +4758,7 @@ impl ThreadRequestProcessor {
             )),
         };
         let mut thread = thread?;
+        apply_live_model_settings(&mut thread, &config_snapshot);
         thread.can_accept_direct_input = Some(can_accept_direct_input);
         thread.id = thread_id.to_string();
         thread.session_id = session_id;
@@ -5220,6 +5256,7 @@ impl ThreadRequestProcessor {
         ));
         thread.session_id = session_configured.session_id.to_string();
         thread.thread_source = config_snapshot.thread_source.clone().map(Into::into);
+        apply_live_model_settings(&mut thread, &config_snapshot);
         if thread.path.is_none() {
             thread.project_id = inherited_project_id.clone();
         }
@@ -6023,6 +6060,8 @@ pub(crate) fn thread_from_stored_thread(
         } else {
             thread.model_provider
         },
+        model: thread.model,
+        reasoning_effort: thread.reasoning_effort,
         created_at: thread.created_at.timestamp(),
         updated_at: thread.updated_at.timestamp(),
         recency_at: Some(thread.recency_at.timestamp()),
@@ -6194,6 +6233,8 @@ fn build_thread_from_snapshot(
         project_id: None,
         history_mode: config_snapshot.history_mode.into(),
         model_provider: config_snapshot.model_provider_id.clone(),
+        model: Some(config_snapshot.model.clone()),
+        reasoning_effort: config_snapshot.reasoning_effort.clone(),
         created_at: now,
         updated_at: now,
         recency_at: Some(now),

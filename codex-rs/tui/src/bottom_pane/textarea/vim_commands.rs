@@ -13,6 +13,7 @@ use super::VimTextObject;
 use super::VimTextObjectScope;
 use super::vim::VimFindMotion;
 use crate::key_hint::KeyBindingListExt;
+use crate::vim_search::SearchQuery;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -23,6 +24,13 @@ use unicode_segmentation::UnicodeSegmentation;
 pub(crate) enum VimEdit {
     Editor(VimEditorEdit),
     Text(String),
+}
+
+/// Vim command recording and searches preserved across same-draft restoration.
+#[derive(Debug, Default)]
+pub(crate) struct VimPersistentState {
+    pub(crate) commands: VimCommandState,
+    search: crate::vim_search::SearchQuery,
 }
 
 #[derive(Clone, Debug)]
@@ -38,12 +46,13 @@ pub(super) enum VimInsertPosition {
     OpenBelow,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum VimEditTarget {
     Character,
     Line,
     LineEnd,
     Motion(VimMotion),
+    Search(SearchQuery),
     TextObject {
         scope: VimTextObjectScope,
         object: VimTextObject,
@@ -57,7 +66,7 @@ pub(super) enum VimEditTarget {
     },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum VimAction {
     Insert(VimInsertPosition),
     Delete(VimEditTarget),
@@ -82,14 +91,19 @@ pub(super) enum VimAction {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct VimCommandState {
-    pending_change: Vec<VimEdit>,
-    last_change: Vec<VimEdit>,
+pub(crate) struct VimCommandState {
+    pub(super) pending_change: Vec<VimEdit>,
+    pub(crate) last_change: Vec<VimEdit>,
     changed: bool,
-    replaying: bool,
+    pub(super) replaying: bool,
 }
 
 impl TextArea {
+    pub(crate) fn swap_vim_persistent_state(&mut self, state: &mut VimPersistentState) {
+        std::mem::swap(&mut self.vim_commands, &mut state.commands);
+        std::mem::swap(&mut self.vim_search.last, &mut state.search);
+    }
+
     pub(crate) fn vim_repeat_actions(&self) -> Option<Vec<VimEdit>> {
         (!self.vim_commands.last_change.is_empty()).then(|| self.vim_commands.last_change.clone())
     }
@@ -119,7 +133,7 @@ impl TextArea {
             && !self.vim_commands.replaying
             && !self.vim_commands.pending_change.is_empty();
         let prior_len = self.text.len();
-        self.apply_vim_editor_action(action);
+        self.apply_vim_editor_action(action.clone());
         let changed = self.text.len() != prior_len;
         let deletion = matches!(
             action,
@@ -141,9 +155,9 @@ impl TextArea {
 
     pub(super) fn start_vim_edit(&mut self, action: VimAction) -> bool {
         let prior_len = self.text.len();
-        self.vim_commands.pending_change = vec![VimEdit::Editor(VimEditorEdit(action))];
+        self.vim_commands.pending_change = vec![VimEdit::Editor(VimEditorEdit(action.clone()))];
         self.vim_commands.changed = false;
-        if !self.apply_vim_editor_action(action) {
+        if !self.apply_vim_editor_action(action.clone()) {
             self.vim_commands.pending_change.clear();
             return false;
         }
@@ -180,7 +194,7 @@ impl TextArea {
 
     pub(crate) fn apply_vim_edit(&mut self, edit: &VimEdit) -> bool {
         match edit {
-            VimEdit::Editor(VimEditorEdit(action)) => self.apply_vim_editor_action(*action),
+            VimEdit::Editor(VimEditorEdit(action)) => self.apply_vim_editor_action(action.clone()),
             VimEdit::Text(text) => {
                 if self.vim_mode != VimMode::Insert {
                     return false;
@@ -193,6 +207,7 @@ impl TextArea {
 
     fn apply_vim_editor_action(&mut self, action: VimAction) -> bool {
         let prior_len = self.text.len();
+        let is_change = matches!(action, VimAction::Change(_));
         match action {
             VimAction::Insert(position) => {
                 match position {
@@ -223,7 +238,7 @@ impl TextArea {
                 self.vim_mode = VimMode::Insert;
             }
             VimAction::Delete(target) | VimAction::Change(target) => {
-                let operator = if matches!(action, VimAction::Delete(_)) {
+                let operator = if !is_change {
                     VimOperator::Delete
                 } else {
                     VimOperator::Change
@@ -254,6 +269,11 @@ impl TextArea {
                         }
                     }
                     VimEditTarget::Motion(motion) => self.apply_vim_operator(operator, motion),
+                    VimEditTarget::Search(query) => {
+                        if !self.apply_vim_search(&query, Some(operator)) {
+                            return false;
+                        }
+                    }
                     VimEditTarget::TextObject { scope, object } => {
                         let Some(range) = self.text_object_range(object, scope) else {
                             return false;
@@ -531,7 +551,7 @@ impl TextArea {
         self.set_cursor(self.first_non_blank_of_current_line());
     }
 
-    fn is_vim_command_target(&self, position: usize) -> bool {
+    pub(super) fn is_vim_command_target(&self, position: usize) -> bool {
         !self
             .elements
             .iter()

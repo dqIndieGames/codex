@@ -39,7 +39,6 @@ use crate::tools::runtimes::is_managed_proxy_env_var;
 use crate::tools::runtimes::unified_exec::UnifiedExecAttempt;
 use crate::tools::runtimes::unified_exec::UnifiedExecRequest as UnifiedExecToolRequest;
 use crate::tools::runtimes::unified_exec::UnifiedExecRuntime;
-use crate::tools::sandboxing::ApprovalAction;
 use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
@@ -71,7 +70,6 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
 use codex_core_plugins::PluginCommandAttribution;
 use codex_core_plugins::PluginMetricsSidecar;
 use codex_core_plugins::strip_output_env;
-use codex_features::Feature;
 use codex_network_proxy::NetworkPolicyDecider;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
@@ -83,6 +81,7 @@ use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::TerminalInteractionEvent;
 use codex_protocol::shell_environment::is_non_inheritable_env_var;
 use codex_sandboxing::SandboxCommand;
+use codex_shell_command::is_dangerous_command::DangerousCommandPlatform;
 use codex_tools::ToolName;
 use codex_utils_output_truncation::approx_tokens_from_byte_count;
 use codex_utils_path_uri::PathUri;
@@ -122,14 +121,14 @@ fn should_use_deterministic_process_ids() -> bool {
     cfg!(test) || deterministic_process_ids_forced_for_tests()
 }
 
-fn apply_unified_exec_env(mut env: HashMap<String, String>) -> HashMap<String, String> {
+pub(super) fn apply_unified_exec_env(mut env: HashMap<String, String>) -> HashMap<String, String> {
     for (key, value) in UNIFIED_EXEC_ENV {
         env.insert(key.to_string(), value.to_string());
     }
     env
 }
 
-fn exec_env_policy_from_shell_policy(
+pub(super) fn exec_env_policy_from_shell_policy(
     policy: &ShellEnvironmentPolicy,
 ) -> codex_exec_server::ExecEnvPolicy {
     let mut exclude = policy
@@ -464,7 +463,11 @@ impl UnifiedExecProcessManager {
     pub(crate) async fn release_process_id(&self, process_id: i32) {
         let removed = {
             let mut store = self.process_store.lock().await;
-            store.remove(process_id)
+            let entry = store.processes.remove(&process_id);
+            if !should_use_deterministic_process_ids() {
+                store.reserved_process_ids.remove(&process_id);
+            }
+            entry
         };
         if let Some(entry) = removed {
             unregister_network_approval_for_entry(&entry).await;
@@ -501,7 +504,7 @@ impl UnifiedExecProcessManager {
         let UnifiedExecAttempt {
             process,
             metrics_sidecar,
-            escalated,
+            permissions,
         } = attempt;
         let process = Arc::new(process);
         if let Some(completion) = completion.as_ref() {
@@ -564,7 +567,7 @@ impl UnifiedExecProcessManager {
                 request.hook_command.clone(),
                 cwd.clone(),
                 request.turn_environment.selection.environment_id.clone(),
-                escalated,
+                permissions,
                 plugin_attribution.clone(),
                 start,
                 request.process_id,
@@ -808,33 +811,31 @@ impl UnifiedExecProcessManager {
         // Different terminal sessions can be polled concurrently, but reads and
         // writes against one terminal must not overlap because they share a
         // draining output buffer and process lifecycle.
-        let (locked_process, approval) = {
+        let locked_process = {
             let store = self.process_store.lock().await;
             let entry = store
                 .processes
                 .get(&process_id)
                 .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
-            let approval = (!request.input.is_empty()
-                && (entry.tty || request.input != INTERRUPT)
-                && entry.escalated
-                && context
-                    .session
-                    .features()
-                    .enabled(Feature::WriteStdinApproval))
-            .then(|| ApprovalAction::WriteStdin {
-                id: entry.call_id.clone(),
-                approval_id: context.call_id.clone(),
-                environment_id: entry.environment_id.clone(),
-                process_id,
-                input: request.input.to_string(),
-                cwd: entry.cwd.clone(),
-                tty: entry.tty,
-            });
-            (Arc::clone(&entry.process), approval)
+            Arc::clone(&entry.process)
         };
         let _interaction_guard = locked_process.interaction_lock().lock_owned().await;
-        if let Some(approval) = approval {
-            let approval_reason = "Send input to an existing escalated terminal. The cwd is its launch directory; the terminal's current directory and state may have changed.".to_string();
+        // A queued write must observe strict review enabled while it was waiting.
+        let strict_auto_review = context
+            .session
+            .active_turn_context_and_strict_auto_review()
+            .await
+            .is_some_and(|(_, _, strict)| strict);
+        let approval = {
+            let store = self.process_store.lock().await;
+            let entry = store
+                .processes
+                .get(&process_id)
+                .filter(|entry| Arc::ptr_eq(&entry.process, &locked_process))
+                .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
+            entry.stdin_approval(context, request.input, strict_auto_review)?
+        };
+        if let Some((approval, approval_reason)) = approval {
             let reviewed = crate::guardian::format_guardian_action_pretty(
                 &approval.clone().into_guardian_request().map_err(|err| {
                     UnifiedExecError::StdinApproval(ToolError::Rejected(err.to_string()))
@@ -866,11 +867,6 @@ impl UnifiedExecProcessManager {
                     "terminal input and permission details are too large to review safely; use a smaller input or start a new terminal with fewer grants".to_string(),
                 )));
             }
-            let strict_auto_review = context
-                .session
-                .active_turn_context_and_strict_auto_review()
-                .await
-                .is_some_and(|(_, _, strict)| strict);
             let approval_context = ApprovalContext {
                 review_context: GuardianReviewContext::from(&context.step_context),
                 cancellation_token: Some(context.cancellation_token.clone()),
@@ -1119,7 +1115,7 @@ impl UnifiedExecProcessManager {
         hook_command: String,
         cwd: PathUri,
         environment_id: String,
-        escalated: bool,
+        permissions: super::TerminalPermissions,
         plugin_attribution: Option<PluginCommandAttribution>,
         started_at: Instant,
         process_id: i32,
@@ -1142,7 +1138,7 @@ impl UnifiedExecProcessManager {
             hook_command,
             tty,
             environment_id,
-            escalated,
+            permissions,
             network_approval,
             session: Arc::downgrade(&context.session),
             last_used: started_at,
@@ -1378,6 +1374,13 @@ impl UnifiedExecProcessManager {
             .shell
             .as_ref()
             .unwrap_or(session_shell.as_ref());
+        // Legacy executors omit the platform. Unknown reported platforms use the
+        // more conservative Windows rules rather than silently weakening checks.
+        let command_platform = match request.turn_environment.executor_platform_os.as_deref() {
+            Some("linux" | "macos") => DangerousCommandPlatform::Posix,
+            Some("windows") | Some(_) => DangerousCommandPlatform::Windows,
+            None => DangerousCommandPlatform::host(),
+        };
         let exec_approval_requirement = context
             .session
             .services
@@ -1399,6 +1402,7 @@ impl UnifiedExecProcessManager {
                 },
                 configured_shell,
                 &request.shell_mode,
+                command_platform,
             )
             .await;
         let req = UnifiedExecToolRequest {
