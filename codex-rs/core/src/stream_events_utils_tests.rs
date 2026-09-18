@@ -424,6 +424,7 @@ fn local1_first_turn_checklist_prefix_contains_current_local3_items() {
     assert!(prefix.contains("16. 配置了 `experimental_bearer_token` 的 provider"));
     assert!(prefix.contains("17. Windows 交付必须分为 GitHub build 和 GitHub release promotion 两段"));
     assert!(prefix.contains("18. context window 溢出后按图片梯子自愈"));
+    assert!(prefix.contains("19. 全局 `--account <账号名>` 只切换 Codex 登录凭据"));
     assert!(!prefix.contains("-local2"));
     assert!(prefix.ends_with("\n\n"));
 }
@@ -433,8 +434,8 @@ fn local3_first_turn_checklist_entries_match_numbered_document() {
     let entries = local3_first_turn_checklist_entries();
     let actual_ids = entries.iter().map(|(index, _)| *index).collect::<Vec<_>>();
     // L0 product truth: docs/local3-custom-feature-checklist-2026-05-10.md
-    // defines numbered items 1..=18 as the first-turn checklist shown to the user.
-    let expected_ids = (1..=18).collect::<Vec<_>>();
+    // defines numbered items 1..=19 as the first-turn checklist shown to the user.
+    let expected_ids = (1..=19).collect::<Vec<_>>();
 
     assert_eq!(actual_ids, expected_ids);
 }
