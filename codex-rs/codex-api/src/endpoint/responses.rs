@@ -122,7 +122,6 @@ impl<T: HttpTransport> ResponsesClient<T> {
             compression,
             turn_state,
         } = options;
-
         let provider = self.session.provider_snapshot();
         let body = if request.store && provider.is_azure_responses_endpoint() {
             let mut body = serde_json::to_value(&request).map_err(|e| {

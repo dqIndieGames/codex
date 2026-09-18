@@ -161,6 +161,7 @@ impl ModelContextScan {
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::ImagesShrunk(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TokenUsageRecord(_) => {}
         }
