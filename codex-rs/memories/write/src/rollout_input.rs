@@ -48,6 +48,7 @@ pub(crate) fn serialize_tiered_input(
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
+            | RolloutItem::ImagesShrunk(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::WorldState(_)
