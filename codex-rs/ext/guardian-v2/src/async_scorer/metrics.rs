@@ -40,6 +40,7 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             ApiError::Transport(TransportError::Connection(_)) => "connection_error",
             ApiError::Transport(TransportError::Network(_)) => "network_error",
             ApiError::Transport(TransportError::RetryLimit) => "retry_limit",
+            ApiError::Transport(TransportError::RetryInterrupted(_)) => "retry_interrupted",
             ApiError::Transport(TransportError::Build(_)) => "request_build_error",
             ApiError::Stream(_) => "stream_error",
             ApiError::ContextWindowExceeded => "context_window_exceeded",
