@@ -2845,8 +2845,12 @@ async fn get_account_and_auth_status_use_latest_provider_auth_config() -> Result
         },
     )?;
 
-    let mut mcp =
-        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let account_id = mcp
