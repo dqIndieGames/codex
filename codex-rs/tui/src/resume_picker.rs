@@ -4069,16 +4069,20 @@ mod tests {
         let local_params = thread_list_params(
             None,
             None,
+            SessionStatus::Active,
             resume_picker_provider_filter(&config, /*uses_remote_workspace*/ false),
             ThreadSortKey::UpdatedAt,
             /*include_non_interactive*/ false,
+            /*use_state_db_only*/ false,
         );
         let remote_params = thread_list_params(
             None,
             None,
+            SessionStatus::Active,
             resume_picker_provider_filter(&config, /*uses_remote_workspace*/ true),
             ThreadSortKey::UpdatedAt,
             /*include_non_interactive*/ false,
+            /*use_state_db_only*/ false,
         );
 
         assert_eq!(local_params.model_providers, None);
@@ -4093,9 +4097,11 @@ mod tests {
         let params = thread_list_params(
             None,
             None,
+            SessionStatus::Active,
             fork_picker_provider_filter(&config, /*uses_remote_workspace*/ false),
             ThreadSortKey::UpdatedAt,
             /*include_non_interactive*/ false,
+            /*use_state_db_only*/ false,
         );
 
         assert_eq!(
@@ -4112,9 +4118,11 @@ mod tests {
         let params = thread_list_params(
             None,
             None,
+            SessionStatus::Active,
             fork_picker_provider_filter(&config, /*uses_remote_workspace*/ true),
             ThreadSortKey::UpdatedAt,
             /*include_non_interactive*/ false,
+            /*use_state_db_only*/ false,
         );
 
         assert_eq!(params.model_providers, None);
