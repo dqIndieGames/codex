@@ -879,6 +879,7 @@ async fn update_rollout_metadata(
                 cwd: metadata.meta.cwd.clone(),
                 model_provider_id: store.config.default_model_provider_id.clone(),
                 generate_memories: metadata.meta.memory_mode.as_deref() != Some("disabled"),
+                rollout_batch_flush_enabled: store.config.rollout_batch_flush_enabled,
             },
             RolloutRecorderParams::resume(path.to_path_buf()),
             writer_lock.clone(),

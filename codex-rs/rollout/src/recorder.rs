@@ -878,6 +878,7 @@ impl RolloutRecorder {
     ) -> std::io::Result<Self> {
         // Clone the cwd for the spawned task to collect git info asynchronously.
         let cwd = config.cwd().to_path_buf();
+        let flush_each_line = !config.rollout_batch_flush_enabled();
         let state = match params {
             RolloutRecorderParams::Create {
                 session_id,
@@ -954,13 +955,18 @@ impl RolloutRecorder {
                     rollout_path: path,
                     ordinal_state,
                     last_logged_error: None,
+                    flush_each_line,
+                    batch_rollback_len: None,
                 }
             }
             RolloutRecorderParams::Resume { path } => {
                 let (path, file, ordinal_state) =
                     open_rollout_for_append(path.as_path(), writer_lock.clone()).await?;
                 RolloutWriterState {
-                    writer: Some(JsonlWriter { file }),
+                    writer: Some(JsonlWriter {
+                        file,
+                        flush_each_line,
+                    }),
                     deferred_creation: false,
                     pending_items: Vec::new(),
                     meta: None,
@@ -968,6 +974,8 @@ impl RolloutRecorder {
                     rollout_path: path,
                     ordinal_state,
                     last_logged_error: None,
+                    flush_each_line,
+                    batch_rollback_len: None,
                 }
             }
         };
@@ -1758,6 +1766,8 @@ struct RolloutWriterState {
     rollout_path: PathBuf,
     ordinal_state: RolloutOrdinalState,
     last_logged_error: Option<String>,
+    flush_each_line: bool,
+    batch_rollback_len: Option<u64>,
 }
 
 impl RolloutWriterState {
@@ -1846,6 +1856,7 @@ impl RolloutWriterState {
         let file = open_log_file(self.rollout_path.as_path())?;
         self.writer = Some(JsonlWriter {
             file: tokio::fs::File::from_std(file),
+            flush_each_line: self.flush_each_line,
         });
         self.deferred_creation = false;
         Ok(())
@@ -1868,6 +1879,10 @@ impl RolloutWriterState {
 
     async fn write_pending_once(&mut self) -> std::io::Result<()> {
         self.ensure_writer_open().await?;
+        self.rollback_failed_batch_if_needed().await?;
+        if !self.flush_each_line {
+            return self.write_pending_batch_once().await;
+        }
         self.write_session_meta_if_needed().await?;
 
         self.write_pending_items_once().await?;
@@ -1876,6 +1891,72 @@ impl RolloutWriterState {
             writer.file.flush().await?;
         }
         Ok(())
+    }
+
+    async fn rollback_failed_batch_if_needed(&mut self) -> std::io::Result<()> {
+        let Some(original_len) = self.batch_rollback_len else {
+            return Ok(());
+        };
+        let Some(writer) = self.writer.as_mut() else {
+            return Err(IoError::other("rollout writer is not open"));
+        };
+        writer.file.set_len(original_len).await?;
+        writer.file.flush().await?;
+        self.batch_rollback_len = None;
+        Ok(())
+    }
+
+    async fn write_pending_batch_once(&mut self) -> std::io::Result<()> {
+        let ordinal_before_write = self.ordinal_state;
+        let pending_count = self.pending_items.len();
+        let Some(writer) = self.writer.as_ref() else {
+            return Err(IoError::other("rollout writer is not open"));
+        };
+        let batch_start_len = writer.file.metadata().await?.len();
+        self.batch_rollback_len = Some(batch_start_len);
+        let result = async {
+            if let Some(session_meta) = self.meta.as_ref().cloned() {
+                write_session_meta(
+                    self.writer.as_mut(),
+                    &mut self.ordinal_state,
+                    session_meta,
+                    &self.cwd,
+                )
+                .await?;
+            }
+
+            let Some(writer) = self.writer.as_mut() else {
+                return Err(IoError::other("rollout writer is not open"));
+            };
+            for item in self.pending_items.iter().take(pending_count) {
+                let ordinal = self.ordinal_state.current()?;
+                writer.write_rollout_item(item, ordinal).await?;
+                self.ordinal_state.advance();
+            }
+            writer.file.flush().await
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                self.batch_rollback_len = None;
+                self.meta = None;
+                self.pending_items.drain(..pending_count);
+                Ok(())
+            }
+            Err(err) => {
+                self.ordinal_state = ordinal_before_write;
+                match self.rollback_failed_batch_if_needed().await {
+                    Ok(()) => Err(err),
+                    Err(rollback_err) => Err(IoError::new(
+                        err.kind(),
+                        format!(
+                            "rollout batch write failed: {err}; rollback to byte {batch_start_len} failed: {rollback_err}"
+                        ),
+                    )),
+                }
+            }
+        }
     }
 
     async fn write_pending_items_once(&mut self) -> std::io::Result<()> {
@@ -1987,7 +2068,10 @@ pub async fn append_rollout_item_to_path(
     let (_rollout_path, file, ordinal_state) =
         open_rollout_for_append(rollout_path, /*writer_lock*/ None).await?;
     let ordinal = ordinal_state.current()?;
-    let mut writer = JsonlWriter { file };
+    let mut writer = JsonlWriter {
+        file,
+        flush_each_line: true,
+    };
     writer.write_rollout_item(item, ordinal).await
 }
 
@@ -2034,6 +2118,7 @@ fn ensure_rollout_is_newline_terminated(file: &mut File) -> std::io::Result<()> 
 
 struct JsonlWriter {
     file: tokio::fs::File,
+    flush_each_line: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -2069,7 +2154,9 @@ impl JsonlWriter {
         let mut json = serde_json::to_string(item)?;
         json.push('\n');
         self.file.write_all(json.as_bytes()).await?;
-        self.file.flush().await?;
+        if self.flush_each_line {
+            self.file.flush().await?;
+        }
         Ok(())
     }
 }

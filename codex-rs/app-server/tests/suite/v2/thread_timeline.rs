@@ -54,6 +54,7 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
             codex_home: codex_home.path().to_path_buf(),
             sqlite,
             default_model_provider_id: "mock_provider".to_string(),
+            rollout_batch_flush_enabled: true,
         },
         Some(state_db),
     );

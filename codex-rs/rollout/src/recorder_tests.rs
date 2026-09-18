@@ -950,6 +950,7 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
     let mut state = RolloutWriterState {
         writer: Some(JsonlWriter {
             file: tokio::fs::File::from_std(read_only_file),
+            flush_each_line: false,
         }),
         deferred_creation: false,
         pending_items: Vec::new(),
@@ -958,6 +959,8 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
         rollout_path: rollout_path.clone(),
         ordinal_state: RolloutOrdinalState::Legacy,
         last_logged_error: None,
+        flush_each_line: false,
+        batch_rollback_len: None,
     };
     state.add_items(vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
         AgentMessageEvent {
@@ -975,6 +978,54 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
         text_after_retry.contains("queued-after-writer-error"),
         "flush should retry after reopening and write buffered items"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn batch_write_error_rolls_back_partial_batch() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    File::create(&rollout_path)?;
+    let initial_len = std::fs::metadata(&rollout_path)?.len();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(&rollout_path)?;
+    let mut state = RolloutWriterState {
+        writer: Some(JsonlWriter {
+            file: tokio::fs::File::from_std(file),
+            flush_each_line: false,
+        }),
+        deferred_creation: false,
+        pending_items: Vec::new(),
+        meta: None,
+        cwd: home.path().to_path_buf(),
+        rollout_path: rollout_path.clone(),
+        ordinal_state: RolloutOrdinalState::Paginated {
+            next: Some(u64::MAX),
+        },
+        last_logged_error: None,
+        flush_each_line: false,
+        batch_rollback_len: None,
+    };
+    let pending_items = vec![agent_message_item("first"), agent_message_item("second")];
+    let pending_count = pending_items.len();
+    state.add_items(pending_items);
+
+    state
+        .flush()
+        .await
+        .expect_err("ordinal overflow after a partial batch should fail");
+
+    assert_eq!(std::fs::metadata(&rollout_path)?.len(), initial_len);
+    assert_eq!(state.pending_items.len(), pending_count);
+    assert_eq!(
+        state.ordinal_state,
+        RolloutOrdinalState::Paginated {
+            next: Some(u64::MAX),
+        }
+    );
+    assert_eq!(state.batch_rollback_len, None);
     Ok(())
 }
 
