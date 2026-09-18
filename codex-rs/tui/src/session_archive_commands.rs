@@ -246,6 +246,7 @@ pub(super) async fn start_app_server_for_session_command(
 
     let workload_identity_selected = codex_login::is_workload_identity_selected();
     let reuse_implicit_local_daemon = !workload_identity_selected
+        && !super::auth_account_override_is_set()
         && super::can_reuse_implicit_local_daemon(
             &cli_kv_overrides,
             &launch_loader_overrides,

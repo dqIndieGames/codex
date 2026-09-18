@@ -34,6 +34,7 @@ pub async fn run_session_queue_command(
     let mut app_server =
         start_app_server_for_session_command(options, codex_home.to_path_buf()).await?;
     if !explicit_remote
+        && !super::auth_account_override_is_set()
         && app_server.uses_embedded_app_server()
         && super::maybe_probe_default_daemon_socket(codex_home.as_path())
             .await

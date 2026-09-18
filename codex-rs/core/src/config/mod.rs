@@ -176,6 +176,10 @@ mod resolved_permission_profile;
 mod schema;
 mod token_budget_startup;
 pub use auth_keyring::bootstrap_auth_config;
+pub use auth_keyring::CODEX_AUTH_ACCOUNT_ENV_VAR;
+pub use auth_keyring::auth_account_override_is_set;
+pub use auth_keyring::set_auth_account_override;
+pub use auth_keyring::validate_auth_account_name;
 pub use auth_keyring::resolve_bootstrap_auth_keyring_backend_kind;
 pub use codex_agent_roles::AgentRoleConfig;
 pub use codex_config::ConfigLoadOptions;
@@ -844,6 +848,10 @@ pub struct Config {
     /// auto: Use the OS-specific keyring service if available, otherwise use a file.
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
 
+    /// Internal local3 account selected for this invocation. All non-auth data
+    /// continues to use `codex_home`.
+    pub auth_account: Option<String>,
+
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: Constrained<HashMap<String, McpServerConfig>>,
 
@@ -1367,7 +1375,7 @@ pub struct TerminalResizeReflowConfig {
 
 impl AuthManagerConfig for Config {
     fn codex_home(&self) -> PathBuf {
-        self.codex_home.to_path_buf()
+        self.auth_storage_home()
     }
 
     fn cli_auth_credentials_store_mode(&self) -> AuthCredentialsStoreMode {
@@ -4200,6 +4208,9 @@ impl Config {
         )
         .map_err(std::io::Error::from)?;
         let otel = otel::resolve_config(cfg.otel.unwrap_or_default(), &mut startup_warnings);
+        let auth_account = auth_keyring::auth_account_for_process()?;
+        let account_selected = auth_account.is_some();
+        auth_keyring::resolve_auth_storage_home(codex_home.as_path(), auth_account.as_deref())?;
         let config = Self {
             model,
             service_tier,
@@ -4247,13 +4258,15 @@ impl Config {
             include_environment_context,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
-            cli_auth_credentials_store_mode: match cli_auth_credentials_store {
-                Some(required) => required.value,
-                None => resolve_cli_auth_credentials_store_mode(
+            cli_auth_credentials_store_mode: auth_keyring::resolve_account_auth_store_mode(
+                account_selected,
+                cli_auth_credentials_store.as_ref().map(|required| required.value),
+                resolve_cli_auth_credentials_store_mode(
                     cfg.cli_auth_credentials_store.unwrap_or_default(),
                     env!("CARGO_PKG_VERSION"),
                 ),
-            },
+            )?,
+            auth_account,
             mcp_servers,
             non_prefixed_mcp_tool_servers,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"

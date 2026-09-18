@@ -72,6 +72,57 @@ fn login_with_api_key_reads_stdin_and_writes_auth_json() -> Result<()> {
 }
 
 #[test]
+fn named_accounts_isolate_auth_files_and_logout() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_file_auth_config(codex_home.path())?;
+
+    for (account, key) in [("alpha", "sk-alpha"), ("工作", "sk-work")] {
+        codex_command(codex_home.path())?
+            .args([
+                "--account",
+                account,
+                "-c",
+                "forced_login_method=\"api\"",
+                "login",
+                "--with-api-key",
+            ])
+            .write_stdin(format!("{key}\n"))
+            .assert()
+            .success();
+        let auth = read_auth_json(&codex_home.path().join("accounts").join(account))?;
+        assert_eq!(auth["OPENAI_API_KEY"], key);
+    }
+
+    assert!(!codex_home.path().join("auth.json").exists());
+    codex_command(codex_home.path())?
+        .args(["login", "--account", "alpha", "status"])
+        .assert()
+        .success();
+    codex_command(codex_home.path())?
+        .args(["logout", "--account", "alpha"])
+        .assert()
+        .success();
+
+    assert!(!codex_home
+        .path()
+        .join("accounts")
+        .join("alpha")
+        .join("auth.json")
+        .exists());
+    assert!(codex_home
+        .path()
+        .join("accounts")
+        .join("工作")
+        .join("auth.json")
+        .exists());
+    codex_command(codex_home.path())?
+        .args(["--account", "工作", "login", "status"])
+        .assert()
+        .success();
+    Ok(())
+}
+
+#[test]
 fn login_status_reports_auth_storage_errors() -> Result<()> {
     let codex_home = TempDir::new()?;
     write_file_auth_config(codex_home.path())?;
@@ -180,6 +231,38 @@ fn logout_clears_only_the_selected_bedrock_provider() -> Result<()> {
         assert_eq!(actual_config, expected_config);
     }
 
+    Ok(())
+}
+
+#[test]
+fn named_account_logout_does_not_modify_shared_bedrock_config() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let config_path = codex_home.path().join("config.toml");
+    let config_contents = "model_provider = \"amazon-bedrock\"\n\
+        [model_providers.amazon-bedrock]\n\
+        base_url = \"https://bedrock.example.com/v1\"\n\
+        [model_providers.amazon-bedrock.aws]\n\
+        profile = \"shared-profile\"\n\
+        region = \"us-west-2\"\n";
+    std::fs::write(&config_path, config_contents)?;
+    let named_home = codex_home.path().join("accounts").join("alpha");
+    login_with_bedrock_access_keys(
+        &named_home,
+        "named-access-key-id",
+        "named-secret-access-key",
+        None,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
+
+    codex_command(codex_home.path())?
+        .args(["--account", "alpha", "logout"])
+        .assert()
+        .success()
+        .stderr(contains("Successfully logged out"));
+
+    assert!(!named_home.join("auth.json").exists());
+    assert_eq!(std::fs::read_to_string(config_path)?, config_contents);
     Ok(())
 }
 

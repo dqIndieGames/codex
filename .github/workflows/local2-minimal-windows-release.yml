@@ -35,6 +35,16 @@ jobs:
         shell: bash
         run: cargo test -p codex-core --lib first_turn_checklist -- --nocapture
 
+      - name: Run named authentication account regression tests
+        shell: bash
+        run: |
+          cargo test -p codex-core --lib auth_account -- --nocapture
+          cargo test -p codex-core --lib account_store_mode_forces_file_and_rejects_conflicting_managed_policy -- --nocapture
+          cargo test -p codex-cli --bin codex account_is_a_global_option_and_rejects_unsafe_names -- --nocapture
+          cargo test -p codex-cli --test login named_account -- --nocapture
+          cargo test -p codex-tui --lib named_auth_account_is_not_eligible_for_the_shared_local_daemon -- --nocapture
+          cargo test -p codex-app-server --test all named_account_api_key_login_and_logout_use_only_named_auth_file -- --nocapture
+
       - name: Run image-ladder and rollout replay regression tests
         shell: bash
         run: cargo test -p codex-core --lib -- images_shrunk rollout_reconstruction image_ladder --nocapture
@@ -89,9 +99,75 @@ jobs:
             throw "Expected $expectedDisplayVersion version output from $exe, got: $version"
           }
 
-          & $exe --help | Select-Object -First 30
+          $helpText = (& $exe --help | Out-String)
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
+          }
+          if ($helpText -notmatch '--account <NAME>') {
+            throw 'Expected global --account <NAME> in codex.exe help output'
+          }
+
+          $accountHome = Join-Path $env:RUNNER_TEMP ("codex-account-smoke-" + [guid]::NewGuid().ToString('N'))
+          $previousCodexHome = $env:CODEX_HOME
+          try {
+            New-Item -ItemType Directory -Force -Path $accountHome | Out-Null
+            $env:CODEX_HOME = $accountHome
+            'sk-default-smoke' | & $exe -c 'forced_login_method="api"' login --with-api-key
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $defaultAuthPath = Join-Path $accountHome 'auth.json'
+            $defaultAuthHash = (Get-FileHash -LiteralPath $defaultAuthPath -Algorithm SHA256).Hash
+            foreach ($entry in @(
+              @{ Name = 'alpha'; Key = 'sk-alpha-smoke' },
+              @{ Name = 'beta'; Key = 'sk-beta-smoke' }
+            )) {
+              $entry.Key | & $exe --account $entry.Name -c 'forced_login_method="api"' login --with-api-key
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              $authPath = Join-Path $accountHome ("accounts\{0}\auth.json" -f $entry.Name)
+              if (-not (Test-Path -LiteralPath $authPath)) {
+                throw "Missing named account auth file: $authPath"
+              }
+            }
+            if ((Get-FileHash -LiteralPath $defaultAuthPath -Algorithm SHA256).Hash -ne $defaultAuthHash) {
+              throw 'Named account login unexpectedly modified the default auth.json'
+            }
+            $statusProcesses = foreach ($accountName in @('alpha', 'beta')) {
+              $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+              $startInfo.FileName = $exe
+              $startInfo.UseShellExecute = $false
+              $startInfo.CreateNoWindow = $true
+              $startInfo.Environment['CODEX_HOME'] = $accountHome
+              $startInfo.ArgumentList.Add('--account')
+              $startInfo.ArgumentList.Add($accountName)
+              $startInfo.ArgumentList.Add('login')
+              $startInfo.ArgumentList.Add('status')
+              [System.Diagnostics.Process]::Start($startInfo)
+            }
+            foreach ($process in $statusProcesses) {
+              $process.WaitForExit()
+              if ($process.ExitCode -ne 0) {
+                throw "Concurrent named account status failed with exit code $($process.ExitCode)"
+              }
+            }
+            & $exe --account alpha login status
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $exe --account alpha logout
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if (Test-Path -LiteralPath (Join-Path $accountHome 'accounts\alpha\auth.json')) {
+              throw 'Named account logout did not remove alpha auth.json'
+            }
+            & $exe --account beta login status
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $daemonError = (& $exe --account beta app-server daemon version 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0 -or $daemonError -notmatch 'named accounts use an embedded app-server') {
+              throw 'Named account daemon lifecycle command was not rejected explicitly'
+            }
+            $proxyError = (& $exe --account beta app-server proxy 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0 -or $proxyError -notmatch 'named accounts use an embedded app-server') {
+              throw 'Named account app-server proxy was not rejected explicitly'
+            }
+          }
+          finally {
+            $env:CODEX_HOME = $previousCodexHome
           }
 
       - name: Package codex.exe

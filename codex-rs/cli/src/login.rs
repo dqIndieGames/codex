@@ -182,7 +182,7 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
 
     let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
     match login_with_chatgpt(
-        config.codex_home.to_path_buf(),
+        config.auth_storage_home(),
         effective_chatgpt_workspaces,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
@@ -218,7 +218,7 @@ pub async fn run_login_with_api_key(
     }
 
     match login_with_api_key(
-        &config.codex_home,
+        &config.auth_storage_home(),
         &api_key,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
@@ -253,7 +253,7 @@ pub async fn run_login_with_access_token(
     let auth_route_config = config.auth_route_config();
     let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
     match login_with_access_token(
-        &config.codex_home,
+        &config.auth_storage_home(),
         &access_token,
         config.cli_auth_credentials_store_mode,
         effective_chatgpt_workspaces.as_deref(),
@@ -333,7 +333,7 @@ pub async fn run_login_with_device_code(
     }
     let auth_route_config = config.auth_route_config();
     clear_existing_auth_before_login(
-        &config.codex_home,
+        &config.auth_storage_home(),
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
         &auth_route_config,
@@ -341,7 +341,7 @@ pub async fn run_login_with_device_code(
     .await;
     let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
     let mut opts = ServerOptions::new(
-        config.codex_home.to_path_buf(),
+        config.auth_storage_home(),
         client_id.unwrap_or(CLIENT_ID.to_string()),
         effective_chatgpt_workspaces,
         config.cli_auth_credentials_store_mode,
@@ -384,7 +384,7 @@ pub async fn run_login_with_device_code_fallback_to_browser(
     }
     let auth_route_config = config.auth_route_config();
     clear_existing_auth_before_login(
-        &config.codex_home,
+        &config.auth_storage_home(),
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
         &auth_route_config,
@@ -393,7 +393,7 @@ pub async fn run_login_with_device_code_fallback_to_browser(
 
     let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
     let mut opts = ServerOptions::new(
-        config.codex_home.to_path_buf(),
+        config.auth_storage_home(),
         client_id.unwrap_or(CLIENT_ID.to_string()),
         effective_chatgpt_workspaces,
         config.cli_auth_credentials_store_mode,
@@ -512,7 +512,7 @@ pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     let auth_route_config = config.auth_route_config();
 
     let logged_out = match logout_with_revoke(
-        &config.codex_home,
+        &config.auth_storage_home(),
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
         &auth_route_config,
@@ -527,7 +527,9 @@ pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     };
 
     let cleared_bedrock_config =
-        if let Some(paths) = ConfigEditsBuilder::bedrock_provider_config_paths_to_clear(&config) {
+        if config.auth_account.is_none()
+            && let Some(paths) = ConfigEditsBuilder::bedrock_provider_config_paths_to_clear(&config)
+        {
             let edits = paths
                 .into_iter()
                 .map(|segments| ConfigEdit::ClearPath { segments });

@@ -150,16 +150,17 @@ pub(super) async fn run_main_inner(
         .await;
     }
 
-    let reuse_implicit_local_daemon = !cli.shared.worktree
-        && !cli.oss
-        && !workload_identity_selected
-        && (cli.agents_overview
-            || can_reuse_implicit_local_daemon(
-                &cli_kv_overrides,
-                &launch_loader_overrides,
-                strict_config,
-                cli.bypass_hook_trust,
-            ));
+    let reuse_implicit_local_daemon = should_reuse_implicit_local_daemon_for_startup(
+        cli.shared.worktree,
+        cli.oss,
+        workload_identity_selected,
+        cli.agents_overview,
+        auth_account_override_is_set(),
+        &cli_kv_overrides,
+        &launch_loader_overrides,
+        strict_config,
+        cli.bypass_hook_trust,
+    );
     let search_only_config_override = !workload_identity_selected
         && cli.web_search
         && startup_preflight::has_only_search_config_override(&cli_kv_overrides)

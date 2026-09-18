@@ -1096,6 +1096,62 @@ async fn login_account_api_key_succeeds_and_notifies() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn named_account_api_key_login_and_logout_use_only_named_auth_file() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[
+            ("OPENAI_API_KEY", None),
+            ("CODEX_INTERNAL_AUTH_ACCOUNT", Some("alpha")),
+        ])
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+
+    let login_id = mcp
+        .send_login_account_api_key_request("sk-named-app-server")
+        .await?;
+    let login: LoginAccountResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(login_id)).await??;
+    assert_eq!(login, LoginAccountResponse::ApiKey {});
+
+    let named_auth = codex_home
+        .path()
+        .join("accounts")
+        .join("alpha")
+        .join("auth.json");
+    assert!(named_auth.exists());
+    assert!(!codex_home.path().join("auth.json").exists());
+
+    let config_before = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
+    let bedrock_id = mcp
+        .send_login_account_amazon_bedrock_request("managed-bedrock-api-key", "us-west-2")
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(bedrock_id)),
+    )
+    .await??;
+    assert_eq!(
+        error.error.message,
+        "Amazon Bedrock login is not supported with --account because provider configuration is shared."
+    );
+    assert_eq!(
+        std::fs::read_to_string(codex_home.path().join("config.toml"))?,
+        config_before
+    );
+
+    let logout_id = mcp.send_logout_account_request().await?;
+    let _: LogoutAccountResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(logout_id)).await??;
+    assert!(!named_auth.exists());
+    assert!(!codex_home.path().join("auth.json").exists());
+    Ok(())
+}
+
 #[test_case("amazonBedrock"; "api_key")]
 #[test_case("amazonBedrockAccessKeys"; "access_keys")]
 #[tokio::test]

@@ -381,6 +381,11 @@ impl AccountRequestProcessor {
     }
 
     fn ensure_bedrock_login_allowed(&self) -> Result<(), JSONRPCErrorError> {
+        if self.config.auth_account.is_some() {
+            return Err(invalid_request(
+                "Amazon Bedrock login is not supported with --account because provider configuration is shared.",
+            ));
+        }
         if self.auth_manager.is_workload_identity_selected() {
             return Err(self.configured_auth_owned_by_host_error());
         }
@@ -424,7 +429,7 @@ impl AccountRequestProcessor {
         }
 
         match login_with_api_key(
-            &self.config.codex_home,
+            &self.config.auth_storage_home(),
             &params.api_key,
             self.config.cli_auth_credentials_store_mode,
             self.config.auth_keyring_backend_kind(),
@@ -500,7 +505,7 @@ impl AccountRequestProcessor {
 
             match credentials {
                 BedrockLoginCredentials::ApiKey(api_key) => login_with_bedrock_api_key(
-                    &self.config.codex_home,
+                    &self.config.auth_storage_home(),
                     api_key.trim(),
                     region,
                     self.config.cli_auth_credentials_store_mode,
@@ -516,7 +521,7 @@ impl AccountRequestProcessor {
                         .map(str::trim)
                         .filter(|token| !token.is_empty());
                     login_with_bedrock_access_keys(
-                        &self.config.codex_home,
+                        &self.config.auth_storage_home(),
                         access_key_id.trim(),
                         secret_access_key.trim(),
                         session_token,
@@ -566,7 +571,7 @@ impl AccountRequestProcessor {
             codex_streamlined_login,
             login_success_page,
             ..LoginServerOptions::new(
-                config.codex_home.to_path_buf(),
+                config.auth_storage_home(),
                 oauth_client_id(),
                 self.auth_manager.effective_chatgpt_workspaces(),
                 config.cli_auth_credentials_store_mode,
@@ -969,7 +974,9 @@ impl AccountRequestProcessor {
             }
         }
 
-        if config.model_provider.is_amazon_bedrock() {
+        if self.config.auth_account.is_none()
+            && config.model_provider.is_amazon_bedrock()
+        {
             clear_user_model_provider_if_bedrock(&self.config_manager, &config).await?;
         }
 

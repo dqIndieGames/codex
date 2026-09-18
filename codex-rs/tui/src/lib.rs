@@ -9,6 +9,7 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::ConfigTomlLoadResult;
 use crate::legacy_core::config::bootstrap_auth_config;
+use crate::legacy_core::config::auth_account_override_is_set;
 use crate::legacy_core::config::load_config_toml_with_layer_stack;
 #[cfg(test)]
 use crate::legacy_core::config::resolve_bootstrap_http_client_factory;
@@ -992,6 +993,31 @@ fn can_reuse_implicit_local_daemon(
         && loader_overrides_are_default(loader_overrides)
         && !strict_config
         && !has_non_replayable_launch_overrides
+}
+
+#[allow(clippy::too_many_arguments)]
+fn should_reuse_implicit_local_daemon_for_startup(
+    worktree: bool,
+    oss: bool,
+    workload_identity_selected: bool,
+    agents_overview: bool,
+    named_auth_account_selected: bool,
+    cli_kv_overrides: &[(String, toml::Value)],
+    loader_overrides: &LoaderOverrides,
+    strict_config: bool,
+    has_non_replayable_launch_overrides: bool,
+) -> bool {
+    !worktree
+        && !oss
+        && !workload_identity_selected
+        && !named_auth_account_selected
+        && (agents_overview
+            || can_reuse_implicit_local_daemon(
+                cli_kv_overrides,
+                loader_overrides,
+                strict_config,
+                has_non_replayable_launch_overrides,
+            ))
 }
 
 /// Restore terminal modes before a fatal startup exit bypasses destructor cleanup.
@@ -2964,6 +2990,32 @@ requires_openai_auth = {requires_openai_auth}
             /*has_non_replayable_launch_overrides*/ true,
         ));
         Ok(())
+    }
+
+    #[test]
+    fn named_auth_account_is_not_eligible_for_the_shared_local_daemon() {
+        assert!(!should_reuse_implicit_local_daemon_for_startup(
+            /*worktree*/ false,
+            /*oss*/ false,
+            /*workload_identity_selected*/ false,
+            /*agents_overview*/ true,
+            /*named_auth_account_selected*/ true,
+            &[],
+            &LoaderOverrides::default(),
+            /*strict_config*/ false,
+            /*has_non_replayable_launch_overrides*/ false,
+        ));
+        assert!(should_reuse_implicit_local_daemon_for_startup(
+            /*worktree*/ false,
+            /*oss*/ false,
+            /*workload_identity_selected*/ false,
+            /*agents_overview*/ true,
+            /*named_auth_account_selected*/ false,
+            &[],
+            &LoaderOverrides::default(),
+            /*strict_config*/ false,
+            /*has_non_replayable_launch_overrides*/ false,
+        ));
     }
 
     #[test]

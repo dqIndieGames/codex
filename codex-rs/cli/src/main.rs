@@ -96,6 +96,8 @@ use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_config_toml_with_layer_stack;
 use codex_core::config::resolve_profile_v2_config_path;
+use codex_core::config::set_auth_account_override;
+use codex_core::config::validate_auth_account_name;
 use codex_features::FEATURES;
 use codex_features::Stage;
 use codex_features::is_known_feature_key;
@@ -132,6 +134,10 @@ struct MultitoolCli {
     #[clap(flatten)]
     pub config_overrides: CliConfigOverrides,
 
+    /// Use a named local3 authentication account while sharing all other Codex data.
+    #[arg(long, global = true, value_name = "NAME", value_parser = parse_auth_account_name)]
+    account: Option<String>,
+
     #[clap(flatten)]
     pub feature_toggles: FeatureToggles,
 
@@ -143,6 +149,11 @@ struct MultitoolCli {
 
     #[clap(subcommand)]
     subcommand: Option<Subcommand>,
+}
+
+fn parse_auth_account_name(value: &str) -> Result<String, String> {
+    validate_auth_account_name(value)?;
+    Ok(value.to_string())
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -1139,6 +1150,7 @@ async fn cli_main(
 ) -> anyhow::Result<()> {
     let MultitoolCli {
         config_overrides: mut root_config_overrides,
+        account,
         feature_toggles,
         remote,
         mut interactive,
@@ -1148,6 +1160,10 @@ async fn cli_main(
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
+    let named_account_requested = account.is_some();
+    if let Some(account) = account {
+        set_auth_account_override(account).map_err(anyhow::Error::msg)?;
+    }
     let agents_options = match &subcommand {
         Some(Subcommand::Agents(options)) => Some(options),
         _ => None,
@@ -1378,7 +1394,13 @@ async fn cli_main(
                         std::process::exit(0);
                     }
                 }
-                Some(AppServerSubcommand::Daemon(daemon_cli)) => match daemon_cli.subcommand {
+                Some(AppServerSubcommand::Daemon(daemon_cli)) => {
+                    if named_account_requested {
+                        anyhow::bail!(
+                            "--account cannot be used with app-server daemon commands; named accounts use an embedded app-server"
+                        );
+                    }
+                    match daemon_cli.subcommand {
                     AppServerDaemonSubcommand::Start => {
                         print_app_server_daemon_output(AppServerLifecycleCommand::Start).await?;
                     }
@@ -1425,8 +1447,14 @@ async fn cli_main(
                         let http_client_factory = updater_http_client_factory(config);
                         codex_app_server_daemon::run_pid_update_loop(http_client_factory).await?;
                     }
-                },
+                    }
+                }
                 Some(AppServerSubcommand::Proxy(proxy_cli)) => {
+                    if named_account_requested {
+                        anyhow::bail!(
+                            "--account cannot be used with app-server proxy; named accounts use an embedded app-server"
+                        );
+                    }
                     let socket_path = match proxy_cli.socket_path {
                         Some(socket_path) => socket_path,
                         None => {
@@ -3029,6 +3057,34 @@ mod tests {
         assert!(size < 64 * 1024, "interactive TUI future is {size} bytes");
     }
 
+    #[test]
+    fn account_is_a_global_option_and_rejects_unsafe_names() {
+        for args in [
+            vec!["codex", "--account", "工作"],
+            vec!["codex", "exec", "--account", "work-1", "hello"],
+            vec!["codex", "login", "--account", "work-1", "status"],
+        ] {
+            let expected = if args.contains(&"工作") {
+                "工作"
+            } else {
+                "work-1"
+            };
+            assert_eq!(
+                MultitoolCli::try_parse_from(args)
+                    .expect("named account should parse")
+                    .account
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+
+        for unsafe_name in ["../work", "a/b", "CON", " work"] {
+            assert!(
+                MultitoolCli::try_parse_from(["codex", "--account", unsafe_name]).is_err()
+            );
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_update_command_resolution_ignores_relative_path_entries() {
@@ -3165,6 +3221,7 @@ mod tests {
         let MultitoolCli {
             mut interactive,
             config_overrides: mut root_overrides,
+            account: _,
             subcommand,
             feature_toggles: _,
             remote: _,
@@ -3202,6 +3259,7 @@ mod tests {
         let MultitoolCli {
             mut interactive,
             config_overrides: mut root_overrides,
+            account: _,
             subcommand,
             feature_toggles: _,
             remote: _,
@@ -3246,6 +3304,7 @@ mod tests {
         let MultitoolCli {
             interactive,
             config_overrides: root_overrides,
+            account: _,
             subcommand,
             feature_toggles: _,
             remote: _,

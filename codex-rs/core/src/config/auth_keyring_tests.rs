@@ -14,6 +14,96 @@ use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 
 #[test]
+fn auth_account_names_are_safe_path_components() {
+    for accepted in ["work", "work-1", "工作"] {
+        assert_eq!(validate_auth_account_name(accepted), Ok(()));
+    }
+
+    for rejected in [
+        "", " work", "work ", ".", "..", "a/b", "a\\b", "a:b", "a*", "CON", "con.txt",
+        "COM1", "lpt9.log",
+    ] {
+        assert!(
+            validate_auth_account_name(rejected).is_err(),
+            "unsafe account name should be rejected: {rejected:?}"
+        );
+    }
+    assert!(validate_auth_account_name(&"a".repeat(65)).is_err());
+}
+
+#[test]
+fn auth_account_resolves_only_the_authentication_storage_root() -> std::io::Result<()> {
+    let codex_home = Path::new("codex-home");
+    assert_eq!(resolve_auth_storage_home(codex_home, None)?, codex_home);
+    assert_eq!(
+        resolve_auth_storage_home(codex_home, Some("工作"))?,
+        codex_home.join("accounts").join("工作")
+    );
+    Ok(())
+}
+
+#[test]
+fn account_store_mode_forces_file_and_rejects_conflicting_managed_policy()
+-> std::io::Result<()> {
+    assert_eq!(
+        resolve_account_auth_store_mode(
+            true,
+            None,
+            AuthCredentialsStoreMode::Keyring,
+        )?,
+        AuthCredentialsStoreMode::File
+    );
+    assert_eq!(
+        resolve_account_auth_store_mode(
+            true,
+            Some(AuthCredentialsStoreMode::File),
+            AuthCredentialsStoreMode::Keyring,
+        )?,
+        AuthCredentialsStoreMode::File
+    );
+    assert_eq!(
+        resolve_account_auth_store_mode(
+            true,
+            Some(AuthCredentialsStoreMode::Keyring),
+            AuthCredentialsStoreMode::File,
+        )
+        .expect_err("managed keyring policy must not be bypassed")
+        .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        resolve_account_auth_store_mode(
+            false,
+            Some(AuthCredentialsStoreMode::Keyring),
+            AuthCredentialsStoreMode::File,
+        )?,
+        AuthCredentialsStoreMode::Keyring
+    );
+    Ok(())
+}
+
+#[test]
+fn bootstrap_default_account_preserves_configured_storage() -> std::io::Result<()> {
+    let codex_home = Path::new("codex-home");
+    let default = bootstrap_auth_config(
+        codex_home,
+        &config_toml_load_result(
+            ConfigToml {
+                cli_auth_credentials_store: Some(AuthCredentialsStoreMode::Keyring),
+                ..Default::default()
+            },
+            None,
+        )?,
+    )?;
+    assert_eq!(default.codex_home, codex_home);
+    assert_eq!(
+        default.auth_credentials_store_mode,
+        AuthCredentialsStoreMode::Keyring
+    );
+    Ok(())
+}
+
+#[test]
 fn resolve_bootstrap_auth_keyring_backend_kind_uses_secret_auth_storage_feature()
 -> std::io::Result<()> {
     let config_toml = ConfigToml {
