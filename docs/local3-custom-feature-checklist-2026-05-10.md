@@ -48,6 +48,8 @@
 
 19. 全局 `--account <账号名>` 只切换 Codex 登录凭据，其他数据继续共享；默认账号仍使用 `$CODEX_HOME/auth.json`，命名账号使用 `$CODEX_HOME/accounts/<账号名>/auth.json`，配置、会话、日志、skills 与 MCP 不复制也不分叉。`login`、`login status`、token 刷新、`logout`、TUI 和本地 embedded app-server 必须读写同一个所选账号；命名账号不得隐式复用只持有单一 AuthManager 的共享 daemon，不得覆盖默认 `auth.json`，多个命名账号可以同时运行。共享 provider 配置的 app-server proxy、daemon lifecycle 和 Amazon Bedrock 登录在命名账号模式下必须明确拒绝，不能静默落到默认账号或留下共享配置。账号名允许中文，但拒绝路径分隔符、路径穿越、Windows 非法字符、保留名、前后空格和超过 64 个字符的名称。
 
+20. HTTP `401 Unauthorized` 触发 managed 认证恢复时，如果当前认证存储模式是文件形式，必须在每个仍可执行的恢复步骤前重新读取对应的 `auth.json`，不能只使用启动时或上一次恢复后留下的内存认证快照；同账号文件发生外部更新时，下一次 401 恢复必须先让新内容进入缓存，再决定是否刷新 token；重新读取仍必须经过当前账号 ID 一致性校验，发现磁盘文件属于其他账号或文件损坏时不得覆盖当前缓存；keyring、外部 provider、API key 和 Personal Access Token 保持各自原有认证恢复流程，不强行改走 `auth.json` 重读。这样并发登录、账号切换和 token 外部刷新不会因为 401 恢复读到错误凭据。
+
 ## local3 验收矩阵（合并上游后必查）
 
 | 主题 | 必验场景 | 通过口径 |
@@ -62,6 +64,7 @@
 | retry 中间态 | HTTP request retry、stream/WebSocket reconnect、compact retry、realtime/WebSocket start retry、WebRTC sideband retry、fallback transport、provider runtime refresh 期间 retry | 用户看到连续 retry 数字和必要诊断；中间失败不进 rollout/history/fork/replay，不刷普通 `warn!` / `error!` 或 app-server stderr；最终失败和显式 debug/trace 诊断仍保留 |
 | context window 图片梯子 | ordinary sampling 连续 `context_length_exceeded`、第 1/2 次原样重试、第 3/6/9/12 次升档、同一回合多次 sampling、新回合复位、无 original 时连升、resume/fork 重建、fork 后新线程重建、磁盘截图文件 | 仅 sampling；用户看到 `Reconnecting...` 与 `Context overflow image ladder step N`；下一包更早的图已降档或占位；会话记录追加 `RolloutItem::ImagesShrunk`（只含 tier 与张数，单条 1 KB 量级），不推进 compact 窗口、不发 compact UI；fork 后原线程历史保持不变，新线程按存活历史重新评估瘦身；paginated 主路径不依赖回合 rollback，legacy rollback 只作兼容验证；不改 `previous_response_id` / sticky-break；磁盘原图文件不变；四档用尽仍 `(auto retry)`，不得终态失败 |
 | 多账号认证 | 默认账号、两个命名账号、中文账号名、并发运行、API key/ChatGPT 登录、`login status`、token 刷新、`logout`、TUI、embedded app-server、共享 daemon 存在时启动 | 仅认证文件按 `$CODEX_HOME/accounts/<账号名>/auth.json` 隔离；默认 `auth.json`、配置、会话、日志、skills 与 MCP 保持共享且不被复制；所选账号的登录、状态、刷新和登出闭环一致；命名账号不隐式复用共享 daemon；账号 A 的操作不改变账号 B 或默认账号 |
+| 401 auth.json 重读 | 首次 401、连续可恢复的第二次 401、同账号外部更新、账号不匹配、文件损坏、API key/PAT/外部认证 | 每个仍可执行的 managed 恢复步骤先重新读取当前认证源；同账号更新先进入缓存再决定 refresh；账号不匹配不覆盖缓存；非 auth.json 认证不走该文件重读路径 |
 | Provider refresh | app-server 已打开线程、TUI/console、`codex exec`、当前 subagent、后续新开 subagent、agent_jobs、无 live instance、Windows tray provider apply | `base_url`、`experimental_bearer_token`、`force_service_tier_priority`、fast mode 有效配置不靠失败 retry 也能刷新；无 live instance 时反馈“配置已保存但未刷新任何实例” |
 | Provider token 隔离 | 带非空 `experimental_bearer_token` 的聊天、compact、realtime/WebSocket、`/models`、provider refresh 后下一次请求；移除 token 后回退 | 有 provider token 时只用 `Authorization: Bearer <experimental_bearer_token>`，不继承 AuthManager 的 auth mode、账号 ID、ChatGPT routing、FedRAMP 或 attestation；无 token provider 保持原 AuthManager 行为 |
 | 历史跨 provider | history list、recent sessions、resume picker、resume last、`codex://threads/{id}` deep link、旧 provider 线程继续、fork picker / fork last | 继续旧线程默认使用当前顶层 provider；历史发现不被旧 provider 过滤；fork 边界按当前 provider 保持，不把“继续旧线程”误扩成“跨 provider 派生” |

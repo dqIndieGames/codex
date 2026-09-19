@@ -1860,7 +1860,9 @@ enum UnauthorizedRecoveryMode {
 //
 // For ChatGPT based authentication, we:
 // 1. Attempt to reload the auth data from disk. We only reload if the account id matches the one the current process is running as.
-// 2. Attempt to refresh the token using OAuth token refresh flow.
+// 2. Before every subsequent file-backed managed recovery attempt, re-read the auth source with
+//    the same account guard so an external auth.json update is observed before token refresh.
+// 3. Attempt to refresh the token using OAuth token refresh flow.
 // If after both steps the server still responds with 401 we let the error bubble to the user.
 //
 // For external auth sources, UnauthorizedRecovery retries once by asking the
@@ -2017,6 +2019,33 @@ impl UnauthorizedRecovery {
                 }
             }
             UnauthorizedRecoveryStep::RefreshToken => {
+                // A second 401 can arrive after auth.json was changed by another process.
+                // Re-read the guarded auth source before refreshing so the request never
+                // refreshes an obsolete in-memory snapshot.
+                if self.manager.uses_file_auth_storage() {
+                    match self
+                        .manager
+                        .reload_if_account_id_matches(self.expected_account_id.as_deref())
+                        .await
+                    {
+                        ReloadOutcome::ReloadedChanged => {
+                            self.step = UnauthorizedRecoveryStep::Done;
+                            return Ok(UnauthorizedRecoveryStepResult {
+                                auth_state_changed: Some(true),
+                            });
+                        }
+                        ReloadOutcome::ReloadedNoChange => {}
+                        ReloadOutcome::Skipped => {
+                            self.step = UnauthorizedRecoveryStep::Done;
+                            return Err(RefreshTokenError::Permanent(
+                                RefreshTokenFailedError::new(
+                                    RefreshTokenFailedReason::Other,
+                                    REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE.to_string(),
+                                ),
+                            ));
+                        }
+                    }
+                }
                 self.manager.refresh_token_from_authority().await?;
                 self.step = UnauthorizedRecoveryStep::Done;
                 return Ok(UnauthorizedRecoveryStepResult {
@@ -2774,6 +2803,14 @@ impl AuthManager {
             .read()
             .ok()
             .and_then(|external_auth| external_auth.clone())
+    }
+
+    fn uses_file_auth_storage(&self) -> bool {
+        !self.has_external_auth()
+            && self.auth_credentials_store_mode == AuthCredentialsStoreMode::File
+            && !self
+                .auth_cached()
+                .is_some_and(CodexAuth::is_external_chatgpt_tokens)
     }
 
     fn has_refreshable_external_auth(&self) -> bool {
