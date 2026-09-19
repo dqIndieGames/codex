@@ -2810,7 +2810,7 @@ impl AuthManager {
             && self.auth_credentials_store_mode == AuthCredentialsStoreMode::File
             && !self
                 .auth_cached()
-                .is_some_and(CodexAuth::is_external_chatgpt_tokens)
+                .is_some_and(|auth| auth.is_external_chatgpt_tokens())
     }
 
     fn has_refreshable_external_auth(&self) -> bool {
