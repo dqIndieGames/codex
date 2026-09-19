@@ -1657,7 +1657,29 @@ async fn run_sampling_request(
             original_input = Some(prompt.input);
         }
 
-        if !err.is_retryable() {
+        // Keep local/user-controlled failures terminal, but do not let the
+        // protocol's retryability classification bypass the local3 model retry
+        // policy for remote policy, quota, capacity, or other model errors.
+        if matches!(
+            err.details(),
+            CodexErrorDetails::TurnAborted
+                | CodexErrorDetails::SessionBudgetExceeded
+                | CodexErrorDetails::Interrupted
+                | CodexErrorDetails::InvalidImageRequest()
+                | CodexErrorDetails::InvalidRequest(_)
+                | CodexErrorDetails::ToolCollision(_)
+                | CodexErrorDetails::ThreadNotFound(_)
+                | CodexErrorDetails::AgentLimitReached { .. }
+                | CodexErrorDetails::Spawn
+                | CodexErrorDetails::SessionConfiguredNotFirstEvent
+                | CodexErrorDetails::UnsupportedOperation(_)
+                | CodexErrorDetails::RefreshTokenFailed(_)
+                | CodexErrorDetails::Sandbox(_)
+                | CodexErrorDetails::LandlockSandboxExecutableNotProvided
+                | CodexErrorDetails::RetryLimit(_)
+                | CodexErrorDetails::EnvVar(_)
+                | CodexErrorDetails::Fatal(_)
+        ) {
             return Err(err);
         }
 

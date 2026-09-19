@@ -77,6 +77,45 @@ jobs:
           }
           "zip_path=$($archives[0].FullName)" >> $env:GITHUB_OUTPUT
 
+      - name: Run downloaded codex.exe smoke and account isolation
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: 0.155.1-local3
+          ZIP_PATH: ${{ steps.archive.outputs.zip_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $verifyRoot = Join-Path $env:RUNNER_TEMP ("codex-release-verify-" + [guid]::NewGuid().ToString('N'))
+          $accountHome = Join-Path $env:RUNNER_TEMP ("codex-account-smoke-" + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Force -Path $verifyRoot, $accountHome | Out-Null
+          Expand-Archive -LiteralPath $env:ZIP_PATH -DestinationPath $verifyRoot -Force
+          $exe = Join-Path $verifyRoot 'codex.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Missing extracted codex.exe: $exe" }
+          $version = (& $exe --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch [regex]::Escape($env:EXPECTED_VERSION)) {
+            throw "Expected $env:EXPECTED_VERSION, got: $version"
+          }
+          $helpText = (& $exe --help | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $helpText -notmatch '--account <NAME>') {
+            throw 'Downloaded codex.exe is missing global --account <NAME>'
+          }
+          $previousCodexHome = $env:CODEX_HOME
+          $env:CODEX_HOME = $accountHome
+          'sk-default-smoke' | & $exe -c 'forced_login_method="api"' login --with-api-key
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $defaultAuth = Join-Path $accountHome 'auth.json'
+          $defaultHash = (Get-FileHash -LiteralPath $defaultAuth -Algorithm SHA256).Hash
+          'sk-alpha-smoke' | & $exe --account alpha -c 'forced_login_method="api"' login --with-api-key
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $namedAuth = Join-Path $accountHome (Join-Path 'accounts' (Join-Path 'alpha' 'auth.json'))
+          if (-not (Test-Path -LiteralPath $namedAuth)) { throw "Missing named auth file: $namedAuth" }
+          if ((Get-FileHash -LiteralPath $defaultAuth -Algorithm SHA256).Hash -ne $defaultHash) {
+            throw 'Named account login changed the default auth.json'
+          }
+          & $exe --account alpha logout
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path -LiteralPath $namedAuth) { throw 'Named account logout did not remove auth.json' }
+          $env:CODEX_HOME = $previousCodexHome
+
       - name: Verify existing release tag target
         shell: pwsh
         env:

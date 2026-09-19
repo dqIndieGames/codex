@@ -1897,11 +1897,15 @@ impl RolloutWriterState {
         let Some(original_len) = self.batch_rollback_len else {
             return Ok(());
         };
-        let Some(writer) = self.writer.as_mut() else {
-            return Err(IoError::other("rollout writer is not open"));
-        };
-        writer.file.set_len(original_len).await?;
-        writer.file.flush().await?;
+        // Append-only handles on Windows do not grant the access needed by `set_len`.
+        // Reopen a short-lived write handle for rollback so a failed batch can be retried.
+        let path = compression::plain_rollout_path(self.rollout_path.as_path());
+        let mut rollback_file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .await?;
+        rollback_file.set_len(original_len).await?;
+        rollback_file.flush().await?;
         self.batch_rollback_len = None;
         Ok(())
     }
