@@ -115,7 +115,11 @@ impl<T: HttpTransport> EndpointSession<T> {
                 let transport = &self.transport;
                 async move {
                     let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
-                    transport.execute(req).await
+                    let result = transport.execute(req).await;
+                    if matches!(&result, Err(TransportError::Http { status, .. }) if *status == http::StatusCode::UNAUTHORIZED) {
+                        auth.on_unauthorized().await;
+                    }
+                    result
                 }
             },
         )
@@ -157,7 +161,11 @@ impl<T: HttpTransport> EndpointSession<T> {
                 let transport = &self.transport;
                 async move {
                     let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
-                    transport.stream(req).await
+                    let result = transport.stream(req).await;
+                    if matches!(&result, Err(TransportError::Http { status, .. }) if *status == http::StatusCode::UNAUTHORIZED) {
+                        auth.on_unauthorized().await;
+                    }
+                    result
                 }
             },
         )

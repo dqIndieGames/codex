@@ -34,7 +34,7 @@ use http::HeaderMap;
 use tokio::time::timeout;
 
 use crate::auth::agent_identity_telemetry;
-use crate::auth::resolve_provider_auth;
+use crate::auth::resolve_provider_auth_with_manager;
 use crate::provider::enforce_managed_residency;
 
 const MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -97,7 +97,11 @@ impl OpenAiModelsEndpoint {
             api_provider.base_url = CHATGPT_CODEX_BASE_URL.to_string();
         }
         enforce_managed_residency(&mut api_provider);
-        let api_auth = resolve_provider_auth(auth.as_ref(), &self.provider_info)?;
+        let api_auth = resolve_provider_auth_with_manager(
+            self.auth_manager.clone(),
+            auth.as_ref(),
+            &self.provider_info,
+        )?;
         let request_url =
             ModelsClient::<ReqwestTransport>::request_url(&api_provider, client_version);
         let auth_telemetry = auth_header_telemetry(api_auth.as_ref());

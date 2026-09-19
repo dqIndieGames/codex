@@ -1568,6 +1568,36 @@ async fn load_auth(
     Ok(Some(auth))
 }
 
+fn auth_source_is_file(
+    codex_home: &Path,
+    mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    enable_codex_api_key_env: bool,
+    auth: Option<&CodexAuth>,
+) -> bool {
+    let Some(auth) = auth else {
+        return false;
+    };
+    if auth.is_external_chatgpt_tokens()
+        || (enable_codex_api_key_env && read_codex_api_key_from_env().is_some())
+        || read_codex_access_token_from_env().is_some()
+    {
+        return false;
+    }
+    match mode {
+        AuthCredentialsStoreMode::File => true,
+        AuthCredentialsStoreMode::Auto => {
+            let keyring = create_auth_storage(
+                codex_home.to_path_buf(),
+                AuthCredentialsStoreMode::Keyring,
+                keyring_backend_kind,
+            );
+            !matches!(keyring.load(), Ok(Some(_)))
+        }
+        AuthCredentialsStoreMode::Keyring | AuthCredentialsStoreMode::Ephemeral => false,
+    }
+}
+
 // Persist refreshed tokens into auth storage and update last_refresh.
 fn persist_tokens(
     storage: &Arc<dyn AuthStorageBackend>,
@@ -2019,33 +2049,6 @@ impl UnauthorizedRecovery {
                 }
             }
             UnauthorizedRecoveryStep::RefreshToken => {
-                // A second 401 can arrive after auth.json was changed by another process.
-                // Re-read the guarded auth source before refreshing so the request never
-                // refreshes an obsolete in-memory snapshot.
-                if self.manager.uses_file_auth_storage() {
-                    match self
-                        .manager
-                        .reload_if_account_id_matches(self.expected_account_id.as_deref())
-                        .await
-                    {
-                        ReloadOutcome::ReloadedChanged => {
-                            self.step = UnauthorizedRecoveryStep::Done;
-                            return Ok(UnauthorizedRecoveryStepResult {
-                                auth_state_changed: Some(true),
-                            });
-                        }
-                        ReloadOutcome::ReloadedNoChange => {}
-                        ReloadOutcome::Skipped => {
-                            self.step = UnauthorizedRecoveryStep::Done;
-                            return Err(RefreshTokenError::Permanent(
-                                RefreshTokenFailedError::new(
-                                    RefreshTokenFailedReason::Other,
-                                    REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE.to_string(),
-                                ),
-                            ));
-                        }
-                    }
-                }
                 self.manager.refresh_token_from_authority().await?;
                 self.step = UnauthorizedRecoveryStep::Done;
                 return Ok(UnauthorizedRecoveryStepResult {
@@ -2094,6 +2097,7 @@ pub struct AuthManager {
     external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
     workload_identity_selected: bool,
     auth_route_config: AuthRouteConfig,
+    auth_source_is_file: bool,
 }
 
 /// Configuration view required to construct a shared [`AuthManager`].
@@ -2208,6 +2212,13 @@ impl AuthManager {
         } = auth_config;
         let agent_identity_authapi_base_url =
             agent_identity_authapi_base_url(chatgpt_base_url.as_deref()).ok();
+        let auth_source_is_file = auth_source_is_file(
+            &codex_home,
+            auth_credentials_store_mode,
+            keyring_backend_kind,
+            enable_codex_api_key_env,
+            managed_auth.as_ref(),
+        );
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
         Self {
             codex_home,
@@ -2231,6 +2242,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             workload_identity_selected: false,
             auth_route_config,
+            auth_source_is_file,
         }
     }
 
@@ -2266,6 +2278,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+            auth_source_is_file: false,
         })
     }
 
@@ -2295,6 +2308,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+            auth_source_is_file: true,
         })
     }
 
@@ -2332,6 +2346,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+            auth_source_is_file: false,
         })
     }
 
@@ -2363,6 +2378,7 @@ impl AuthManager {
             auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
                 OutboundProxyPolicy::ReqwestDefault,
             )),
+            auth_source_is_file: false,
         })
     }
 
@@ -2805,12 +2821,61 @@ impl AuthManager {
             .and_then(|external_auth| external_auth.clone())
     }
 
-    fn uses_file_auth_storage(&self) -> bool {
-        !self.has_external_auth()
-            && self.auth_credentials_store_mode == AuthCredentialsStoreMode::File
-            && !self
-                .auth_cached()
-                .is_some_and(|auth| auth.is_external_chatgpt_tokens())
+    /// Whether managed credentials currently resolve through auth.json, including Auto fallback.
+    pub fn uses_file_auth_storage(&self) -> bool {
+        let allowed = self.allowed_login_methods();
+        if self.has_external_auth()
+            || (self.enable_codex_api_key_env
+                && auth_mode_is_allowed(Some(&allowed), AuthMode::ApiKey)
+                && read_codex_api_key_from_env().is_some())
+            || (auth_mode_is_allowed(Some(&allowed), AuthMode::AgentIdentity)
+                && read_codex_access_token_from_env().is_some())
+        {
+            return false;
+        }
+        let ephemeral = create_auth_storage(
+            self.codex_home.clone(),
+            AuthCredentialsStoreMode::Ephemeral,
+            self.keyring_backend_kind,
+        );
+        match ephemeral.load() {
+            Ok(Some(auth)) if auth_mode_is_allowed(Some(&allowed), auth.resolved_mode()) => {
+                return false;
+            }
+            Err(_) => return false,
+            _ => {}
+        }
+        self.auth_source_is_file
+    }
+
+    /// Re-read file credentials after every HTTP 401 without changing identity or retry policy.
+    pub async fn reload_file_auth_on_unauthorized(&self, expected: &CodexAuth) {
+        let Ok(_refresh_guard) = self.refresh_lock.acquire().await else {
+            return;
+        };
+        if !self.uses_file_auth_storage() {
+            return;
+        }
+        let before = self.auth_cached();
+        let same_identity = |auth: &CodexAuth| {
+            auth.api_auth_mode() == expected.api_auth_mode()
+                && auth.get_account_id() == expected.get_account_id()
+                && auth.get_chatgpt_user_id() == expected.get_chatgpt_user_id()
+                && auth.is_workspace_account() == expected.is_workspace_account()
+        };
+        if !before.as_ref().is_some_and(same_identity) {
+            return;
+        }
+        let Some(new_auth) = self.load_auth().await else {
+            // A missing or partially written file must not discard usable cached credentials.
+            return;
+        };
+        if !same_identity(&new_auth)
+            || !Self::auths_equal_for_refresh(before.as_ref(), self.auth_cached().as_ref())
+        {
+            return;
+        }
+        self.set_cached_auth(Some(new_auth));
     }
 
     fn has_refreshable_external_auth(&self) -> bool {

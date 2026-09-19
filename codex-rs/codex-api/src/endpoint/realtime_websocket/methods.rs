@@ -783,6 +783,7 @@ fn contains_transcript_entry(entries: &[RealtimeTranscriptEntry], role: &str, te
 
 pub struct RealtimeWebsocketClient {
     provider: Provider,
+    auth: Option<crate::auth::SharedAuthProvider>,
     webrtc_sideband_base_url: String,
     request_retry_notifier: Option<RealtimeRetryNotifier>,
     request_retry_timeout: Option<RequestRetryTimeout>,
@@ -800,6 +801,7 @@ impl RealtimeWebsocketClient {
     pub fn new(provider: Provider) -> Self {
         Self {
             provider,
+            auth: None,
             webrtc_sideband_base_url: OPENAI_REALTIME_API_BASE_URL.to_string(),
             request_retry_notifier: None,
             request_retry_timeout: None,
@@ -825,6 +827,12 @@ impl RealtimeWebsocketClient {
     /// Overrides the direct WebRTC sideband URL for local development and tests.
     pub fn with_webrtc_sideband_base_url(mut self, base_url: String) -> Self {
         self.webrtc_sideband_base_url = base_url;
+        self
+    }
+
+    /// Retains the authentication source so every handshake can use reloaded credentials.
+    pub fn with_auth(mut self, auth: crate::auth::SharedAuthProvider) -> Self {
+        self.auth = Some(auth);
         self
     }
 
@@ -1057,6 +1065,13 @@ impl RealtimeWebsocketClient {
             default_headers,
         );
         request.headers_mut().extend(headers);
+        if let Some(auth) = &self.auth {
+            request.headers_mut().extend(
+                auth.resolve_auth_headers()
+                    .await
+                    .map_err(TransportError::from)?,
+            );
+        }
 
         info!("connecting realtime websocket: {ws_url}");
         // Realtime websocket TLS should honor the same custom-CA env vars as the rest of Codex's
@@ -1064,14 +1079,20 @@ impl RealtimeWebsocketClient {
         let connector = maybe_build_rustls_client_config_with_custom_ca()
             .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?
             .map(tokio_tungstenite::Connector::Rustls);
-        let (stream, response) = tokio_tungstenite::connect_async_tls_with_config(
+        let result = tokio_tungstenite::connect_async_tls_with_config(
             request,
             Some(websocket_config()),
             false,
             connector,
         )
         .await
-        .map_err(map_realtime_websocket_connect_error)?;
+        .map_err(map_realtime_websocket_connect_error);
+        if matches!(&result, Err(ApiError::Transport(TransportError::Http { status, .. })) if *status == http::StatusCode::UNAUTHORIZED)
+            && let Some(auth) = &self.auth
+        {
+            auth.on_unauthorized().await;
+        }
+        let (stream, response) = result?;
         info!(
             ws_url = %ws_url,
             status = %response.status(),

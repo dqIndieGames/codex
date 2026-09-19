@@ -685,7 +685,7 @@ impl RealtimeConversationManager {
                 )
                 .await?;
             let task = spawn_webrtc_sideband_input_task(RealtimeWebrtcSidebandInputTask {
-                client,
+                client: client.with_auth(call.api_auth),
                 session_config,
                 call_id: call.call_id,
                 sideband_headers: call.sideband_headers,
@@ -719,6 +719,21 @@ impl RealtimeConversationManager {
             .await?;
             (task, None)
         } else {
+            let provider = model_client.current_provider();
+            let client = if provider.info().api_key()?.is_none()
+                && !(provider.info().is_openai() && read_openai_api_key_from_env().is_some())
+                && !provider.info().experimental_bearer_token_is_non_empty()
+                && provider.info().auth.is_none()
+                && let Some(manager) = model_client.auth_manager()
+                && manager.uses_file_auth_storage()
+                && let Some(auth) = manager.auth_cached()
+            {
+                client.with_auth(codex_model_provider::auth_provider_from_auth_manager(
+                    manager, &auth,
+                ))
+            } else {
+                client
+            };
             let connection = client
                 .connect(
                     session_config,

@@ -28,6 +28,12 @@ impl From<AuthError> for TransportError {
 /// Header-only providers can implement `add_auth_headers`; providers that sign
 /// complete requests can override `apply_auth`.
 pub trait AuthProvider: Send + Sync {
+    /// Observes each HTTP 401 before the caller decides whether to retry.
+    /// File-backed providers can reload credentials for the next attempt.
+    fn on_unauthorized(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+
     /// Adds any auth headers that are available without request body access.
     ///
     /// Implementations should be cheap and non-blocking. This method is also

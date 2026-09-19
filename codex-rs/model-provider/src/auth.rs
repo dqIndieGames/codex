@@ -132,7 +132,7 @@ struct AuthManagerAuthProvider {
 
 impl AuthManagerAuthProvider {
     fn is_expected_auth(&self, auth: &CodexAuth) -> bool {
-        auth.uses_codex_backend()
+        auth.api_auth_mode() == self.expected_auth.api_auth_mode()
             && auth.get_account_id() == self.expected_auth.get_account_id()
             && auth.get_chatgpt_user_id() == self.expected_auth.get_chatgpt_user_id()
             && auth.is_workspace_account() == self.expected_auth.is_workspace_account()
@@ -146,6 +146,18 @@ impl AuthManagerAuthProvider {
 }
 
 impl AuthProvider for AuthManagerAuthProvider {
+    fn on_unauthorized(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            if self.current_auth().is_some() {
+                self.auth_manager
+                    .reload_file_auth_on_unauthorized(&self.expected_auth)
+                    .await;
+            }
+        })
+    }
+
     fn add_auth_headers(&self, headers: &mut HeaderMap) {
         let Some(auth) = self.current_auth() else {
             return;
@@ -225,6 +237,24 @@ pub(crate) fn resolve_provider_auth(
     })
 }
 
+pub(crate) fn resolve_provider_auth_with_manager(
+    auth_manager: Option<Arc<AuthManager>>,
+    auth: Option<&CodexAuth>,
+    provider: &ModelProviderInfo,
+) -> codex_protocol::error::Result<SharedAuthProvider> {
+    let resolved = resolve_provider_auth(auth, provider)?;
+    if provider.requires_openai_auth
+        && provider.api_key()?.is_none()
+        && !provider.experimental_bearer_token_is_non_empty()
+        && provider.auth.is_none()
+        && let (Some(manager), Some(auth)) = (auth_manager, auth)
+        && manager.uses_file_auth_storage()
+    {
+        return Ok(auth_provider_from_auth_manager(manager, auth));
+    }
+    Ok(resolved)
+}
+
 pub(crate) async fn resolve_provider_auth_for_scope(
     auth_manager: Option<Arc<AuthManager>>,
     auth: Option<&CodexAuth>,
@@ -237,15 +267,17 @@ pub(crate) async fn resolve_provider_auth_for_scope(
         agent_identity_session_fallback,
     } = scope;
     if let Some(CodexAuth::AgentIdentity(agent_identity_auth)) = auth {
-        return Ok(ResolvedProviderAuth::for_agent_identity(
-            agent_identity_auth.clone(),
-        ));
+        return Ok(ResolvedProviderAuth {
+            auth: resolve_provider_auth_with_manager(auth_manager, auth, provider)?,
+            agent_identity_telemetry: Some(agent_identity_telemetry(agent_identity_auth)),
+        });
     }
 
     if !should_bootstrap_chatgpt_agent_identity(agent_identity_policy, auth)
         || agent_identity_session_fallback.is_engaged()
     {
-        return resolve_provider_auth(auth, provider).map(ResolvedProviderAuth::new);
+        return resolve_provider_auth_with_manager(auth_manager, auth, provider)
+            .map(ResolvedProviderAuth::new);
     }
 
     let Some(auth_manager) = auth_manager else {
@@ -259,7 +291,12 @@ pub(crate) async fn resolve_provider_auth_for_scope(
         Ok(Some(agent_identity_auth)) => Ok(ResolvedProviderAuth::for_agent_identity(
             agent_identity_auth,
         )),
-        Ok(None) => resolve_provider_auth(auth, provider).map(ResolvedProviderAuth::new),
+        Ok(None) => resolve_provider_auth_with_manager(
+            Some(Arc::clone(&auth_manager)),
+            auth,
+            provider,
+        )
+            .map(ResolvedProviderAuth::new),
         Err(err) => {
             if let Some(AgentIdentityAuthError::BootstrapUnavailable {
                 operation,
@@ -277,7 +314,12 @@ pub(crate) async fn resolve_provider_auth_for_scope(
                     newly_engaged,
                     "agent identity bootstrap unavailable; using ChatGPT bearer auth for this session"
                 );
-                resolve_provider_auth(auth, provider).map(ResolvedProviderAuth::new)
+                resolve_provider_auth_with_manager(
+                    Some(Arc::clone(&auth_manager)),
+                    auth,
+                    provider,
+                )
+                    .map(ResolvedProviderAuth::new)
             } else {
                 Err(err.into())
             }

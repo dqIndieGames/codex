@@ -428,7 +428,8 @@ impl ResponsesWebsocketClient {
         self.auth.add_auth_headers(&mut headers);
 
         let (stream, _status, server_reasoning_included, server_model) =
-            connect_websocket(ws_url, headers, http_client_factory, turn_state.clone()).await?;
+            connect_websocket(ws_url, headers, http_client_factory, turn_state.clone(), &self.auth)
+                .await?;
         Ok(ResponsesWebsocketConnection::new(
             stream,
             self.provider.stream_idle_timeout,
@@ -468,6 +469,7 @@ impl ResponsesWebsocketClient {
             headers,
             http_client_factory,
             /*turn_state*/ None,
+            &self.auth,
         )
         .await?;
         let immediate_close = tokio::time::timeout(immediate_close_timeout, stream.next())
@@ -524,6 +526,7 @@ async fn connect_websocket(
     headers: HeaderMap,
     http_client_factory: &HttpClientFactory,
     turn_state: Option<Arc<OnceLock<String>>>,
+    auth: &SharedAuthProvider,
 ) -> Result<(WsStream, StatusCode, bool, Option<String>), ApiError> {
     info!("connecting to websocket: {url}");
 
@@ -547,7 +550,11 @@ async fn connect_websocket(
         }
         Err(err) => {
             error!("failed to connect to websocket: {err}, url: {url}");
-            return Err(map_ws_error(err, &url));
+            let err = map_ws_error(err, &url);
+            if matches!(&err, ApiError::Transport(TransportError::Http { status, .. }) if *status == StatusCode::UNAUTHORIZED) {
+                auth.on_unauthorized().await;
+            }
+            return Err(err);
         }
     };
 

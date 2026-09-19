@@ -53,9 +53,10 @@ pub(super) async fn attach(attachment: ExistingCallAttachment) -> CodexResult<Jo
         transcript_tail_flush,
         stop_token,
     } = attachment;
-    let sideband_headers = model_client
+    let (sideband_headers, api_auth) = model_client
         .realtime_sideband_headers(extra_headers)
         .await?;
+    let client = client.with_auth(api_auth);
     let transcript_state = RealtimeTranscriptState::default();
     let connection = client
         .connect_existing_call_sideband(

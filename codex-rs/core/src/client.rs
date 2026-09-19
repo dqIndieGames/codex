@@ -471,6 +471,7 @@ pub(crate) struct RealtimeWebrtcCallStart {
     pub(crate) sdp: String,
     pub(crate) call_id: String,
     pub(crate) sideband_headers: ApiHeaderMap,
+    pub(crate) api_auth: SharedAuthProvider,
 }
 
 /// Reuses the API-auth material that created the WebRTC call for the sideband WebSocket join.
@@ -715,7 +716,8 @@ impl ModelClient {
         ));
         let api_provider = api_provider_override.unwrap_or(client_setup.api_provider);
         let transport = self.build_api_transport(&api_provider, REALTIME_CALLS_ENDPOINT)?;
-        let response = ApiRealtimeCallClient::new(transport, api_provider, client_setup.api_auth)
+        let api_auth = client_setup.api_auth;
+        let response = ApiRealtimeCallClient::new(transport, api_provider, Arc::clone(&api_auth))
             .create_with_session_and_headers(sdp, session_config, extra_headers)
             .await
             .map_err(|error| self.current_provider().map_api_error(error))?;
@@ -723,13 +725,14 @@ impl ModelClient {
             sdp: response.sdp,
             call_id: response.call_id,
             sideband_headers,
+            api_auth,
         })
     }
 
     pub(crate) async fn realtime_sideband_headers(
         &self,
         mut extra_headers: ApiHeaderMap,
-    ) -> Result<ApiHeaderMap> {
+    ) -> Result<(ApiHeaderMap, SharedAuthProvider)> {
         let client_setup = self.current_client_setup().await?;
         if let Some(header_value) = self.generate_attestation_header_for().await {
             extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
@@ -737,7 +740,7 @@ impl ModelClient {
         extra_headers.extend(sideband_websocket_auth_headers(
             client_setup.api_auth.as_ref(),
         ));
-        Ok(extra_headers)
+        Ok((extra_headers, client_setup.api_auth))
     }
 
     /// Builds memory summaries for each provided normalized raw memory.
