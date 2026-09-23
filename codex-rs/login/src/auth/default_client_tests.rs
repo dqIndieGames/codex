@@ -39,11 +39,29 @@ impl Write for TestLogSink {
 }
 
 #[test]
+fn version_token(user_agent: &str) -> &str {
+    user_agent
+        .split_once('/')
+        .and_then(|(_, rest)| rest.split_once(' '))
+        .map(|(version, _)| version)
+        .expect("user agent should be originator/version ...")
+}
+
+#[test]
 fn test_get_codex_user_agent() {
     let user_agent = get_codex_user_agent();
-    let originator = originator().value;
-    let prefix = format!("{originator}/{CODEX_DISPLAY_VERSION}");
-    assert!(user_agent.starts_with(&prefix));
+    assert_eq!(version_token(&user_agent), env!("CARGO_PKG_VERSION"));
+    assert!(!version_token(&user_agent).contains("-local3"));
+}
+
+#[test]
+fn test_display_user_agent_keeps_local_suffix() {
+    let user_agent = get_codex_display_user_agent();
+    assert_eq!(version_token(&user_agent), CODEX_DISPLAY_VERSION);
+    assert_eq!(
+        CODEX_DISPLAY_VERSION,
+        concat!(env!("CARGO_PKG_VERSION"), "-local3")
+    );
 }
 
 #[test]
@@ -289,7 +307,7 @@ fn test_macos() {
     let user_agent = get_codex_user_agent();
     let originator = regex_lite::escape(originator().value.as_str());
     let re = Regex::new(&format!(
-        r"^{originator}/\d+\.\d+\.\d+-local3 \(Mac OS \d+\.\d+\.\d+; (x86_64|arm64)\) (\S+)$"
+        r"^{originator}/\d+\.\d+\.\d+ \(Mac OS \d+\.\d+\.\d+; (x86_64|arm64)\) (\S+)$"
     ))
     .unwrap();
     assert!(re.is_match(&user_agent));

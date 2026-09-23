@@ -3,7 +3,7 @@
 
 > 2026-08-31 当前口径：Responses 流式主链按阶段卡顿，不是一把 `300s` / 5 分钟。1) 等 HTTP 头：`60s`。2) 已开流、等第一个模型事件：`390s`（6.5 分钟）。3) 已有模型事件后连续无新事件：`60s`。4) RST / 读失败：立刻重试。compact / realtime / WebRTC 没有「首包 / 吐过后」两段，等完整响应或建连按第 2 段封顶 `390s`，RST / 读失败仍立刻重试。每次尝试独立计时，满点只中断该次并固定等 `5s` 再自动重试。provider 显式连接/空闲超时短于当前阶段默认值的继续保留，不得把第 2 段默认砍回 5 分钟或更短。下文历史段落中的 `10 分钟` / `600s` / 单尺 `300s` 口径均由本条替代。
 
-1. local3 版本身份保留为 `<Codex 版本>-local3`，所有用户能看到版本的位置都要显示这个本地构建后缀；原来可能被上游版本覆盖成官方裸版本，修改后 CLI、TUI、状态卡片、标题区、历史单元和升级提示都继续显示 local3 身份，这样用户能确认自己正在使用本地定制版。
+1. local3 版本身份保留为 `<Codex 版本>-local3`，所有用户能看到版本的位置都要显示这个本地构建后缀；原来可能被上游版本覆盖成官方裸版本，修改后 CLI、TUI、状态卡片、标题区、历史单元和升级提示都继续显示 local3 身份，这样用户能确认自己正在使用本地定制版。屏幕、命令行、TUI、doctor、历史和升级提示继续显示 `<Codex 版本>-local3`。发给服务端的 HTTP `User-Agent` 不使用这套显示版本，按第 21 条。
 
 2. 首次输入纯文本 `你好` 时显示 local3 功能清单，并且每个新线程只显示 1 次；原来清单可能被做成某个客户端专用提示或重复插入，修改后 brand-new thread 或 Clear 后的新线程中，首个普通用户输入恰好为 `你好` 才会在首个 assistant 主消息第一段显示全量 local3 清单，resume、continue、fork、历史线程重开、子会话和其他输入都不重复触发，这样用户首次检查定制功能时能稳定看到完整清单且不会被反复打扰。
 
@@ -50,11 +50,14 @@
 
 20. 每次 HTTP `401 Unauthorized`（包括 WebSocket 握手）返回时，若实际凭据来自 `auth.json`，必须重新读取当前所选账号对应的文件，让下一次请求使用更新后的凭据；覆盖文件中的 API key、ChatGPT 等凭据及 Auto 存储实际回退到文件的情况，不受 managed 恢复状态机次数限制。默认账号读取 `$CODEX_HOME/auth.json`，命名账号读取 `$CODEX_HOME/accounts/<账号名>/auth.json`；认证类型或账号身份不匹配、文件缺失或损坏时保留原缓存，不串用其他账号。provider 自带 token、环境变量、外部认证、内存凭据和实际使用 keyring 的请求不得被文件覆盖。重读不改变既有固定 `5s` 等待、累计重试次数、预算和每 3 次 sticky-break 规则。
 
+21. 屏幕版本仍是 `<Codex 版本>-local3`。只有发给服务端的 HTTP `User-Agent` 特殊：版本段用当前 `codex-rs/Cargo.toml` 的裸包版本，也就是这次合入的官方版本，不追加 `-local3`，不写死某一个版本号。官方升到新版本时两处一起变，屏幕是 `<新版本>-local3`，发出去的只有裸版本。`originator`、操作系统、架构、终端标识，以及官方原本会加的后缀，保持原样。WebSocket 握手、登录、ChatGPT 辅助接口和云任务都按此发送。本机界面、`codex --version`、doctor，以及 app-server initialize 回给本机客户端的 `user_agent` 仍带 `-local3`。`/models` 的 `client_version` 继续发同一裸包版本。
+
 ## local3 验收矩阵（合并上游后必查）
 
 | 主题 | 必验场景 | 通过口径 |
 |---|---|---|
-| 版本身份 | `codex --version`、`codex doctor --json`、TUI 状态卡、app-server initialize `user_agent`、daemon/remote-control 输出、线程历史元数据、升级提示、GitHub Release 下载后的 Windows smoke | 用户能看到的 local3 构建身份均显示 `<Codex 版本>-local3`；用于包版本、协议版本、配置锁或更新比较的裸 semver 不误加后缀 |
+| 版本身份 | `codex --version`、`codex doctor --json`、TUI 状态卡、app-server initialize `user_agent`、daemon/remote-control 输出、线程历史元数据、升级提示、GitHub Release 下载后的 Windows smoke | 用户能看到的 local3 构建身份均显示 `<Codex 版本>-local3`；用于包版本、协议版本、配置锁或更新比较的裸 semver 不误加后缀。发给服务端的 HTTP `User-Agent` 不得带 `-local3`。app-server initialize 回给本机的 `user_agent` 仍带 `-local3` |
+| 发出去的 User-Agent | WebSocket 握手、登录、ChatGPT 辅助接口、云任务 | HTTP `User-Agent` 的版本段等于当前 `codex-rs/Cargo.toml` 包版本，无 `-local3`；其余与官方原版一致。屏幕和回给本机的 `user_agent` 仍是该版本加 `-local3` |
 | 首轮 `你好` 清单 | brand-new thread、Clear 后新线程、同线程第二次 `你好`、resume/continue、fork、历史线程重开、subagent、多段输入、带富文本/附件输入 | 只有 brand-new 或 Clear 后首个普通纯文本恰好为 `你好` 时，在首个 assistant 主消息第一段插入清单，且含第 18 条图片梯子；其他入口和重复输入不触发 |
 | retry 固定 5 秒 | Responses HTTP request retry、stream/WebSocket reconnect、local compact、remote compaction v2、realtime/WebSocket 连接、服务端 `Retry-After` | 每一次自动 retry 前的等待都必须固定为 `5s`；不得是 `<=5s` 上限、指数退避、jitter、base_delay 或 cap-only；服务端 `Retry-After` 不得拉长或缩短固定 `5s`；旧 `8s/eight seconds` 实现、测试名、断言和文档口径不得残留在 retry 语义里 |
 | retry 分阶段卡顿 watchdog | ordinary sampling、首次 Responses HTTP、Responses HTTP request retry、SSE/WebSocket reconnect、local compact、old remote compact、remote compaction v2、realtime/WebSocket、WebRTC sideband、fallback transport、provider runtime refresh、sticky-break | 每一次 HTTP/连接尝试按阶段独立计时；首次请求也受保护；前序请求、5 秒等待和内部恢复不扣减下一次额度。流式：等 HTTP 头 `60s`；已开流等第一个模型事件 `390s`；已有模型事件后连续无新事件 `60s`（有新事件就重置本段，不按总时长误杀长生成）；RST / 读失败立刻重试。compact / realtime / WebRTC 等完整响应或建连封顶 `390s`。卡满当前阶段时只取消该次尝试、发出对应阶段临时提示并固定等待 5 秒后重连，下一次重新按阶段获得完整额度，不得终态或要求手动重试；无上限或很大次数时状态显示累计序号与 `(auto retry)`，不显示 `(10 min limit)` / `(unbounded)`，阶段切换不得把 N 归零 |
@@ -110,7 +113,7 @@
 ## 2026-05-31 local3 版本身份与 GitHub 打包经验
 
 - local3 版本身份不能只查 `codex.exe --version`；`codex doctor --json`、doctor runtime details、`codex-app-server --version`、app-server initialize 返回的 `user_agent`、daemon/remote-control JSON、device-code 登录欢迎文案、线程历史元数据和 rollout 元数据都是用户或客户端能看到的版本面，也必须显示 `<版本>-local3`。
-- app-server 的 `user_agent` 不是普通 telemetry 字符串；daemon 会从 initialize 响应里解析它，再显示到 doctor 的 `app-server version` 详情里。这里如果继续使用裸 `CARGO_PKG_VERSION`，用户会看到 CLI 是 local3、后台 app-server 却像官方裸版本。
+- app-server 的 `user_agent` 不是普通 telemetry 字符串；daemon 会从 initialize 响应里解析它，再显示到 doctor 的 `app-server version` 详情里。这里如果继续使用裸 `CARGO_PKG_VERSION`，用户会看到 CLI 是 local3、后台 app-server 却像官方裸版本。app-server initialize 回给本机的 `user_agent` 仍用显示版本。把它放进发给服务端的 HTTP `User-Agent` 不算通过。
 - `cli_version`、`client_version`、`app_server_version` 字段要按用途区分：进入历史列表、远端诊断、daemon JSON 或用户界面的用 display version；用于更新比较、Python wheel 版本、配置锁、OpenTelemetry service_version、OAuth/device-code 协议参数的仍用裸 semver，避免破坏包版本和协议兼容。
 - GitHub workflow 不能把 `GITHUB_REF_NAME` 当 Python wheel 的 Codex 版本；手动从 `main` 分支触发时它是 `main`，不符合 PEP 440，会导致 wheel 打包失败。云端打包应从 `codex-rs/Cargo.toml` 读取裸 semver，再把 local3 只用于用户可见版本输出。
 - Windows release smoke test 必须明确断言 `-local3`，不能只检查输出里包含裸 `0.135.0`；否则 `0.135.0` 和 `0.135.0-local3` 都会通过，无法阻止本地身份后缀回退。
