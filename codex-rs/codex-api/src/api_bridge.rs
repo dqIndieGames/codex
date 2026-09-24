@@ -10,7 +10,6 @@ use codex_protocol::auth::PlanType;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::is_retry_watchdog_interrupted_message;
-use codex_protocol::error::RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE;
 use codex_protocol::error::ConnectionFailedError;
 use codex_protocol::error::RetryLimitReachedError;
 use codex_protocol::error::UnexpectedResponseError;
@@ -249,11 +248,7 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                 request_id: None,
             }),
             TransportError::RetryInterrupted(reason) => CodexErr::Stream(reason),
-            TransportError::Timeout => {
-                CodexErr::RetryTimeBudgetInterrupted(
-                    RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE.to_string(),
-                )
-            }
+            TransportError::Timeout => CodexErr::RequestTimeout,
             TransportError::Connection(source) => {
                 CodexErr::ConnectionFailed(ConnectionFailedError { source })
             }

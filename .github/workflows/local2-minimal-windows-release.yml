@@ -22,9 +22,21 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: just,cargo-nextest
+
+      - name: Test stream configuration and transport behavior
+        shell: pwsh
+        run: just test --release --target x86_64-pc-windows-msvc -p codex-api -p codex-model-provider-info --lib
+
       - name: Build codex.exe
         shell: bash
         run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
+
+      - name: Verify delayed response headers against the built CLI
+        shell: pwsh
+        run: python ../.github/scripts/test_response_header_wait.py target/x86_64-pc-windows-msvc/release/codex.exe
 
       - name: Package codex.exe
         id: package

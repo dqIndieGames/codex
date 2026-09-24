@@ -26,15 +26,10 @@ use std::path::Component;
 use std::path::Path;
 use std::time::Duration;
 
-/// Wait for HTTP response headers on one streaming attempt.
-pub const HEADER_WAIT_TIMEOUT_MS: u64 = 60_000;
-/// Wait for the first model event after the stream is open (6.5 minutes).
-pub const FIRST_MODEL_EVENT_TIMEOUT_MS: u64 = 390_000;
-/// Idle after at least one model event has arrived.
-pub const POST_OUTPUT_IDLE_TIMEOUT_MS: u64 = 60_000;
-/// Cap for unary compact / realtime / WebRTC connect (same as first-event).
-pub const MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS: u64 = FIRST_MODEL_EVENT_TIMEOUT_MS;
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = POST_OUTPUT_IDLE_TIMEOUT_MS;
+// Official rust-v0.155.1 stream idle default; retries remain local3 policy.
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
+/// Cap for unary compact / realtime / WebRTC connect.
+pub const MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS: u64 = 390_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 const DEFAULT_AWS_CREDENTIAL_EXPORT_TIMEOUT_MS: u64 = 30_000;
@@ -525,34 +520,16 @@ impl ModelProviderInfo {
         matches!(current_retry_mode(), RetryMode::Unbounded)
     }
 
-    /// Effective idle timeout after the first model event (phase 3).
-    ///
-    /// Explicit shorter `stream_idle_timeout_ms` can fire earlier; the default
-    /// must not extend past 60s or cut the 390s first-event window.
+    /// Effective idle timeout for streaming responses, matching upstream configuration.
     pub fn stream_idle_timeout(&self) -> Duration {
-        Duration::from_millis(
-            self.stream_idle_timeout_ms
-                .unwrap_or(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
-                .min(POST_OUTPUT_IDLE_TIMEOUT_MS),
-        )
+        self.stream_idle_timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
     }
 
-    /// Effective wait for the first model event after the stream is open.
-    ///
-    /// Phase 2 is the 390s thinking window. `stream_idle_timeout_ms` is an idle
-    /// timeout for other phases and must not cut this window (including legacy
-    /// `300000` / 5 minute configs).
+    /// Retained for existing API consumers; both stream phases use the configured idle timeout.
     pub fn first_model_event_timeout(&self) -> Duration {
-        Duration::from_millis(FIRST_MODEL_EVENT_TIMEOUT_MS)
-    }
-
-    /// Effective wait for HTTP response headers on one streaming attempt.
-    pub fn header_wait_timeout(&self) -> Duration {
-        Duration::from_millis(
-            self.stream_idle_timeout_ms
-                .unwrap_or(HEADER_WAIT_TIMEOUT_MS)
-                .min(HEADER_WAIT_TIMEOUT_MS),
-        )
+        self.stream_idle_timeout()
     }
 
     /// Effective timeout for websocket connect attempts.

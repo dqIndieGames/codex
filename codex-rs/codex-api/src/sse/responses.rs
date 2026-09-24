@@ -9,7 +9,6 @@ use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
 use codex_protocol::ResponseUsageMetadata;
-use codex_protocol::error::retry_stream_idle_interrupted_message;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::MisalignmentErrorDetails;
 use codex_protocol::protocol::ModelVerification;
@@ -588,7 +587,7 @@ pub async fn process_sse(
 async fn process_sse_with_treatment(
     stream: ByteStream,
     tx_event: mpsc::Sender<Result<ResponseEvent, ApiError>>,
-    first_event_timeout: Duration,
+    _first_event_timeout: Duration,
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     safety_buffering_treatment: SafetyBufferingTreatment,
@@ -596,28 +595,13 @@ async fn process_sse_with_treatment(
     let mut stream = stream.eventsource();
     let mut response_error: Option<ApiError> = None;
     let mut last_server_model: Option<String> = None;
-    let mut seen_model_event = false;
-    let first_event_deadline = Instant::now() + first_event_timeout;
 
     loop {
         let start = Instant::now();
-        let phase_idle = if seen_model_event {
-            idle_timeout
-        } else {
-            first_event_deadline.saturating_duration_since(Instant::now())
-        };
-        if phase_idle.is_zero() {
-            let _ = tx_event
-                .send(Err(ApiError::Stream(
-                    retry_stream_idle_interrupted_message(seen_model_event).to_string(),
-                )))
-                .await;
-            return;
-        }
         let response = tokio::select! {
             biased;
             _ = tx_event.closed() => return,
-            response = timeout(phase_idle, stream.next()) => response,
+            response = timeout(idle_timeout, stream.next()) => response,
         };
         if let Some(t) = telemetry.as_ref() {
             t.on_sse_poll(&response, start.elapsed());
@@ -639,7 +623,7 @@ async fn process_sse_with_treatment(
             Err(_) => {
                 let _ = tx_event
                     .send(Err(ApiError::Stream(
-                        retry_stream_idle_interrupted_message(seen_model_event).to_string(),
+                        "idle timeout waiting for SSE".to_string(),
                     )))
                     .await;
                 return;
@@ -661,9 +645,6 @@ async fn process_sse_with_treatment(
                 continue;
             }
         };
-        if stream_event_kind_is_model_progress(&event.kind) {
-            seen_model_event = true;
-        }
         let model_verifications = event.model_verifications();
         let turn_moderation_metadata = event.turn_moderation_metadata();
         let safety_buffering = event.safety_buffering(&safety_buffering_treatment);
@@ -707,9 +688,6 @@ async fn process_sse_with_treatment(
 
         match process_responses_event(event) {
             Ok(Some(event)) => {
-                if event.is_model_progress_event() {
-                    seen_model_event = true;
-                }
                 let is_completed = matches!(event, ResponseEvent::Completed { .. });
                 if tx_event.send(Ok(event)).await.is_err() {
                     return;
@@ -798,8 +776,6 @@ mod tests {
     use bytes::Bytes;
     use codex_client::StreamResponse;
     use codex_client::TransportError;
-    use codex_protocol::error::RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE;
-    use codex_protocol::error::RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE;
     use codex_protocol::models::MessagePhase;
     use codex_protocol::models::ResponseItem;
     use futures::StreamExt;
@@ -893,7 +869,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn created_keeps_first_model_event_watchdog() {
+    async fn created_uses_configured_stream_idle_timeout() {
         let created = format!(
             "event: response.created\ndata: {}\n\n",
             json!({"type": "response.created", "response": {}})
@@ -912,17 +888,13 @@ mod tests {
         assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Created)));
         let err = tokio::time::timeout(Duration::from_millis(500), rx.recv())
             .await
-            .expect("first-event watchdog")
+            .expect("stream idle timeout")
             .expect("channel");
-        assert_matches!(
-            err,
-            Err(ApiError::Stream(message))
-                if message == RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE
-        );
+        assert_matches!(err, Err(ApiError::Stream(_)));
     }
 
     #[tokio::test]
-    async fn output_delta_uses_post_output_idle_watchdog() {
+    async fn output_delta_uses_configured_stream_idle_timeout() {
         let delta = format!(
             "event: response.output_text.delta\ndata: {}\n\n",
             json!({"type": "response.output_text.delta", "delta": "hi"})
@@ -944,13 +916,35 @@ mod tests {
         );
         let err = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
-            .expect("post-output idle watchdog")
+            .expect("stream idle timeout")
             .expect("channel");
-        assert_matches!(
-            err,
-            Err(ApiError::Stream(message))
-                if message == RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE
-        );
+        assert_matches!(err, Err(ApiError::Stream(_)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_activity_resets_idle_timeout_before_model_output() {
+        // L1: activity inside each idle window keeps the stream alive even when
+        // total elapsed time exceeds one idle window (official SSE semantics).
+        let events = vec![
+            json!({"type": "response.created", "response": {}}),
+            json!({"type": "response.created", "response": {}}),
+            json!({"type": "response.completed", "response": {"id": "idle-test"}}),
+        ];
+        let stream = stream::iter(events).then(|event| async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Ok(Bytes::from(format!("data: {event}\n\n")))
+        });
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(process_sse(
+            Box::pin(stream),
+            tx,
+            Duration::from_secs(3),
+            /*telemetry*/ None,
+        ));
+        assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Created)));
+        assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Created)));
+        assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Completed { .. })));
+        assert!(rx.recv().await.is_none());
     }
 
     #[tokio::test]

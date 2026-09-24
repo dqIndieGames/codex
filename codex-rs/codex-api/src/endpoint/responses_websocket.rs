@@ -11,11 +11,9 @@ use crate::rate_limits::parse_rate_limit_event;
 use crate::safety_buffering::treatment_from_headers;
 use crate::sse::ResponsesStreamEvent;
 use crate::sse::process_responses_event;
-use crate::sse::stream_event_kind_is_model_progress;
 use crate::telemetry::WebsocketTelemetry;
 use codex_client::TransportError;
 use codex_http_client::HttpClientFactory;
-use codex_protocol::error::retry_stream_idle_interrupted_message;
 use codex_websocket_client::WebSocketConnection;
 use codex_websocket_client::WebSocketConnector;
 use futures::SinkExt;
@@ -710,7 +708,7 @@ async fn run_websocket_response_stream(
     ws_stream: &mut WsStream,
     tx_event: mpsc::Sender<std::result::Result<ResponseEvent, ApiError>>,
     request_text: String,
-    first_event_timeout: Duration,
+    _first_event_timeout: Duration,
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
     turn_state: Option<&OnceLock<String>>,
@@ -727,27 +725,11 @@ async fn run_websocket_response_stream(
     )
     .await?;
 
-    let mut seen_model_event = false;
-    let first_event_deadline = Instant::now() + first_event_timeout;
     loop {
         let poll_start = Instant::now();
-        let phase_idle = if seen_model_event {
-            idle_timeout
-        } else {
-            first_event_deadline.saturating_duration_since(Instant::now())
-        };
-        if phase_idle.is_zero() {
-            return Err(ApiError::Stream(
-                retry_stream_idle_interrupted_message(seen_model_event).to_string(),
-            ));
-        }
-        let response = tokio::time::timeout(phase_idle, ws_stream.next())
+        let response = tokio::time::timeout(idle_timeout, ws_stream.next())
             .await
-            .map_err(|_| {
-                ApiError::Stream(
-                    retry_stream_idle_interrupted_message(seen_model_event).to_string(),
-                )
-            });
+            .map_err(|_| ApiError::Stream("idle timeout waiting for websocket".to_string()));
         if let Some(t) = telemetry.as_ref() {
             t.on_ws_event(&response, poll_start.elapsed());
         }
@@ -782,9 +764,6 @@ async fn run_websocket_response_stream(
                         continue;
                     }
                 };
-                if stream_event_kind_is_model_progress(event.kind()) {
-                    seen_model_event = true;
-                }
                 emit_responses_websocket_timing_event(
                     event.kind(),
                     text.as_str(),
@@ -860,9 +839,6 @@ async fn run_websocket_response_stream(
                 }
                 match process_responses_event(event) {
                     Ok(Some(event)) => {
-                        if event.is_model_progress_event() {
-                            seen_model_event = true;
-                        }
                         let is_completed = matches!(event, ResponseEvent::Completed { .. });
                         let _ = tx_event.send(Ok(event)).await;
                         if is_completed {
