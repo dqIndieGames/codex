@@ -853,7 +853,7 @@ mod tests {
     fn created_is_not_a_model_progress_event() {
         // Ground truth: docs/local3-custom-feature-checklist-2026-05-10.md item 3.
         // Phase 2 waits for the first model event; response.created is only stream open.
-        assert!(!ResponseEvent::Created.is_model_progress_event());
+        assert!(!ResponseEvent::Created { response_id: None }.is_model_progress_event());
         assert!(ResponseEvent::OutputTextDelta("hi".into()).is_model_progress_event());
         assert!(ResponseEvent::Completed {
             response_id: "r".into(),
@@ -885,7 +885,7 @@ mod tests {
             None,
             SafetyBufferingTreatment::default(),
         ));
-        assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Created)));
+        assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Created { .. })));
         let err = tokio::time::timeout(Duration::from_millis(500), rx.recv())
             .await
             .expect("stream idle timeout")
@@ -941,8 +941,8 @@ mod tests {
             Duration::from_secs(3),
             /*telemetry*/ None,
         ));
-        assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Created)));
-        assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Created)));
+        assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Created { .. })));
+        assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Created { .. })));
         assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::Completed { .. })));
         assert!(rx.recv().await.is_none());
     }
