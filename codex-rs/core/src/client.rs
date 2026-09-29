@@ -3037,6 +3037,11 @@ impl ApiTelemetry {
 }
 
 impl RequestTelemetry for ApiTelemetry {
+    fn request_retry_timeout(&self) -> Option<Duration> {
+        (self.request_route_telemetry.endpoint == RESPONSES_ENDPOINT)
+            .then_some(Duration::from_secs(60))
+    }
+
     fn on_request(
         &self,
         attempt: u64,
@@ -3118,7 +3123,8 @@ impl RequestTelemetry for ApiTelemetry {
                 max_attempts,
                 status,
                 details: user_visible_transport_retry_details(error),
-                message_override: None,
+                message_override: matches!(error, TransportError::Timeout)
+                    .then(|| codex_protocol::error::RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE.to_string()),
             });
         }
     }

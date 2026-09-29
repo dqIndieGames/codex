@@ -687,7 +687,7 @@ async fn run_websocket_response_stream(
     ws_stream: &mut WsStream,
     tx_event: mpsc::Sender<std::result::Result<ResponseEvent, ApiError>>,
     request_text: String,
-    _first_event_timeout: Duration,
+    first_event_timeout: Duration,
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
     turn_state: Option<&OnceLock<String>>,
@@ -708,11 +708,15 @@ async fn run_websocket_response_stream(
     // A response owns its interrupt, and create must be sent before interrupt.
     let mut interrupt = interrupt.fuse();
     let mut response_id = None;
+    let mut seen_model_event = false;
+    let mut progress_deadline = Instant::now() + first_event_timeout;
     loop {
         let poll_start = Instant::now();
         let response = tokio::select! {
-            response = tokio::time::timeout(idle_timeout, ws_stream.next()) => {
-                response.map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()))
+            response = tokio::time::timeout_at(progress_deadline, ws_stream.next()) => {
+                response.map_err(|_| ApiError::Stream(
+                    codex_protocol::error::retry_stream_idle_interrupted_message(seen_model_event).into()
+                ))
             }
             Ok(()) = &mut interrupt, if response_id.is_some() => {
                 send_websocket_request(
@@ -764,6 +768,10 @@ async fn run_websocket_response_stream(
                         continue;
                     }
                 };
+                if crate::sse::stream_event_kind_is_model_progress(event.kind()) {
+                    seen_model_event = true;
+                    progress_deadline = Instant::now() + idle_timeout;
+                }
                 emit_responses_websocket_timing_event(
                     event.kind(),
                     text.as_str(),
@@ -839,6 +847,10 @@ async fn run_websocket_response_stream(
                 }
                 match process_responses_event(event) {
                     Ok(Some(event)) => {
+                        if event.is_model_progress_event() {
+                            seen_model_event = true;
+                            progress_deadline = Instant::now() + idle_timeout;
+                        }
                         if let ResponseEvent::Created { response_id: id } = &event {
                             response_id.clone_from(id);
                         }

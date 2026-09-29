@@ -60,7 +60,7 @@ pub fn read_managed_residency_requirement() -> Option<ResidencyRequirement> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 60_000;
 /// Cap for unary compact / realtime / WebRTC connect.
 pub const MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS: u64 = 390_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
@@ -595,16 +595,20 @@ other non-default provider fields are not supported"
         matches!(current_retry_mode(), RetryMode::Unbounded)
     }
 
-    /// Effective idle timeout for streaming responses, matching upstream configuration.
+    /// local3 checklist: after model progress, each idle window is at most 60s.
     pub fn stream_idle_timeout(&self) -> Duration {
         self.stream_idle_timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
+            .min(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
     }
 
-    /// Retained for existing API consumers; both stream phases use the configured idle timeout.
+    /// First model progress receives 390s unless the user explicitly selects less.
     pub fn first_model_event_timeout(&self) -> Duration {
-        self.stream_idle_timeout()
+        self.stream_idle_timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_secs(390))
+            .min(Duration::from_secs(390))
     }
 
     /// Effective timeout for websocket connect attempts.
