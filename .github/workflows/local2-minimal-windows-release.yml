@@ -9,7 +9,7 @@ permissions:
 jobs:
   test:
     name: Test transport and shared recovery
-    runs-on: windows-2022
+    runs-on: windows-latest
     timeout-minutes: 120
     defaults:
       run:
@@ -25,8 +25,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             codex-rs/target
-          key: local3-159-windows-test-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: local3-159-windows-test-${{ hashFiles('codex-rs/Cargo.lock') }}-
+          key: local3-159-windows-latest-test-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: local3-159-windows-latest-test-${{ hashFiles('codex-rs/Cargo.lock') }}-
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -38,12 +38,12 @@ jobs:
 
       - name: Test stream configuration and transport behavior
         shell: pwsh
-        run: just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-api -p codex-model-provider-info -p codex-protocol -p codex-login --lib
+        run: just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-api -p codex-model-provider-info -p codex-model-provider -p codex-protocol -p codex-login --lib
 
       - name: Test shared WebSocket and compaction recovery
         shell: pwsh
         run: |
-          just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-core --lib -E 'test(responses_retry::tests::) | test(context_overflow_image_ladder) | test(provider_runtime_refresh) | test(build_latest_agent_spawn_config)'
+          just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-core --lib -E 'test(responses_retry::tests::) | test(context_overflow_image_ladder) | test(images_shrunk) | test(provider_runtime_refresh) | test(build_latest_agent_spawn_config)'
 
       - name: Save Rust build cache
         if: always()
@@ -53,11 +53,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             codex-rs/target
-          key: local3-159-windows-test-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+          key: local3-159-windows-latest-test-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
 
   build:
     name: Build minimal Windows package
-    runs-on: windows-2022
+    runs-on: windows-latest
     timeout-minutes: 240
     env:
       CARGO_PROFILE_RELEASE_DEBUG: "0"
@@ -75,8 +75,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             codex-rs/target
-          key: local3-159-windows-build-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: local3-159-windows-build-${{ hashFiles('codex-rs/Cargo.lock') }}-
+          key: local3-159-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: local3-159-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -136,4 +136,4 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             codex-rs/target
-          key: local3-159-windows-build-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+          key: local3-159-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}

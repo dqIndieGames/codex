@@ -1713,7 +1713,7 @@ fn realtime_retry_notifier(sess: &Arc<Session>, sub_id: &str) -> RealtimeRetryNo
         let sess = Arc::clone(&sess);
         let sub_id = sub_id.clone();
         tokio::spawn(async move {
-            sess.send_event_raw(Event {
+            sess.deliver_event_raw(Event {
                 id: sub_id,
                 msg: EventMsg::StreamError(StreamErrorEvent {
                     message: realtime_retry_status_message(

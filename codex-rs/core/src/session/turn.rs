@@ -3453,7 +3453,7 @@ pub(crate) fn request_retry_notifier(
         tokio::spawn(async move {
             let (message, codex_error_info) = if let Some(message) = event.message_override {
                 (
-                    message,
+                    format!("{message} {}", transport_retry_status_message(retry_number, event.max_attempts)),
                     CodexErrorInfo::ResponseStreamDisconnected {
                         http_status_code: None,
                     },
@@ -3471,14 +3471,14 @@ pub(crate) fn request_retry_notifier(
                     },
                 )
             };
-            sess.send_event(
-                &turn_context,
-                EventMsg::StreamError(StreamErrorEvent {
+            sess.deliver_event_raw(Event {
+                id: turn_context.sub_id.clone(),
+                msg: EventMsg::StreamError(StreamErrorEvent {
                     message,
                     codex_error_info: Some(codex_error_info),
                     additional_details: Some(event.details),
                 }),
-            )
+            })
             .await;
         });
     })

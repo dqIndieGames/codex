@@ -1829,8 +1829,7 @@ impl ModelClientSession {
                 .await?;
             let include_internal = self
                 .client
-                .state
-                .provider
+                .current_provider()
                 .include_internal_metadata(&client_setup.api_provider);
             let responses_headers = self
                 .client
@@ -2049,8 +2048,7 @@ impl ModelClientSession {
                 .await?;
             let include_internal = self
                 .client
-                .state
-                .provider
+                .current_provider()
                 .include_internal_metadata(&client_setup.api_provider);
             let responses_headers = self
                 .client

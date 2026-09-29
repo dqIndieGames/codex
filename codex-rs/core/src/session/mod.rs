@@ -2808,7 +2808,8 @@ impl Session {
         self.deliver_event_raw(event).await;
     }
 
-    async fn deliver_event_raw(&self, event: Event) {
+    /// Deliver to the live consumer only, without tracing or durable history.
+    pub(crate) async fn deliver_event_raw(&self, event: Event) {
         // Record the last known agent status.
         if let Some(status) = agent_status_from_event(&event.msg) {
             self.agent_status.send_replace(status);
@@ -5297,7 +5298,13 @@ impl Session {
             codex_error_info: Some(codex_error_info),
             additional_details: Some(additional_details),
         });
-        self.send_event(turn_context, event).await;
+        // Retry status is transient: skip rollout, trace, realtime history,
+        // and fork/replay observers while still updating the live UI.
+        self.deliver_event_raw(Event {
+            id: turn_context.sub_id.clone(),
+            msg: event,
+        })
+        .await;
     }
 
     pub(crate) async fn record_memory_citation_for_turn(&self, sub_id: &str) {
