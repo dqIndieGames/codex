@@ -35,7 +35,6 @@ use crate::setup_error::extract_failure;
 use crate::setup_error::failure;
 use crate::setup_error::read_setup_error_report;
 use crate::ssh_config_dependencies::ssh_config_dependency_paths;
-use crate::winutil::current_account_name;
 use anyhow::Result;
 use anyhow::anyhow;
 use base64::Engine;
@@ -1146,7 +1145,7 @@ fn elevated_provisioning_payload(
 ) -> ElevationPayload {
     let offline_proxy_settings =
         offline_proxy_settings_for_request(request, offline_proxy_settings_override);
-    Ok(ElevationPayload {
+    ElevationPayload {
         version: SETUP_VERSION,
         offline_username: OFFLINE_USERNAME.to_string(),
         online_username: ONLINE_USERNAME.to_string(),
@@ -1163,7 +1162,7 @@ fn elevated_provisioning_payload(
         mode: SetupMode::InteractiveProvision,
         runtime: SetupRuntime::Legacy,
         refresh_only: false,
-    })
+    }
 }
 
 pub fn run_elevated_provisioning_setup(
