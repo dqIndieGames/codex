@@ -1,7 +1,10 @@
 //! TUI orchestration for an app-server-signaled, locally owned WebRTC voice session.
 //! Completed captions and both speakers' partials stay bounded across widget replacement.
+//! Interleaved speakers retain separate displays so settled caption text never reanimates.
+//! Speech recovery suppresses stale queued answers while preserving unspoken text fallbacks.
 
 mod recording_controls;
+mod transcript_replay;
 
 use super::ChatWidget;
 use super::HistoryCell;
@@ -13,7 +16,6 @@ use crate::app_event::AppEvent;
 use crate::bottom_pane::VoiceStripPhase;
 use crate::bottom_pane::VoiceStripState;
 use crate::history_cell;
-use crate::key_hint::KeyBindingListExt;
 use crate::motion::MotionMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::UserInput;
@@ -23,8 +25,6 @@ use codex_protocol::models::MessagePhase;
 use codex_realtime_webrtc::RealtimeWebrtcSession;
 use codex_realtime_webrtc::RealtimeWebrtcSessionHandle;
 use codex_realtime_webrtc::StartedRealtimeWebrtcSession;
-use crossterm::event::KeyEvent;
-use crossterm::event::KeyEventKind;
 use futures::future::AbortHandle;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -35,6 +35,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
+
+#[path = "realtime_navigation.rs"]
+mod navigation;
 
 #[cfg(test)]
 #[path = "realtime_tests.rs"]
@@ -59,6 +62,7 @@ const INTERRUPTION_ACKNOWLEDGMENT: Duration = Duration::from_millis(400);
 static NEXT_REALTIME_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REALTIME_SPEECH_DELIVERY_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone)]
 struct PendingRealtimeSpeech {
     state: PendingSpeechState,
     captioned: bool,
@@ -68,10 +72,12 @@ struct PendingRealtimeSpeech {
     item: ThreadItem,
 }
 
+#[derive(Clone)]
 pub(crate) struct RealtimeTranscriptRecord {
     pub(crate) role: String,
     pub(crate) text: String,
     pub(crate) complete: bool,
+    pub(crate) before_turn_id: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -155,12 +161,14 @@ pub(super) struct RealtimeConversationUiState {
     transcript: String,
     // The other speaker's bounded partial while duplex deltas interleave.
     interleaved_transcript: Option<(String, String)>,
+    interleaved_transcript_cell: Option<Box<dyn HistoryCell>>,
     transcript_input_generation: Option<u64>,
     assistant_transcript_generation: Option<u64>,
     assistant_caption_started_after_speech_queue: bool,
     pub(super) live_transcript_cell: Option<Box<dyn HistoryCell>>,
-    pending_history_cells: VecDeque<Box<dyn HistoryCell>>,
+    pub(super) pending_history_cells: VecDeque<Box<dyn HistoryCell>>,
     accepted_transcripts: VecDeque<RealtimeTranscriptRecord>,
+    replay_transcripts: Option<VecDeque<RealtimeTranscriptRecord>>,
     latest_input_was_voice: bool,
     input_generation: u64,
     latest_voice_input_fingerprint: Option<(usize, u64)>,
@@ -169,6 +177,24 @@ pub(super) struct RealtimeConversationUiState {
     delegated_reasoning_turns: VecDeque<String>,
     pub(super) agent_items: HashMap<(String, String), RealtimeAgentItemOrigin>,
     pending_speech: VecDeque<PendingRealtimeSpeech>,
+}
+
+impl RealtimeConversationUiState {
+    pub(super) fn live_transcript_cells(&self) -> impl Iterator<Item = &Box<dyn HistoryCell>> {
+        // Keep the user above the reply even when their last packets interleave.
+        let cells = if self.transcript_role.as_deref() == Some("user") {
+            [
+                &self.live_transcript_cell,
+                &self.interleaved_transcript_cell,
+            ]
+        } else {
+            [
+                &self.interleaved_transcript_cell,
+                &self.live_transcript_cell,
+            ]
+        };
+        cells.into_iter().filter_map(Option::as_ref)
+    }
 }
 
 pub(crate) fn realtime_delegation_input(items: &[UserInput]) -> Option<&str> {
@@ -308,7 +334,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(super) fn stop_realtime_conversation(&mut self) {
+    pub(crate) fn stop_realtime_conversation(&mut self) {
         self.realtime_conversation.startup_retry = StartupRetry::Used;
         if matches!(
             self.realtime_conversation.phase,
@@ -783,7 +809,14 @@ impl ChatWidget {
         if questions.is_some() {
             return false;
         }
-        if from_replay || !self.is_realtime_delegated_agent_item(turn_id, item_id) {
+        if from_replay {
+            return self
+                .realtime_conversation
+                .pending_speech
+                .iter()
+                .any(|pending| pending.turn_id == turn_id && pending.item.id() == item_id);
+        }
+        if !self.is_realtime_delegated_agent_item(turn_id, item_id) {
             return false;
         }
         let Some(RealtimeAgentItemOrigin::Delegated {
@@ -980,10 +1013,15 @@ impl ChatWidget {
     pub(crate) fn take_undelivered_realtime_speech_for_replay(
         &mut self,
     ) -> Vec<(ThreadId, String, ThreadItem)> {
+        let input_generation = self.realtime_conversation.input_generation;
         self.realtime_conversation
             .pending_speech
             .drain(..)
-            .filter(|delivery| !delivery.captioned)
+            .filter(|delivery| {
+                !delivery.captioned
+                    && (delivery.state == PendingSpeechState::AwaitingTurn
+                        || delivery.input_generation == input_generation)
+            })
             .map(|delivery| (delivery.thread_id, delivery.turn_id, delivery.item))
             .collect()
     }
@@ -991,10 +1029,23 @@ impl ChatWidget {
     pub(crate) fn take_realtime_transcript_cells_for_replay(
         &mut self,
     ) -> VecDeque<RealtimeTranscriptRecord> {
-        let mut records = std::mem::take(&mut self.realtime_conversation.accepted_transcripts);
+        let records = self.realtime_transcript_cells_for_replay();
+        self.realtime_conversation.accepted_transcripts.clear();
+        self.realtime_conversation.pending_history_cells.clear();
+        self.realtime_conversation.interleaved_transcript = None;
+        self.realtime_conversation.interleaved_transcript_cell = None;
+        self.realtime_conversation.transcript_role = None;
+        self.realtime_conversation.transcript.clear();
+        self.realtime_conversation.live_transcript_cell = None;
+        records
+    }
+
+    pub(crate) fn realtime_transcript_cells_for_replay(
+        &self,
+    ) -> VecDeque<RealtimeTranscriptRecord> {
+        let mut records = self.realtime_conversation.accepted_transcripts.clone();
         // Accepted records include cells already flushed into the old widget as
         // well as those still deferred behind another assistant stream.
-        self.realtime_conversation.pending_history_cells.clear();
         let mut retain_partial = |role: String, text: String| {
             if text.trim().is_empty() {
                 return;
@@ -1014,15 +1065,14 @@ impl ChatWidget {
                 role,
                 text,
                 complete: false,
+                before_turn_id: None,
             });
         };
-        if let Some((role, text)) = self.realtime_conversation.interleaved_transcript.take() {
+        if let Some((role, text)) = self.realtime_conversation.interleaved_transcript.clone() {
             retain_partial(role, text);
         }
-        if let Some(role) = self.realtime_conversation.transcript_role.take() {
-            let text = std::mem::take(&mut self.realtime_conversation.transcript);
-            retain_partial(role, text);
-            self.realtime_conversation.live_transcript_cell = None;
+        if let Some(role) = self.realtime_conversation.transcript_role.clone() {
+            retain_partial(role, self.realtime_conversation.transcript.clone());
         }
         records
     }
@@ -1047,6 +1097,7 @@ impl ChatWidget {
                 self.realtime_conversation
                     .pending_history_cells
                     .push_back(cell);
+                self.bump_active_cell_revision();
             } else {
                 // Keep an unfinished caption editable until its late completion or close.
                 self.on_realtime_transcript_delta(record.role.clone(), record.text.clone());
@@ -1084,6 +1135,9 @@ impl ChatWidget {
     }
 
     pub(crate) fn restore_undelivered_realtime_speech(&mut self, delivery_id: u64) {
+        if self.app_event_tx.voice_only.load(Ordering::Relaxed) {
+            return;
+        }
         if let Some(index) = self
             .realtime_conversation
             .pending_speech
@@ -1096,10 +1150,14 @@ impl ChatWidget {
     }
 
     fn restore_realtime_speech(&mut self, delivery: PendingRealtimeSpeech) {
-        if delivery.captioned {
-            return;
-        }
-        if self.thread_id() != Some(delivery.thread_id) {
+        // Do not append old queued speech under a newer question. An answer that
+        // never reached speech still needs its text fallback: a delayed user
+        // transcript can advance the generation after its delegation starts.
+        if delivery.captioned
+            || (delivery.state != PendingSpeechState::AwaitingTurn
+                && delivery.input_generation != self.realtime_conversation.input_generation)
+            || self.thread_id() != Some(delivery.thread_id)
+        {
             return;
         }
         self.forget_realtime_turn_origin(&delivery.turn_id);
@@ -1111,6 +1169,10 @@ impl ChatWidget {
     }
 
     fn restore_all_undelivered_realtime_speech(&mut self) {
+        // Preserve parked recovery without undoing overflow eviction.
+        if self.app_event_tx.voice_only.load(Ordering::Relaxed) {
+            return;
+        }
         while let Some(delivery) = self.realtime_conversation.pending_speech.pop_front() {
             self.restore_realtime_speech(delivery);
         }
@@ -1133,13 +1195,7 @@ impl ChatWidget {
         }
         self.forget_realtime_turn_origin(turn_id);
         for delivery in waiting {
-            if self.thread_id() == Some(delivery.thread_id) {
-                self.handle_thread_item(
-                    delivery.item,
-                    delivery.turn_id,
-                    super::ThreadItemRenderSource::Live,
-                );
-            }
+            self.restore_realtime_speech(delivery);
         }
     }
 
@@ -1193,11 +1249,11 @@ impl ChatWidget {
                 .wrapping_add(/*rhs*/ 1);
             self.realtime_conversation.transcript_input_generation =
                 Some(self.realtime_conversation.input_generation);
-            if interrupted && self.config.animations {
+            if interrupted && self.local_settings.tui.animations {
                 self.realtime_conversation.interruption_acknowledged_until =
                     Some(Instant::now() + INTERRUPTION_ACKNOWLEDGMENT);
             }
-            self.suppress_realtime_speaker();
+            self.suppress_active_realtime_speaker();
         }
         if active
             && role == "assistant"
@@ -1233,13 +1289,22 @@ impl ChatWidget {
             let previous = self.realtime_conversation.transcript_role.take();
             let previous_text = std::mem::take(&mut self.realtime_conversation.transcript);
             let saved = self.realtime_conversation.interleaved_transcript.take();
+            let saved_cell = self
+                .realtime_conversation
+                .interleaved_transcript_cell
+                .take();
+            let previous_cell = self.realtime_conversation.live_transcript_cell.take();
             self.realtime_conversation.transcript = match saved {
-                Some((saved_role, saved_text)) if saved_role == role => saved_text,
+                Some((saved_role, saved_text)) if saved_role == role => {
+                    self.realtime_conversation.live_transcript_cell = saved_cell;
+                    saved_text
+                }
                 _ => String::new(),
             };
             if let Some(previous_role) = previous {
                 self.realtime_conversation.interleaved_transcript =
                     Some((previous_role, previous_text));
+                self.realtime_conversation.interleaved_transcript_cell = previous_cell;
             }
             self.realtime_conversation.transcript_role = Some(role);
         }
@@ -1262,6 +1327,20 @@ impl ChatWidget {
             .transcript_role
             .as_deref()
             .unwrap_or("");
+        // Keep recognition and interruption state current without echoing each partial utterance.
+        // The final event commits the ordinary user history cell once.
+        if role == "user" && !self.local_settings.tui.animations {
+            if self
+                .realtime_conversation
+                .live_transcript_cell
+                .take()
+                .is_some()
+            {
+                self.bump_active_cell_revision();
+                self.request_redraw();
+            }
+            return;
+        }
         let previous = self
             .realtime_conversation
             .live_transcript_cell
@@ -1273,7 +1352,7 @@ impl ChatWidget {
             &self.realtime_conversation.transcript,
             previous,
             discarded_prefix_bytes,
-            MotionMode::from_animations_enabled(self.config.animations),
+            MotionMode::from_animations_enabled(self.local_settings.tui.animations),
             self.frame_requester.clone(),
         );
         self.realtime_conversation.live_transcript_cell = Some(Box::new(live_cell));
@@ -1303,6 +1382,8 @@ impl ChatWidget {
                 .is_some_and(|(saved_role, _)| saved_role == &role)
             {
                 self.realtime_conversation.interleaved_transcript = None;
+                self.realtime_conversation.interleaved_transcript_cell = None;
+                self.bump_active_cell_revision();
             }
             if text.trim().is_empty() {
                 if let Some(index) = self
@@ -1347,6 +1428,7 @@ impl ChatWidget {
                         role: role.clone(),
                         text: text.clone(),
                         complete: true,
+                        before_turn_id: None,
                     },
                 );
                 text.clone()
@@ -1362,6 +1444,7 @@ impl ChatWidget {
             self.realtime_conversation
                 .pending_history_cells
                 .push_back(cell);
+            self.bump_active_cell_revision();
             self.flush_realtime_transcript_history();
             return;
         }
@@ -1449,7 +1532,7 @@ impl ChatWidget {
                         .input_generation
                         .wrapping_add(/*rhs*/ 1);
                     self.realtime_conversation.latest_input_was_voice = true;
-                    self.suppress_realtime_speaker();
+                    self.suppress_active_realtime_speaker();
                 }
             }
         }
@@ -1465,6 +1548,8 @@ impl ChatWidget {
             .is_some_and(|(saved_role, _)| saved_role == &role)
         {
             self.realtime_conversation.interleaved_transcript = None;
+            self.realtime_conversation.interleaved_transcript_cell = None;
+            self.bump_active_cell_revision();
         }
         if text.len() > MAX_TRANSCRIPT_BYTES {
             let mut end = MAX_TRANSCRIPT_BYTES;
@@ -1488,6 +1573,7 @@ impl ChatWidget {
                     role: role.clone(),
                     text: text.clone(),
                     complete: true,
+                    before_turn_id: None,
                 });
             while self.realtime_conversation.pending_history_cells.len()
                 >= MAX_PENDING_TRANSCRIPT_CELLS
@@ -1499,12 +1585,14 @@ impl ChatWidget {
             self.realtime_conversation
                 .pending_history_cells
                 .push_back(cell);
+            self.bump_active_cell_revision();
             self.flush_realtime_transcript_history();
         }
     }
 
     fn finish_realtime_partial_transcripts(&mut self) {
         if let Some((role, text)) = self.realtime_conversation.interleaved_transcript.take() {
+            self.realtime_conversation.interleaved_transcript_cell = None;
             self.on_realtime_transcript_done(role, text);
         }
         if let Some(role) = self.realtime_conversation.transcript_role.clone() {
@@ -1531,9 +1619,31 @@ impl ChatWidget {
         {
             return;
         }
-        while let Some(cell) = self.realtime_conversation.pending_history_cells.pop_front() {
-            self.add_boxed_history(cell);
+        if !self.realtime_conversation.pending_history_cells.is_empty() {
+            self.app_event_tx
+                .send(AppEvent::CommitRealtimeTranscriptHistory);
+            self.request_redraw();
         }
+    }
+
+    pub(crate) fn take_realtime_transcript_history(&mut self) -> Vec<Box<dyn HistoryCell>> {
+        if self.stream_controller.is_some()
+            || self.plan_stream_controller.is_some()
+            || self.pending_stream_consolidations > 0
+        {
+            return Vec::new();
+        }
+        let mut cells = Vec::new();
+        while let Some(cell) = self.realtime_conversation.pending_history_cells.pop_front() {
+            if let Some(active) = self.take_history_insertion_prefix(cell.as_ref()) {
+                cells.push(active);
+            }
+            cells.push(cell);
+        }
+        if !cells.is_empty() {
+            self.bump_active_cell_revision();
+        }
+        cells
     }
 
     pub(crate) fn record_realtime_failure(&mut self) {
@@ -1561,7 +1671,7 @@ impl ChatWidget {
             self.record_realtime_failure();
         }
         self.stop_realtime_conversation();
-        self.add_error_message(message);
+        self.add_realtime_error(message);
     }
 
     pub(super) fn on_realtime_conversation_closed(&mut self, reason: Option<String>) {
@@ -1599,6 +1709,7 @@ impl ChatWidget {
         {
             self.record_realtime_failure();
         }
+        let failed = self.realtime_conversation.failure_recorded;
         self.reset_realtime_conversation();
         if let Some(thread_id) = retry_thread_id {
             // The old backend is closed. A late peer result belongs to its attempt ID.
@@ -1615,11 +1726,14 @@ impl ChatWidget {
         }
         if let Some(reason) = reason
             && reason != "error"
+            && !(failed && reason == "requested")
         {
-            self.add_info_message(
-                format!("Voice conversation ended: {reason}"),
-                /*hint*/ None,
-            );
+            let message = format!("Voice conversation ended: {reason}");
+            if self.app_event_tx.voice_only.load(Ordering::Relaxed) && reason != "requested" {
+                self.add_realtime_error(message);
+            } else {
+                self.add_info_message(message, /*hint*/ None);
+            }
         }
         self.request_redraw();
     }
@@ -1637,6 +1751,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn reset_realtime_conversation(&mut self) -> Option<ThreadId> {
+        if self.realtime_conversation_is_running() {
+            self.app_event_tx
+                .send(AppEvent::RealtimeConversationStateChanged);
+        }
         self.finish_realtime_session_metrics();
         let should_refresh_terminal_title = self.realtime_conversation.phase
             != RealtimeConversationPhase::Inactive
@@ -1705,12 +1823,14 @@ impl ChatWidget {
             self.realtime_conversation
                 .pending_history_cells
                 .push_back(cell);
+            self.bump_active_cell_revision();
             self.realtime_conversation
                 .accepted_transcripts
                 .push_back(RealtimeTranscriptRecord {
                     role,
                     text,
                     complete: true,
+                    before_turn_id: None,
                 });
         }
         let pending_history_cells =
@@ -1719,9 +1839,16 @@ impl ChatWidget {
             std::mem::take(&mut self.realtime_conversation.accepted_transcripts);
         let delegated_reasoning_turns =
             std::mem::take(&mut self.realtime_conversation.delegated_reasoning_turns);
-        let had_live_transcript = self.realtime_conversation.live_transcript_cell.is_some();
+        let had_live_transcript = self
+            .realtime_conversation
+            .live_transcript_cells()
+            .next()
+            .is_some();
         self.realtime_conversation = RealtimeConversationUiState {
             attempt_id: self.realtime_conversation.attempt_id,
+            // Keep parked speech tied to its input until it is taken for replay.
+            input_generation: self.realtime_conversation.input_generation,
+            pending_speech: std::mem::take(&mut self.realtime_conversation.pending_speech),
             pending_history_cells,
             accepted_transcripts,
             delegated_reasoning_turns,

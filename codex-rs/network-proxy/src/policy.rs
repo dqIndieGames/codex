@@ -90,6 +90,18 @@ fn ipv4_in_cidr(ip: Ipv4Addr, base: [u8; 4], prefix: u8) -> bool {
     (ip & mask) == (base & mask)
 }
 
+/// Private unicast ranges that may be reachable through an upstream VPN proxy.
+/// Loopback, link-local, and other special-use addresses retain their normal routing.
+pub(crate) fn is_private_network_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_private() || ipv4_in_cidr(ip, [100, 64, 0, 0], /*prefix*/ 10),
+        IpAddr::V6(ip) => match ip.to_ipv4() {
+            Some(ip) => is_private_network_ip(IpAddr::V4(ip)),
+            None => ip.is_unique_local(),
+        },
+    }
+}
+
 fn is_non_public_ipv6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4() {
         return is_non_public_ipv4(v4) || ip.is_loopback();
@@ -200,6 +212,9 @@ pub(crate) fn compile_denylist_globset(patterns: &[String]) -> Result<GlobSet> {
     compile_globset_with_policy(patterns, GlobalWildcard::Reject)
 }
 
+// Browser network-policy matchers implement a subset of this hostname grammar.
+// Keep changes to shared grammar and normalization in sync with their contract
+// cases and the Rust tests below, including compile_globset_supports_question_mark_wildcards.
 fn compile_globset_with_policy(
     patterns: &[String],
     global_wildcard: GlobalWildcard,
@@ -217,6 +232,7 @@ fn compile_globset_with_policy(
         // - "example.com": match the exact host
         // - "*.example.com": match any subdomain (not the apex)
         // - "**.example.com": match the apex and any subdomain
+        // - "api?.example.com": match exactly one character after "api"
         // - "*": match every host when explicitly enabled for allowlist compilation
         for candidate in expand_domain_pattern(&pattern) {
             if !seen.insert(candidate.clone()) {
@@ -409,6 +425,46 @@ mod tests {
         assert_eq!(true, set.is_match("region.v2.argotunnel.com"));
         assert_eq!(false, set.is_match("xregion1.v2.argotunnel.com"));
         assert_eq!(false, set.is_match("foo.region1.v2.argotunnel.com"));
+    }
+
+    // Keep this table one-for-one with the browser network-policy matchers'
+    // question-mark contract cases so grammar changes are checked on both sides.
+    #[test]
+    fn compile_globset_supports_question_mark_wildcards() -> Result<()> {
+        for (pattern, host, expected) in [
+            ("api?.example.com", "api1.example.com", true),
+            ("api?.example.com", "api.example.com", false),
+            ("api?.example.com", "api12.example.com", false),
+            ("api??.example.com", "api12.example.com", true),
+            ("api??.example.com", "api1.example.com", false),
+            ("api*?.example.com", "api.example.com", false),
+            ("api*?.example.com", "api1.example.com", true),
+            ("api*?.example.com", "api123.example.com", true),
+            ("api?example.com", "api.example.com", true),
+            ("*.api?.example.com", "api1.example.com", false),
+            ("*.api?.example.com", "www.api1.example.com", true),
+            ("*.api?.example.com", "nested.www.api1.example.com", true),
+            ("*.api?.example.com", "www.api12.example.com", false),
+            ("**.api?.example.com", "api1.example.com", true),
+            ("**.api?.example.com", "www.api1.example.com", true),
+            ("**.api?.example.com", "nested.www.api1.example.com", true),
+            ("**.api?.example.com", "api12.example.com", false),
+            ("**.api?.example.com", "www.api12.example.com", false),
+            (" API?.EXAMPLE.COM. ", "API1.EXAMPLE.COM.", true),
+        ] {
+            let patterns = [pattern.to_string()];
+            for set in [
+                compile_allowlist_globset(&patterns)?,
+                compile_denylist_globset(&patterns)?,
+            ] {
+                assert_eq!(
+                    set.is_match(normalize_host(host)),
+                    expected,
+                    "pattern {pattern}, host {host}"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]

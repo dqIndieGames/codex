@@ -60,6 +60,8 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
     );
     store
         .create_thread(CreateThreadParams {
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             thread_id,
             extra_config: None,
@@ -98,6 +100,7 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
                 }),
                 RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                     turn_id: "turn-1".to_string(),
+                    root_turn_id: None,
                     trace_id: None,
                     started_at: Some(10),
                     model_context_window: None,

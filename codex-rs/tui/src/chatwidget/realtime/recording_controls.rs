@@ -1,10 +1,10 @@
 //! Live voice capture controls, activity meters, and interruption presentation.
-//! Meter samples remain bounded and the current thread owns every shortcut.
+//! Meter samples remain bounded; App routes shortcuts to the voice owner.
 
 use super::*;
 
 impl ChatWidget {
-    pub(in crate::chatwidget) fn toggle_realtime_microphone(&mut self) {
+    pub(crate) fn toggle_realtime_microphone(&mut self) {
         let muted = !self.realtime_conversation.microphone_muted;
         if let Some(handle) = self.realtime_conversation.handle.as_ref() {
             if let Err(error) = handle.set_microphone_muted(muted) {
@@ -12,7 +12,7 @@ impl ChatWidget {
                 return;
             }
         } else if self.realtime_conversation.phase != RealtimeConversationPhase::Starting {
-            self.add_error_message("Start voice mode before muting the microphone.".to_string());
+            self.add_realtime_error("Start voice mode before muting the microphone.".to_string());
             return;
         }
 
@@ -39,17 +39,6 @@ impl ChatWidget {
             && self.bottom_pane.no_modal_or_popup_active()
     }
 
-    pub(crate) fn handle_realtime_microphone_shortcut(&mut self, key_event: KeyEvent) -> bool {
-        if key_event.kind != KeyEventKind::Press
-            || !self.chat_keymap.toggle_voice_mute.is_pressed(key_event)
-            || !self.realtime_microphone_shortcut_available()
-        {
-            return false;
-        }
-        self.toggle_realtime_microphone();
-        true
-    }
-
     pub(in crate::chatwidget) fn realtime_microphone_is_listening(&self) -> bool {
         !self.realtime_conversation.microphone_muted
             && self.realtime_conversation.thread_id.is_some()
@@ -73,6 +62,39 @@ impl ChatWidget {
         }
         if acknowledged {
             self.update_realtime_footer();
+        }
+    }
+
+    pub(super) fn suppress_active_realtime_speaker(&mut self) {
+        // Quiet turns must not wait for captions before accepting their first
+        // audio packets. Only interrupt output that may belong to an older turn.
+        if self
+            .realtime_conversation
+            .assistant_transcript_generation
+            .is_some()
+            || self
+                .realtime_conversation
+                .pending_speech
+                .iter()
+                .any(|pending| {
+                    pending.input_generation != self.realtime_conversation.input_generation
+                        && !pending.captioned
+                        && matches!(
+                            pending.state,
+                            PendingSpeechState::Queued(_) | PendingSpeechState::Accepted
+                        )
+                })
+            || self.realtime_conversation.speaker_level > 0
+            || self
+                .realtime_conversation
+                .speaker_active_until
+                .is_some_and(|deadline| deadline > Instant::now())
+            || self
+                .realtime_conversation
+                .speaker_suppression_generation
+                .is_some()
+        {
+            self.suppress_realtime_speaker();
         }
     }
 
@@ -104,7 +126,7 @@ impl ChatWidget {
         }
     }
 
-    pub(in crate::chatwidget) fn refresh_realtime_microphone_level(&mut self) {
+    pub(crate) fn refresh_realtime_microphone_level(&mut self) {
         if !matches!(
             self.realtime_conversation.phase,
             RealtimeConversationPhase::Starting | RealtimeConversationPhase::Active
@@ -156,10 +178,12 @@ impl ChatWidget {
         let speaker_intensity = audio_meter_intensity(speaker_peak);
         let previous_microphone_history = self.realtime_conversation.microphone_history;
         let previous_speaker_history = self.realtime_conversation.speaker_history;
-        let mut changed = self.realtime_conversation.microphone_level != microphone_level
-            || self.realtime_conversation.speaker_level != speaker_level
-            || self.realtime_conversation.microphone_intensity != microphone_intensity
-            || self.realtime_conversation.speaker_intensity != speaker_intensity;
+        let mut changed = (self.realtime_conversation.speaker_level > 0) != (speaker_level > 0)
+            || (self.local_settings.tui.animations
+                && (self.realtime_conversation.microphone_level != microphone_level
+                    || self.realtime_conversation.speaker_level != speaker_level
+                    || self.realtime_conversation.microphone_intensity != microphone_intensity
+                    || self.realtime_conversation.speaker_intensity != speaker_intensity));
         if speaker_level > 0 {
             self.realtime_conversation.speaker_active_until = Some(now + SPEAKER_ACTIVITY_HOLD);
         } else {
@@ -189,24 +213,16 @@ impl ChatWidget {
             .audio_meter_history
             .iter()
             .any(|(microphone, speaker)| *microphone > 0 || *speaker > 0);
-        // Release a quiet channel instead of waiting for old peaks to scroll out.
-        for (microphone, speaker) in &mut self.realtime_conversation.audio_meter_history {
-            if microphone_intensity == 0 {
-                *microphone = 0;
-            }
-            if speaker_intensity == 0 {
-                *speaker = 0;
-            }
-        }
         if self.realtime_conversation.audio_meter_history.len() >= MAX_REALTIME_AUDIO_METER_FRAMES {
             self.realtime_conversation.audio_meter_history.pop_front();
         }
         self.realtime_conversation
             .audio_meter_history
             .push_back((microphone_intensity, speaker_intensity));
-        changed |= previous_microphone_history != self.realtime_conversation.microphone_history
-            || previous_speaker_history != self.realtime_conversation.speaker_history
-            || had_meter_activity;
+        changed |= self.local_settings.tui.animations
+            && (previous_microphone_history != self.realtime_conversation.microphone_history
+                || previous_speaker_history != self.realtime_conversation.speaker_history
+                || had_meter_activity);
         if changed {
             self.update_realtime_footer();
         }
@@ -268,7 +284,8 @@ impl ChatWidget {
                 .map(|(_, speaker)| *speaker)
                 .collect(),
             activity,
-            animations: self.config.animations,
+            animations: self.local_settings.tui.animations,
+            progress: self.local_settings.tui.effects.progress,
         }));
     }
 }

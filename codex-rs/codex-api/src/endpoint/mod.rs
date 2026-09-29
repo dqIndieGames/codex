@@ -8,6 +8,7 @@ pub(crate) mod responses_websocket;
 pub(crate) mod search;
 mod session;
 
+pub use images::ImageRequestError;
 pub use images::ImagesClient;
 pub use memories::MemoriesClient;
 pub use models::ModelsClient;
@@ -29,7 +30,6 @@ pub use realtime_websocket::RealtimeWebsocketEvents;
 pub use realtime_websocket::RealtimeWebsocketWriter;
 pub use realtime_websocket::session_update_session_json;
 pub use responses::ResponsesClient;
-pub use responses::ResponsesEndpoint;
 pub use responses::ResponsesOptions;
 pub use responses_websocket::ResponsesWebsocketClient;
 pub use responses_websocket::ResponsesWebsocketClose;

@@ -25,6 +25,15 @@ use std::process::Output;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
+#[path = "wslg_tests.rs"]
+mod wslg_tests;
+
+#[path = "nested_metadata_tests.rs"]
+mod nested_metadata_tests;
+
+#[path = "root_metadata_tests.rs"]
+mod root_metadata_tests;
+
 // At least on GitHub CI, the arm64 tests appear to need longer timeouts.
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -183,7 +192,6 @@ async fn run_cmd_result_with_permission_profile_for_cwd(
         network_environment_id: None,
         sandbox_permissions: SandboxPermissions::UseDefault,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
-        windows_sandbox_private_desktop: false,
         justification: None,
         arg0: None,
     };
@@ -195,6 +203,7 @@ async fn run_cmd_result_with_permission_profile_for_cwd(
         &sandbox_cwd,
         std::slice::from_ref(&sandbox_cwd),
         &codex_linux_sandbox_exe,
+        /*codex_self_exe*/ &None,
         use_legacy_landlock,
         /*stdout_stream*/ None,
     )
@@ -558,59 +567,6 @@ async fn wsl_interop_cannot_reenter_distro_as_root_with_network_access() {
 }
 
 #[tokio::test]
-async fn legacy_landlock_rejects_wsl_interop_with_network_access() {
-    let Some(powershell) = wsl_windows_executable(r"WindowsPowerShell\v1.0\powershell.exe").await
-    else {
-        return;
-    };
-    if wsl_baseline_output(
-        &powershell,
-        &["-NoProfile", "-NonInteractive", "-Command", "exit 0"],
-    )
-    .await
-    .is_none()
-    {
-        eprintln!("skipping legacy WSL interop test: Windows interop is unavailable on the host");
-        return;
-    }
-
-    let safe_profile = PermissionProfile::from_runtime_permissions(
-        &FileSystemSandboxPolicy::read_only(),
-        NetworkSandboxPolicy::Restricted,
-    );
-    let linux_output = run_cmd_result_with_permission_profile(
-        &["/bin/true"],
-        safe_profile,
-        NETWORK_TIMEOUT_MS,
-        /*use_legacy_landlock*/ true,
-    )
-    .await
-    .expect("legacy Landlock should run a Linux command");
-    assert_eq!(linux_output.exit_code, 0);
-
-    let unsafe_profile = PermissionProfile::from_runtime_permissions(
-        &FileSystemSandboxPolicy::read_only(),
-        NetworkSandboxPolicy::Enabled,
-    );
-    let output = expect_denied(
-        run_cmd_result_with_permission_profile(
-            &["/bin/true"],
-            unsafe_profile,
-            NETWORK_TIMEOUT_MS,
-            /*use_legacy_landlock*/ true,
-        )
-        .await,
-        "legacy Landlock must reject restricted filesystem access with full network access on WSL",
-    );
-    assert!(
-        output
-            .stderr
-            .text
-            .contains("legacy Landlock cannot isolate WSL Windows interop")
-    );
-}
-
-#[tokio::test]
 async fn test_root_read() {
     run_cmd(&["ls", "-l", "/bin"], &[], SHORT_TIMEOUT_MS).await;
 }
@@ -763,20 +719,19 @@ async fn sandbox_ignores_missing_writable_roots_under_bwrap() {
 #[tokio::test]
 async fn test_no_new_privs_is_enabled() {
     let output = run_cmd_output(
-        &["bash", "-lc", "grep '^NoNewPrivs:' /proc/self/status"],
+        &[
+            "python3",
+            "-c",
+            "import ctypes; print(ctypes.CDLL(None).prctl(39, 0, 0, 0, 0))",
+        ],
         &[],
         // We have seen timeouts when running this test in CI on GitHub,
         // so we are using a generous timeout until we can diagnose further.
         LONG_TIMEOUT_MS,
     )
     .await;
-    let line = output
-        .stdout
-        .text
-        .lines()
-        .find(|line| line.starts_with("NoNewPrivs:"))
-        .unwrap_or("");
-    assert_eq!(line.trim(), "NoNewPrivs:\t1");
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout.text, "1\n");
 }
 
 #[tokio::test]
@@ -788,19 +743,16 @@ async fn sandboxed_command_has_no_effective_or_permitted_capabilities() {
 
     let output = run_cmd_output(
         &[
-            "bash",
-            "-lc",
-            "awk '$1 == \"CapPrm:\" || $1 == \"CapEff:\" { print $1, $2 }' /proc/self/status",
+            "python3",
+            "-c",
+            "import ctypes; h=(ctypes.c_uint*2)(0x20080522,0); d=(ctypes.c_uint*6)(); assert ctypes.CDLL(None).capget(h,d)==0; print(d[0],d[1],d[3],d[4])",
         ],
         &[],
         LONG_TIMEOUT_MS,
     )
     .await;
-
-    assert_eq!(
-        output.stdout.text,
-        "CapPrm: 0000000000000000\nCapEff: 0000000000000000\n"
-    );
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout.text, "0 0 0 0\n");
 }
 
 #[tokio::test]
@@ -878,7 +830,6 @@ async fn assert_network_blocked(cmd: &[&str]) {
         network_environment_id: None,
         sandbox_permissions: SandboxPermissions::UseDefault,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
-        windows_sandbox_private_desktop: false,
         justification: None,
         arg0: None,
     };
@@ -891,6 +842,7 @@ async fn assert_network_blocked(cmd: &[&str]) {
         &sandbox_cwd,
         std::slice::from_ref(&sandbox_cwd),
         &codex_linux_sandbox_exe,
+        /*codex_self_exe*/ &None,
         /*use_legacy_landlock*/ false,
         /*stdout_stream*/ None,
     )
@@ -944,55 +896,50 @@ async fn sandbox_blocks_nc() {
     assert_network_blocked(&["nc", "-z", "127.0.0.1", "80"]).await;
 }
 
+#[test_case::test_case(".git", "config")]
+#[test_case::test_case(".codex", "config.toml")]
+#[test_case::test_case(".aws", "config")]
 #[tokio::test]
-async fn sandbox_blocks_git_and_codex_writes_inside_writable_root() {
+async fn sandbox_blocks_metadata_writes_inside_writable_root(name: &str, config: &str) {
     if should_skip_bwrap_tests().await {
         eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
         return;
     }
 
-    let tmpdir = tempfile::tempdir().expect("tempdir");
-    let dot_git = tmpdir.path().join(".git");
-    let dot_codex = tmpdir.path().join(".codex");
-    std::fs::create_dir_all(&dot_git).expect("create .git");
-    std::fs::create_dir_all(&dot_codex).expect("create .codex");
-
-    let git_target = dot_git.join("config");
-    let codex_target = dot_codex.join("config.toml");
-
-    let git_output = expect_denied(
-        run_cmd_result_with_writable_roots(
-            &[
-                "bash",
-                "-lc",
-                &format!("echo denied > {}", git_target.to_string_lossy()),
-            ],
-            &[tmpdir.path().to_path_buf()],
-            LONG_TIMEOUT_MS,
-            /*use_legacy_landlock*/ false,
-            /*network_access*/ true,
-        )
-        .await,
-        ".git write should be denied under bubblewrap",
+    let home = tempfile::tempdir().expect("tempdir");
+    let metadata = home.path().join(name);
+    std::fs::create_dir(&metadata).expect("create protected directory");
+    let target = metadata.join(config);
+    std::fs::write(&target, "original").expect("write protected config");
+    let output = run_cmd_result_with_writable_roots(
+        &[
+            "/bin/sh",
+            "-c",
+            r#"set -eu
+writable_home="$1"
+printf permitted > "$writable_home/allowed"
+if (printf changed > "$2") 2>/dev/null; then exit 1; fi
+printf protected"#,
+            "metadata-test",
+            home.path().to_str().expect("UTF-8 home"),
+            target.to_str().expect("UTF-8 config"),
+        ],
+        &[home.path().to_path_buf()],
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+        /*network_access*/ true,
+    )
+    .await
+    .expect("sandbox should run with a separate writable home");
+    assert_eq!(
+        (output.exit_code, output.stdout.text, output.stderr.text),
+        (0, "protected".to_string(), String::new())
     );
-
-    let codex_output = expect_denied(
-        run_cmd_result_with_writable_roots(
-            &[
-                "bash",
-                "-lc",
-                &format!("echo denied > {}", codex_target.to_string_lossy()),
-            ],
-            &[tmpdir.path().to_path_buf()],
-            LONG_TIMEOUT_MS,
-            /*use_legacy_landlock*/ false,
-            /*network_access*/ true,
-        )
-        .await,
-        ".codex write should be denied under bubblewrap",
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "original");
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("allowed")).unwrap(),
+        "permitted"
     );
-    assert_ne!(git_output.exit_code, 0);
-    assert_ne!(codex_output.exit_code, 0);
 }
 
 #[tokio::test]
@@ -1617,3 +1564,6 @@ async fn sandbox_blocks_dev_tcp_redirection() {
     // all images ship bash, so we guard against 127 as well.
     assert_network_blocked(&["bash", "-c", "echo hi > /dev/tcp/127.0.0.1/80"]).await;
 }
+
+#[path = "daemon_sockets_tests.rs"]
+mod daemon_sockets_tests;

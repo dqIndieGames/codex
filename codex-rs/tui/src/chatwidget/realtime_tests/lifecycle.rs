@@ -10,6 +10,7 @@ async fn enabling_voice_on_an_open_thread_snapshots_the_new_thread_notice() {
         codex_features::Feature::RealtimeConversation,
         /*enabled*/ true,
     );
+    commit_realtime_history_events(&mut chat, &mut events);
     let rendered = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|event| match event {
             AppEvent::InsertHistoryCell(cell) => Some(
@@ -33,6 +34,7 @@ async fn voice_cannot_start_in_a_side_conversation() {
 
     chat.toggle_realtime_conversation();
 
+    commit_realtime_history_events(&mut chat, &mut events);
     let Ok(AppEvent::InsertHistoryCell(cell)) = events.try_recv() else {
         panic!("voice should report that side conversations are unsupported");
     };
@@ -82,17 +84,36 @@ async fn voice_cannot_start_on_a_parent_owned_thread() {
 
 #[tokio::test]
 async fn stopping_while_the_offer_is_pending_resets_the_session() {
-    let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
+    let (mut chat, sender, mut events, _ops) = make_chatwidget_manual_with_sender().await;
     let (abort, _registration) = AbortHandle::new_pair();
     let observed_abort = abort.clone();
     chat.realtime_conversation.phase = RealtimeConversationPhase::Starting;
     chat.realtime_conversation.startup_abort = Some(abort);
 
-    chat.stop_realtime_conversation();
+    let (mut restored, _, _, mut ops) = make_chatwidget_manual_with_sender().await;
+    let callback = chat.app_event_tx.clone();
+    chat.park_voice();
+    callback.send(AppEvent::ResetTranscriptForThreadSwitch);
+    assert!(events.try_recv().is_err());
+    callback.send(AppEvent::RefreshRateLimits {
+        origin: crate::app_event::RateLimitRefreshOrigin::Recovery,
+    });
+    assert!(matches!(
+        events.try_recv(),
+        Ok(AppEvent::RefreshRateLimits {
+            origin: crate::app_event::RateLimitRefreshOrigin::Recovery
+        })
+    ));
+    sender.send(AppEvent::ResetTranscriptForThreadSwitch);
+    assert!(events.try_recv().is_ok());
+    restored.resume_background_voice(&mut chat);
+    drop(chat);
+    assert!(!observed_abort.is_aborted());
+    restored.stop_realtime_conversation();
 
     assert_eq!(
         (
-            chat.realtime_conversation.phase,
+            restored.realtime_conversation.phase,
             ops.try_recv().ok(),
             observed_abort.is_aborted(),
         ),
@@ -129,9 +150,13 @@ async fn audio_failure_cancels_pending_voice_and_reports_the_device_error() {
 
     chat.on_realtime_error("speaker stream failed: device disconnected".to_string());
 
-    let Ok(AppEvent::InsertHistoryCell(cell)) = events.try_recv() else {
-        panic!("voice should report the speaker failure");
-    };
+    commit_realtime_history_events(&mut chat, &mut events);
+    let cell = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(cell),
+            _ => None,
+        })
+        .expect("voice should report the speaker failure");
     assert!(
         cell.display_lines(/*width*/ 80)
             .iter()
@@ -209,6 +234,7 @@ async fn voice_becomes_active_only_after_backend_and_current_peer_are_ready() {
         chat.realtime_conversation.phase,
         RealtimeConversationPhase::Active
     );
+    commit_realtime_history_events(&mut chat, &mut events);
     let Ok(AppEvent::InsertHistoryCell(cell)) = events.try_recv() else {
         panic!("voice start should insert its history banner");
     };
@@ -230,6 +256,7 @@ async fn normal_voice_close_renders_the_ended_message() {
 
     chat.on_realtime_conversation_closed(Some("transport_closed".into()));
 
+    commit_realtime_history_events(&mut chat, &mut events);
     let rendered = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|event| match event {
             AppEvent::InsertHistoryCell(cell) => Some(
@@ -291,6 +318,7 @@ async fn startup_retry_waits_for_closed_then_uses_a_fresh_attempt_and_preserves_
     );
     assert!(ops.try_recv().is_err());
     let mut rendered = Vec::new();
+    commit_realtime_history_events(&mut chat, &mut events);
     while let Ok(event) = events.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
             rendered.extend(
@@ -394,6 +422,7 @@ async fn startup_transport_close_before_peer_timeout_retries_once_and_ignores_ol
         ops.try_recv().is_err(),
         "closed backend needs no extra stop"
     );
+    commit_realtime_history_events(&mut chat, &mut events);
     let rendered = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|event| match event {
             AppEvent::InsertHistoryCell(cell) => Some(
@@ -470,4 +499,36 @@ async fn startup_retry_never_retries_twice_or_retries_other_errors_or_active_ses
         }
         assert!(ops.try_recv().is_err(), "no retry may be queued");
     }
+}
+
+#[tokio::test]
+async fn failure_cleanup_does_not_attribute_stop_to_the_user() {
+    let (mut chat, _sender, mut events, _ops) = make_chatwidget_manual_with_sender().await;
+    // A local failure initiates backend cleanup; its acknowledgement is still "requested".
+    chat.realtime_conversation.phase = RealtimeConversationPhase::Stopping;
+    chat.realtime_conversation.failure_recorded = true;
+    chat.on_realtime_error(format!(
+        "Failed to connect voice mode: {}",
+        codex_realtime_webrtc::ConnectionError::AudioDevices
+    ));
+    chat.on_realtime_conversation_closed(Some("requested".into()));
+    assert_eq!(
+        chat.realtime_conversation.phase,
+        RealtimeConversationPhase::Inactive
+    );
+    commit_realtime_history_events(&mut chat, &mut events);
+    let rendered = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(
+                cell.display_lines(/*width*/ 80)
+                    .into_iter()
+                    .map(|line| line.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("voice_device_failure_cleanup", rendered);
 }

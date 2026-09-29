@@ -6,6 +6,7 @@ use super::exports;
 use super::literals;
 use super::posix_env_path_expansion_function;
 use crate::shell_detect::ShellType;
+use crate::shell_startup_script;
 use std::borrow::Cow;
 
 const SNAPSHOT_COMMAND_HELPER: &str = r#"__codex_snapshot_command() {
@@ -42,6 +43,36 @@ pub fn snapshot_capture_script(
     shell_type: ShellType,
     options: SnapshotCaptureOptions,
 ) -> Option<String> {
+    capture_script(shell_type, options, Replay::Eval)
+}
+
+/// Capture state for incremental sourcing. Parse options and aliases together so
+/// restored aliases and quoting options cannot reinterpret later declarations.
+pub fn snapshot_source_capture_script(
+    shell_type: ShellType,
+    options: SnapshotCaptureOptions,
+) -> Option<String> {
+    capture_script(
+        shell_type,
+        options,
+        if shell_type == ShellType::Sh {
+            Replay::Eval
+        } else {
+            Replay::Source
+        },
+    )
+}
+
+enum Replay {
+    Eval,
+    Source,
+}
+
+fn capture_script(
+    shell_type: ShellType,
+    options: SnapshotCaptureOptions,
+    replay: Replay,
+) -> Option<String> {
     let script = match shell_type {
         ShellType::Zsh => zsh_snapshot_script(options.startup),
         ShellType::Bash => bash_snapshot_script(options.startup),
@@ -55,6 +86,15 @@ pub fn snapshot_capture_script(
     };
     Some(
         script
+            .replace("SNAPSHOT_OPTIONS_BEGIN", match replay { Replay::Eval => "", Replay::Source => "printf '{\\n'" })
+            .replace("SNAPSHOT_ALIASES_END", match replay { Replay::Eval => "", Replay::Source => "printf \"case '' in '') ;; esac\\n}\\n\"" })
+            // The source group is parsed before its options take effect. Serialize
+            // aliases with the replay shell's initial quoting rules, not RC_QUOTES.
+            // setopt works without the optional zsh/parameter module.
+            .replace("SNAPSHOT_ZSH_ALIASES", match replay {
+                Replay::Eval => "\\alias -L",
+                Replay::Source => "(\\setopt NO_RC_QUOTES; \\alias -L)",
+            })
             .replace("SNAPSHOT_EXPORTS", &declarations)
             .replace(
                 "SNAPSHOT_DECLARATION_ENVIRONMENT",
@@ -82,17 +122,7 @@ pub fn snapshot_capture_script(
 
 fn zsh_snapshot_script(shell_startup: SnapshotStartup) -> String {
     let startup = match shell_startup {
-        SnapshotStartup::Interactive => {
-            r##"if [[ -n "${ZDOTDIR-}" ]]; then
-  rc="$ZDOTDIR/.zshrc"
-elif [[ -n "${HOME-}" ]]; then
-  rc="$HOME/.zshrc"
-else
-  rc=
-fi
-[[ -r "$rc" ]] && . "$rc"
-"##
-        }
+        SnapshotStartup::Interactive => shell_startup_script(ShellType::Zsh),
         SnapshotStartup::NonInteractive => "",
     };
     let script = r##"print '# Snapshot file'
@@ -101,16 +131,18 @@ print 'unalias -a 2>/dev/null || true'
 print '# Functions'
 functions
 print ''
+SNAPSHOT_OPTIONS_BEGIN
 SNAPSHOT_COMMAND_HELPER
 setopt_count=$(setopt | __codex_snapshot_command wc -l | __codex_snapshot_command tr -d ' ')
 print "# setopts $setopt_count"
 setopt | __codex_snapshot_command sed 's/^/setopt /'
 print ''
 printf '\0'
-alias_count=$(alias -L | __codex_snapshot_command wc -l | __codex_snapshot_command tr -d ' ')
+alias_count=$(\alias -L | __codex_snapshot_command wc -l | __codex_snapshot_command tr -d ' ')
 print "# aliases $alias_count"
-alias -L
+SNAPSHOT_ZSH_ALIASES
 print ''
+SNAPSHOT_ALIASES_END
 printf '\0'
 SNAPSHOT_EXPORTS
 printf '\0'
@@ -121,12 +153,7 @@ SNAPSHOT_ENVIRONMENT
 
 fn bash_snapshot_script(shell_startup: SnapshotStartup) -> String {
     let startup = match shell_startup {
-        SnapshotStartup::Interactive => {
-            r##"if [ -z "${BASH_ENV-}" ] && [ -n "${HOME-}" ] && [ -r "$HOME/.bashrc" ]; then
-  . "$HOME/.bashrc"
-fi
-"##
-        }
+        SnapshotStartup::Interactive => shell_startup_script(ShellType::Bash),
         SnapshotStartup::NonInteractive => "",
     };
     let script = r##"echo '# Snapshot file'
@@ -136,6 +163,7 @@ shopt -p || true
 echo '# Functions'
 declare -f
 echo ''
+SNAPSHOT_OPTIONS_BEGIN
 SNAPSHOT_COMMAND_HELPER
 bash_opts=$(set -o | __codex_snapshot_command awk '$2=="on"{print $1}')
 bash_opt_count=$(printf '%s\n' "$bash_opts" | __codex_snapshot_command sed '/^$/d' | __codex_snapshot_command wc -l | __codex_snapshot_command tr -d ' ')
@@ -145,10 +173,11 @@ if [ -n "$bash_opts" ]; then
 fi
 echo ''
 printf '\0'
-alias_count=$(alias -p | __codex_snapshot_command wc -l | __codex_snapshot_command tr -d ' ')
+alias_count=$(\alias -p | __codex_snapshot_command wc -l | __codex_snapshot_command tr -d ' ')
 echo "# aliases $alias_count"
-alias -p
+\alias -p
 echo ''
+SNAPSHOT_ALIASES_END
 printf '\0'
 SNAPSHOT_EXPORTS
 printf '\0'
@@ -194,6 +223,7 @@ elif command -v declare >/dev/null 2>&1; then
   declare -f
 fi
 echo ''
+SNAPSHOT_OPTIONS_BEGIN
 SNAPSHOT_COMMAND_HELPER
 if set -o >/dev/null 2>&1; then
   sh_opts=$(set -o | __codex_snapshot_command awk '$2=="on"{print $1}')
@@ -215,6 +245,7 @@ if alias >/dev/null 2>&1; then
 else
   echo '# aliases 0'
 fi
+SNAPSHOT_ALIASES_END
 printf '\0'
 SNAPSHOT_EXPORTS
 printf '\0'

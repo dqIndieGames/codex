@@ -20,7 +20,6 @@ use codex_guardian_context::TranscriptImageInput;
 use codex_guardian_context::TranscriptRetentionConfig;
 use codex_guardian_context::TrustedTool;
 use codex_guardian_context::default_registry;
-pub(crate) use codex_guardian_context::truncate_text as truncate_entry;
 
 pub(crate) const MAX_MESSAGE_ENTRY_TOKENS: usize = ContextProfile::asynchronous()
     .transcript
@@ -46,6 +45,7 @@ pub(crate) struct ContextInput<'a> {
     pub(crate) root_conversation: &'a [GuardianRootMessage],
     pub(crate) trusted_user_answers: &'a [String],
     pub(crate) planned_action: Option<&'a PlannedAction>,
+    pub(crate) permissions: Option<&'a codex_guardian_context::PermissionContext>,
     pub(crate) previous_reviews: Option<&'a PreviousReviews>,
     pub(crate) trusted_tool: Option<&'a TrustedTool>,
     pub(crate) trusted_skill_paths: &'a [String],
@@ -90,6 +90,7 @@ impl TranscriptConfig {
             root_conversation,
             trusted_user_answers,
             planned_action,
+            permissions,
             previous_reviews,
             trusted_tool,
             trusted_skill_paths,
@@ -124,7 +125,7 @@ impl TranscriptConfig {
             root_conversation,
             trusted_user_answers,
             planned_action,
-            permissions: None,
+            permissions,
             previous_reviews,
             trusted_tool,
             trusted_skill_paths,
@@ -137,7 +138,11 @@ impl TranscriptConfig {
         })?;
         let transcript =
             profile.render_transcript(context.transcript_entries(), /*entry_number_offset*/ 0);
-        context.compose(ContextPresentation::Async, transcript)
+        let mut context = context.compose(ContextPresentation::Async, transcript)?;
+        // Each sample is self-contained: only this request's protected transcript
+        // entries can replace retained originals, never a previous sample's history.
+        context.deduplicate_transcript_instructions();
+        Ok(context)
     }
 }
 
@@ -149,7 +154,22 @@ impl SectionHistory for SnapshotHistory<'_> {
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        self.0.review_items()
+        Box::new(self.items_with_sources().map(|(item, _)| item))
+    }
+
+    fn items_with_sources(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
+    {
+        self.0.review_items_with_sources()
+    }
+
+    fn render_retained_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        codex_core::context::render_retained_assistant_context(message)
+            .map(GuardianRootMessage::Assistant)
     }
 }
 

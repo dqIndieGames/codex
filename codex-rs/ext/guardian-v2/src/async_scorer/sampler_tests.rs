@@ -1,4 +1,6 @@
 use anyhow::Result;
+use codex_api::ApiError;
+use codex_context_fragments::RenderedFragment;
 use codex_extension_api::ContextualUserFragment;
 use codex_extension_api::ExtensionMetrics;
 use codex_guardian_context::PreviousReviews;
@@ -12,6 +14,7 @@ use codex_login::ExternalAuthFuture;
 use codex_login::ExternalAuthRefreshContext;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_prompts::GuardianClassifierInstructions;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
@@ -45,6 +48,9 @@ use super::LunaSamplerConfig;
 use super::LunaSamplerError;
 use super::LunaSamplingRequest;
 use super::MAX_CONCURRENT_REQUESTS;
+
+#[path = "sampler_routing_tests.rs"]
+mod routing;
 
 impl LunaSampler {
     /// Waits for warm sockets to enter the client pool, beyond the server handshake.
@@ -194,6 +200,9 @@ pub(in crate::async_scorer) async fn proxy_websocket_servers_with_http(
 
 pub(super) fn sampler_config(base_url: String) -> LunaSamplerConfig {
     LunaSamplerConfig {
+        workspace_routing: codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
         provider: create_model_provider(
             ModelProviderInfo::create_openai_provider(Some(base_url)),
             Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
@@ -206,7 +215,7 @@ pub(super) fn sampler_config(base_url: String) -> LunaSamplerConfig {
         session_id: "session-1".to_owned(),
         thread_id: "thread-1".to_owned(),
         originator: Some("guardian-v2-test".to_owned()),
-        free_guardian: false,
+
         service_tier: None,
         luna_compaction_hash: None,
         max_input_tokens: codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS,
@@ -220,10 +229,39 @@ async fn connect_sampler(config: LunaSamplerConfig) -> Result<LunaSampler> {
     Ok(sampler)
 }
 
+fn classifier_instructions() -> RenderedFragment {
+    GuardianClassifierInstructions::new(
+        "Classify using {{ tenant_policy_config }}.",
+        "the tenant policy",
+        "Return high for high risk or low for low risk.",
+        /*max_tokens*/ None,
+    )
+    .render_fragment()
+}
+
+fn assert_classifier_instructions(request: &serde_json::Value) {
+    let mut instructions = request["input"][1].clone();
+    instructions.as_object_mut().unwrap().remove("id");
+    assert_eq!(
+        instructions,
+        json!({
+            "type": "message",
+            "role": "developer",
+            "content": [{
+                "type": "input_text",
+                "text": "Classify using the tenant policy.\n\nReturn high for high risk or low for low risk.",
+            }],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
+        })
+    );
+}
+
 pub(super) fn sample_request(parent_turn_id: &str) -> LunaSamplingRequest {
     LunaSamplingRequest {
         parent_response_id: None,
-        instructions: "Return high for high risk or low for low risk.".to_owned(),
+        instructions: classifier_instructions(),
         input: vec![responses::user_message_item(
             "The user requested a README summary.",
         )],
@@ -363,36 +401,26 @@ impl ExternalAuth for RefreshableAuth {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn classifier_uses_free_endpoint_only_with_codex_backend_auth() -> Result<()> {
+async fn classifier_sends_guardian_header_only_with_codex_backend_auth() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    for (auth, base_path, free_guardian, expected_path, expected_service_tier) in [
+    for (auth, base_path, expected_header, expected_service_tier) in [
         (
             CodexAuth::create_dummy_chatgpt_auth_for_testing(),
             "/backend-api/codex",
-            false,
-            "/backend-api/codex/responses",
-            Some("priority"),
-        ),
-        (
-            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
-            "/backend-api/codex",
-            true,
-            "/backend-api/codex/guardian-classifier",
+            Some("classifier"),
             None,
         ),
         (
             CodexAuth::create_dummy_chatgpt_auth_for_testing(),
             "/v1",
-            true,
-            "/v1/responses",
+            None,
             Some("priority"),
         ),
         (
             CodexAuth::from_api_key("test-api-key"),
             "/v1",
-            true,
-            "/v1/responses",
+            None,
             Some("priority"),
         ),
     ] {
@@ -412,13 +440,16 @@ async fn classifier_uses_free_endpoint_only_with_codex_backend_auth() -> Result<
             ModelProviderInfo::create_openai_provider(Some(base_url)),
             Some(AuthManager::from_auth_for_testing(auth)),
         );
-        config.free_guardian = free_guardian;
         config.service_tier = Some("priority".to_owned());
         let sampler = connect_sampler(config).await?;
 
         assert_eq!(sampler.sample(sample_request("turn-1")).await?, "low");
         for handshake in server.handshakes() {
-            assert_eq!(handshake.uri(), expected_path);
+            assert_eq!(handshake.uri(), format!("{base_path}/responses"));
+            assert_eq!(
+                handshake.header("x-codex-guardian").as_deref(),
+                expected_header
+            );
             assert_eq!(handshake.header("x-codex-routing-hint"), None);
         }
         let request = server
@@ -482,6 +513,9 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     );
 
     let sampler = connect_sampler(LunaSamplerConfig {
+        workspace_routing: codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
         provider,
         http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
@@ -489,7 +523,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
         session_id: "session-1".to_owned(),
         thread_id: "thread-1".to_owned(),
         originator: Some("guardian-v2-test".to_owned()),
-        free_guardian: false,
+
         service_tier: None,
         luna_compaction_hash: None,
         max_input_tokens: codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS,
@@ -526,7 +560,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     let first = sampler
         .sample(LunaSamplingRequest {
             parent_response_id: None,
-            instructions: "Return high for high risk or low for low risk.".to_owned(),
+            instructions: classifier_instructions(),
             input: vec![ResponseItem::Message {
                 id: None,
                 role: "user".to_owned(),
@@ -567,7 +601,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     let second = sampler
         .sample(LunaSamplingRequest {
             parent_response_id: None,
-            instructions: "Return high for high risk or low for low risk.".to_owned(),
+            instructions: classifier_instructions(),
             input: vec![responses::user_message_item(
                 "The user requested a source review.",
             )],
@@ -613,6 +647,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
         assert_eq!(request["type"], "response.create");
         assert_eq!(request["model"], "gpt-5.6-luna");
         assert_eq!(request["input"][0]["tools"], json!([]));
+        assert_classifier_instructions(&request);
         assert_eq!(request["tool_choice"], "none");
         assert!(request.get("text").is_none());
         assert_eq!(request["prompt_cache_key"], "guardian-v2:thread-1");
@@ -726,6 +761,9 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
         ))),
     );
     let sampler = connect_sampler(LunaSamplerConfig {
+        workspace_routing: codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
         provider,
         http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
@@ -733,7 +771,7 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
         session_id: "session-1".to_owned(),
         thread_id: "thread-1".to_owned(),
         originator: None,
-        free_guardian: false,
+
         service_tier: None,
         luna_compaction_hash: None,
         max_input_tokens: codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS,
@@ -745,7 +783,7 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
         Duration::from_secs(2),
         sampler.sample(LunaSamplingRequest {
             parent_response_id: None,
-            instructions: "Return high for high risk or low for low risk.".to_owned(),
+            instructions: classifier_instructions(),
             input: vec![responses::user_message_item(
                 "The user requested a README summary.",
             )],
@@ -1037,6 +1075,7 @@ async fn sampler_uses_http_with_a_fresh_identity_when_warm_connections_expire() 
     ]);
     assert_eq!(thread_ids.len(), 3);
     responses::assert_parent_turn(&request.body_json(), Some("turn-2"))?;
+    assert_classifier_instructions(&request.body_json());
     assert_eq!(second.single_connection().len(), 1);
     Ok(())
 }
@@ -1056,7 +1095,11 @@ async fn sampler_reconnects_after_transient_service_failures() -> Result<()> {
         })]]]
     };
     let first = responses::start_websocket_server(unavailable()).await;
-    let second = responses::start_websocket_server(unavailable()).await;
+    let second = responses::start_websocket_server(vec![vec![vec![json!({
+        "type": "response.failed",
+        "response": {"error": {"code": "flex_unavailable", "message": "capacity unavailable"}}
+    })]]])
+    .await;
     let http = responses::start_mock_server().await;
     let recovered = responses::mount_sse_once(
         &http,
@@ -1107,13 +1150,17 @@ async fn sampler_limits_transient_recovery_attempts() -> Result<()> {
         })]]]
     };
     let first = responses::start_websocket_server(unavailable()).await;
-    let second = responses::start_websocket_server(unavailable()).await;
+    let second = responses::start_websocket_server(vec![vec![vec![json!({
+        "type": "response.failed",
+        "response": {"error": {"code": "flex_unavailable", "message": "capacity unavailable"}}
+    })]]])
+    .await;
     let http = responses::start_mock_server().await;
     let third = responses::mount_sse_once(
         &http,
         responses::sse(vec![json!({
             "type": "response.failed", "response": {
-                "error": {"code": "internal_server_error", "message": "HTTP sampling failed"}
+                "error": {"code": "flex_unavailable", "message": "HTTP sampling failed"}
             }
         })]),
     )
@@ -1133,7 +1180,10 @@ async fn sampler_limits_transient_recovery_attempts() -> Result<()> {
         .await
         .expect_err("sampling should stop after the bounded retries");
 
-    assert!(error.to_string().contains("HTTP sampling failed"));
+    assert!(matches!(
+        error,
+        LunaSamplerError::Api(ApiError::FlexUnavailable)
+    ));
     assert_eq!(first.single_connection().len(), 1);
     assert_eq!(second.single_connection().len(), 1);
     assert_eq!(third.requests().len(), 1);
@@ -1144,7 +1194,7 @@ async fn sampler_limits_transient_recovery_attempts() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> {
     skip_if_no_network!(Ok(()));
-    for free_guardian in [false, true] {
+    for uses_codex_backend in [false, true] {
         let healthy = responses::start_websocket_server(vec![vec![vec![
             ev_assistant_message("resp-review", "low"),
             ev_completed("resp-review"),
@@ -1156,8 +1206,7 @@ async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> 
         })]]]).await;
         let base_url = proxy_websocket_servers(&[&healthy, &expired]).await?;
         let mut config = sampler_config(base_url.clone());
-        if free_guardian {
-            config.free_guardian = true;
+        if uses_codex_backend {
             config.provider = create_model_provider(
                 ModelProviderInfo::create_openai_provider(Some(format!(
                     "{}/backend-api/codex",
@@ -1182,7 +1231,7 @@ async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> 
                     body["client_metadata"].get("parent_response_id").cloned(),
                     body["client_metadata"].get("guardian_credits_requested"),
                 ),
-                (free_guardian.then(|| json!(parent_response_id)), None)
+                (uses_codex_backend.then(|| json!(parent_response_id)), None)
             );
             assert!(!body["input"].to_string().contains(parent_response_id));
         }

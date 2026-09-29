@@ -7,22 +7,25 @@ use codex_guardian_context::ContextProfile;
 #[cfg(test)]
 use codex_guardian_context::ConversationTranscriptEntry;
 use codex_guardian_context::GuardianRootMessage;
-use codex_guardian_context::PermissionContext;
 use codex_guardian_context::PlannedAction;
 use codex_guardian_context::PlannedActionKind;
 use codex_guardian_context::SectionError;
 use codex_guardian_context::SectionHistory;
 use codex_guardian_context::SectionInput;
+pub(crate) use codex_guardian_context::TranscriptCursor as GuardianTranscriptCursor;
+pub(crate) use codex_guardian_context::TranscriptMode as GuardianPromptMode;
+use codex_guardian_context::TranscriptSelection;
 use codex_guardian_context::default_registry;
 use codex_protocol::models::ResponseItem;
 
 use crate::context::ContextualUserFragment;
+use crate::context::GuardianPermissionContext;
 use crate::context::GuardianReviewEvidence;
 use crate::context::GuardianToolDescriptions;
 use crate::context::NodeReplReviewEvidence;
 use crate::context::NodeReplReviewEvidenceMode;
+use crate::context::is_guardian_context_message;
 use crate::context::node_repl_review_evidence_mode;
-use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::session::Session;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_bytes_for_tokens;
@@ -36,25 +39,14 @@ use super::GuardianReviewContext;
 use super::approval_request::format_guardian_action_pretty;
 
 const GUARDIAN_MAX_APPROVAL_REASON_TOKENS: usize = 512;
+// Bound both JSON and permission evidence without restricting manual approvals.
+const MAX_GUARDIAN_ENVIRONMENT_ID_BYTES: usize = 256;
 pub(super) const GUARDIAN_TRANSCRIPT_START: &str = ">>> TRANSCRIPT START\n";
 
 pub(crate) struct GuardianPromptItems {
     pub(crate) context: ComposedContext,
     pub(crate) transcript_cursor: GuardianTranscriptCursor,
     pub(crate) node_repl_evidence_sequence: u64,
-}
-
-/// Points to the end of the transcript that the guardian has already reviewed.
-/// The saved count is only reusable when `parent_history_version` still matches.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct GuardianTranscriptCursor {
-    pub(crate) parent_history_version: u64,
-    pub(crate) transcript_entry_count: usize,
-}
-
-pub(crate) enum GuardianPromptMode {
-    Full,
-    Delta { cursor: GuardianTranscriptCursor },
 }
 
 /// Builds the guardian user content items from:
@@ -96,6 +88,12 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
     mode: GuardianPromptMode,
     reviewed_node_repl_evidence_sequence: u64,
 ) -> anyhow::Result<GuardianPromptItems> {
+    if request
+        .target_environment_id()
+        .is_some_and(|id| id.len() > MAX_GUARDIAN_ENVIRONMENT_ID_BYTES)
+    {
+        anyhow::bail!("approval environment id exceeds Guardian's 256-byte limit");
+    }
     let evidence_mode = parent_context
         .map(|context| node_repl_review_evidence_mode(context.turn()))
         .unwrap_or(NodeReplReviewEvidenceMode::Disabled);
@@ -108,7 +106,7 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
     let root_authorization = session
         .services
         .agent_control
-        .root_user_authorization(session.thread_id)
+        .get_guardian_package(session.thread_id)
         .await
         .map(|snapshot| snapshot.messages);
     let trusted_user_inputs = session
@@ -153,7 +151,11 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
             )
         }),
     };
-    let permissions = parent_context.map(parent_turn_permissions);
+    let permissions = parent_context
+        .map(|context| {
+            super::permissions::for_environment(context, request.target_environment_id())
+        })
+        .transpose()?;
     let node_repl_snapshot = if node_repl_transcripts_enabled {
         session
             .services
@@ -180,41 +182,23 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
         permissions.as_ref(),
         node_repl_context.as_ref(),
     )?;
-    let transcript_entries = sections.transcript_entries();
-    let transcript_cursor = GuardianTranscriptCursor {
-        parent_history_version: history.review_history_version(),
-        transcript_entry_count: transcript_entries.len(),
-    };
-
-    let prompt_shape = match mode {
-        GuardianPromptMode::Full => GuardianPromptShape::Full,
-        GuardianPromptMode::Delta { cursor } => {
-            if cursor.parent_history_version == transcript_cursor.parent_history_version
-                && cursor.transcript_entry_count <= transcript_cursor.transcript_entry_count
-            {
-                GuardianPromptShape::Delta {
-                    already_seen_entry_count: cursor.transcript_entry_count,
-                }
-            } else {
-                GuardianPromptShape::Full
-            }
-        }
-    };
+    let (selection, transcript_cursor) = mode.select(
+        sections.transcript_entries(),
+        history.review_history_version(),
+    );
     let session_id = session.thread_id.to_string();
-    let (transcript_entries, offset, placeholder, presentation) = match prompt_shape {
-        GuardianPromptShape::Full => (
-            transcript_entries,
+    let (transcript_entries, offset, placeholder, presentation) = match selection {
+        TranscriptSelection::Full(entries) => (
+            entries,
             0,
             "<no retained transcript entries>",
             ContextPresentation::SyncFull {
                 session_id: &session_id,
             },
         ),
-        GuardianPromptShape::Delta {
-            already_seen_entry_count,
-        } => (
-            &transcript_entries[already_seen_entry_count..],
-            already_seen_entry_count,
+        TranscriptSelection::Delta { entries, offset } => (
+            entries,
+            offset,
             "<no retained transcript delta entries>",
             ContextPresentation::SyncDelta {
                 session_id: &session_id,
@@ -234,32 +218,6 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
         transcript_cursor,
         node_repl_evidence_sequence,
     })
-}
-
-fn parent_turn_permissions(context: &GuardianReviewContext) -> PermissionContext {
-    let turn = context.turn();
-    let environment = context.environments().primary();
-    #[allow(deprecated)]
-    let cwd = environment
-        .and_then(|environment| environment.cwd().to_abs_path().ok())
-        .unwrap_or_else(|| turn.cwd.clone());
-    let permission_profile = context
-        .environments()
-        .permission_profile_or_else(|| turn.permission_profile());
-    let file_system_policy = permission_profile.file_system_sandbox_policy();
-    PermissionContext {
-        denied_paths: file_system_policy
-            .get_unreadable_roots_with_cwd(&cwd)
-            .into_iter()
-            .map(|root| root.to_string_lossy().into_owned())
-            .collect(),
-        denied_globs: file_system_policy.get_unreadable_globs_with_cwd(&cwd),
-    }
-}
-
-enum GuardianPromptShape {
-    Full,
-    Delta { already_seen_entry_count: usize },
 }
 
 /// Exercises the sync profile through the host's existing transcript tests.
@@ -300,7 +258,7 @@ pub(super) fn collect_guardian_context(
     root_conversation: &[GuardianRootMessage],
     trusted_user_answers: &[String],
     planned_action: Option<&PlannedAction>,
-    permissions: Option<&PermissionContext>,
+    permissions: Option<&GuardianPermissionContext>,
     node_repl: Option<&codex_guardian_context::NodeReplContext<'_>>,
 ) -> Result<CollectedContext, SectionError> {
     let mut profile = ContextProfile::synchronous();
@@ -329,25 +287,52 @@ impl SectionHistory for GuardianReviewHistory<'_> {
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        self.0.review_items()
+        Box::new(self.items_with_sources().map(|(item, _)| item))
+    }
+
+    fn items_with_sources(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
+    {
+        self.0.review_items_with_sources()
+    }
+
+    fn render_retained_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        crate::context::render_retained_assistant_context(message)
+            .map(GuardianRootMessage::Assistant)
     }
 }
 
 struct FilteredGuardianHistory<'a>(&'a dyn SectionHistory);
 
 impl SectionHistory for FilteredGuardianHistory<'_> {
+    fn items_with_sources(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
+    {
+        Box::new(
+            self.0
+                .items_with_sources()
+                .filter(|(item, _)| !is_guardian_context_message(item)),
+        )
+    }
+
     fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
         self.0.retained_context()
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        Box::new(self.0.items().filter(|item| {
-            !matches!(
-                item,
-                ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content)
-            )
-        }))
+        Box::new(self.items_with_sources().map(|(item, _)| item))
+    }
+
+    fn render_retained_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        self.0.render_retained_assistant(message)
     }
 }
 
@@ -356,32 +341,4 @@ pub(crate) fn guardian_truncate_text(content: &str, token_cap: usize) -> (String
         codex_guardian_context::truncate_text(content, token_cap),
         content.len() > approx_bytes_for_tokens(token_cap),
     )
-}
-
-use codex_guardian_reviewer::guardian_output_contract_prompt;
-
-pub(crate) const BUNDLED_GUARDIAN_POLICY: &str = include_str!("../../assets/guardian/policy.md");
-pub(crate) const BUNDLED_GUARDIAN_POLICY_TEMPLATE: &str =
-    include_str!("../../assets/guardian/policy_template.md");
-const TENANT_POLICY_CONFIG_PLACEHOLDER: &str = "{{ tenant_policy_config }}";
-
-/// Guardian policy prompt.
-///
-/// Keep the bundled fallback in a dedicated markdown file so reviewers can
-/// audit prompt changes directly without diffing through code. The output
-/// contract is appended from code so it stays near `guardian_output_schema()`.
-///
-/// The template is intentionally separated from the default tenant policy
-/// configuration so workspace-managed overrides can keep the configurable
-/// section narrower than the full policy.
-pub(super) fn guardian_policy_prompt_with_config_and_template(
-    tenant_policy_config: &str,
-    policy_template: &str,
-) -> String {
-    let template = policy_template.trim_end();
-    let prompt = template.replace(
-        TENANT_POLICY_CONFIG_PLACEHOLDER,
-        tenant_policy_config.trim(),
-    );
-    format!("{prompt}\n\n{}\n", guardian_output_contract_prompt())
 }

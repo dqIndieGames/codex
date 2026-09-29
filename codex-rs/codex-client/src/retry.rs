@@ -1,4 +1,5 @@
 use codex_http_client::Request;
+use codex_http_client::RetryAfter;
 use codex_http_client::TransportError;
 use std::future::Future;
 use std::time::Duration;
@@ -30,9 +31,11 @@ impl RetryOn {
             | TransportError::Timeout
             | TransportError::Connection(_)
             | TransportError::Network(_) => true,
-            TransportError::RetryLimit
+            TransportError::Build(_)
             | TransportError::RetryInterrupted(_)
-            | TransportError::Build(_) => false,
+            | TransportError::RetryLimit
+            | TransportError::Policy(_)
+            | TransportError::ResponseTooLarge { .. } => false,
         }
     }
 }
@@ -123,6 +126,7 @@ mod tests {
         };
 
         let usage_limit_err = TransportError::Http {
+            retry_after: None,
             status: StatusCode::PAYMENT_REQUIRED,
             url: None,
             headers: None,
@@ -131,6 +135,7 @@ mod tests {
         assert!(retry_on.should_retry(&usage_limit_err, 0, 1));
 
         let non_usage_limit_err = TransportError::Http {
+            retry_after: None,
             status: StatusCode::PAYMENT_REQUIRED,
             url: None,
             headers: None,

@@ -15,7 +15,6 @@ use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use codex_app_server::AppServerRuntimeOptions;
 use codex_app_server::AppServerTransport;
-use codex_app_server::AppServerWebsocketAuthSettings;
 use codex_app_server::PluginStartupTasks;
 use codex_app_server::RemoteControlStartupMode;
 use codex_app_server::run_main_with_transport_options;
@@ -47,6 +46,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_state::RemoteControlEnrollmentRecord;
 use codex_state::StateRuntime;
 use codex_utils_cli::CliConfigOverrides;
+use codex_websocket_auth::WebsocketAuthSettings;
 use futures::SinkExt;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
@@ -241,7 +241,7 @@ async fn explicit_remote_control_startup_fails_when_disabled_by_requirements() -
             /*default_analytics_enabled*/ false,
             transport,
             SessionSource::VSCode,
-            AppServerWebsocketAuthSettings::default(),
+            WebsocketAuthSettings::default(),
             AppServerRuntimeOptions {
                 plugin_startup_tasks: PluginStartupTasks::Skip,
                 remote_control_startup_mode: RemoteControlStartupMode::EnabledEphemeral,
@@ -956,6 +956,7 @@ struct BlockingRemoteControlBackend {
 struct ConnectedRemoteControlBackend {
     initialized_rx: Option<oneshot::Receiver<std::result::Result<(), String>>>,
     server_task: JoinHandle<Result<()>>,
+    _models_server: wiremock::MockServer,
 }
 
 struct ClientManagementRemoteControlBackend {
@@ -966,6 +967,20 @@ struct ClientManagementRemoteControlBackend {
 impl ConnectedRemoteControlBackend {
     async fn start(codex_home: &std::path::Path) -> Result<Self> {
         let listener = configured_remote_control_listener(codex_home).await?;
+        // Model refreshes can arrive after enrollment, when this listener expects a WebSocket.
+        let models_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v1/models"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(/*s*/ 200)
+                    .set_body_json(serde_json::json!({ "models": [] })),
+            )
+            .mount(&models_server)
+            .await;
+        let remote_control_url = format!("http://{}/backend-api/", listener.local_addr()?);
+        MockResponsesConfig::new(&models_server.uri())
+            .with_root_config(&format!("chatgpt_base_url = \"{remote_control_url}\""))
+            .write(codex_home)?;
         let (initialized_tx, initialized_rx) = oneshot::channel();
         let server_task = tokio::spawn(async move {
             let mut initialized_tx = Some(initialized_tx);
@@ -1061,6 +1076,7 @@ impl ConnectedRemoteControlBackend {
         Ok(Self {
             initialized_rx: Some(initialized_rx),
             server_task,
+            _models_server: models_server,
         })
     }
 
@@ -1235,11 +1251,14 @@ impl PairingRemoteControlBackend {
                 )
                 .await?;
 
-                let request_after_enroll = read_http_request(&listener).await?;
-                let pair_http_request = if request_after_enroll.request_line.starts_with("GET ") {
-                    read_http_request(&listener).await?
-                } else {
-                    request_after_enroll
+                let mut websocket_connections = Vec::new();
+                let pair_http_request = loop {
+                    let request = read_http_request(&listener).await?;
+                    if request.request_line.starts_with("GET ") {
+                        websocket_connections.push(request);
+                    } else {
+                        break request;
+                    }
                 };
                 respond_with_json(
                     pair_http_request.reader.into_inner(),
@@ -1256,7 +1275,14 @@ impl PairingRemoteControlBackend {
                     serde_json::json!({ "pairing_code": "pairing-code" }),
                     serde_json::json!({ "manual_pairing_code": "ABCD-EFGH" }),
                 ] {
-                    let status_http_request = read_http_request(&listener).await?;
+                    let status_http_request = loop {
+                        let request = read_http_request(&listener).await?;
+                        if request.request_line.starts_with("GET ") {
+                            websocket_connections.push(request);
+                        } else {
+                            break request;
+                        }
+                    };
                     assert_eq!(
                         status_http_request.request_line,
                         "POST /backend-api/wham/remote/control/server/pair/status HTTP/1.1"

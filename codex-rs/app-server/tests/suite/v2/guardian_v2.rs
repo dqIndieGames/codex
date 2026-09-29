@@ -25,6 +25,7 @@ use axum::routing::post;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ImageReference;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemGuardianApprovalReviewStartedNotification;
 use codex_app_server_protocol::McpServerElicitationRequest;
@@ -36,12 +37,9 @@ use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadCompactStartResponse;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
-use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
-use codex_app_server_protocol::ThreadRollbackParams;
-use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnSettingsUpdateParams;
@@ -196,7 +194,6 @@ struct MockResponsesState {
     root_user_restriction: bool,
     root_user_input_restriction: bool,
     compact_root_after_answer: bool,
-    thread_context_enabled: bool,
     late_root_restriction: bool,
     user_input_restriction: bool,
 }
@@ -247,7 +244,6 @@ enum ThreadLifecycle {
     UserInputHookBlocked,
     Resume,
     Fork,
-    RootRollback,
     RootRestriction,
     RootRestrictionDuringClassification,
     RootTrustedSkill,
@@ -261,8 +257,7 @@ impl ThreadLifecycle {
     fn uses_root_worker(self) -> bool {
         matches!(
             self,
-            Self::RootRollback
-                | Self::RootRestriction
+            Self::RootRestriction
                 | Self::RootRestrictionDuringClassification
                 | Self::RootTrustedSkill
                 | Self::RootUserInputRestriction
@@ -423,7 +418,16 @@ async fn parent_response(
         if review_number == 0 {
             state.allow_guardian_review.notified().await;
         }
-        let assessment = match state.review_outcome {
+        let review_outcome = if state.late_root_restriction && review_number > 0 {
+            assert!(
+                request.to_string().contains(ROOT_RESTRICTION),
+                "the refreshed review must see the root revocation"
+            );
+            ReviewOutcome::Deny
+        } else {
+            state.review_outcome
+        };
+        let assessment = match review_outcome {
             ReviewOutcome::Allow => json!({
                 "risk_level": "low", "user_authorization": "high", "outcome": "allow",
                 "rationale": "The requested command is safe.",
@@ -508,7 +512,7 @@ async fn parent_response(
                 .contains("Completed synchronous Guardian review.")
         );
         let request_number = state.parent_requests.fetch_add(1, Ordering::SeqCst);
-        if state.thread_context_enabled && state.late_root_restriction && request_number == 1 {
+        if state.late_root_restriction && request_number == 1 {
             let output = request["input"]
                 .as_array()
                 .expect("worker model input")
@@ -518,11 +522,10 @@ async fn parent_response(
                 })
                 .expect("first tool result after root revocation");
             assert!(
-                output.to_string().contains("user cancelled MCP tool call")
-                    || output
-                        .to_string()
-                        .contains("Tool execution was cancelled by Guardian."),
-                "a stale sync allow must not execute the first tool: {output}"
+                output
+                    .to_string()
+                    .contains("Tool execution was declined by Guardian."),
+                "the refreshed review must deny the first tool after revocation: {output}"
             );
         }
         if request["model"] == REQUIRED_MODEL && request_number == 3 {
@@ -660,15 +663,10 @@ async fn guardian_v2_routes_tool_approvals(
         transcript_content,
         GuardianToolScope::AllTools,
         /*sensitive_action*/ None,
-        /*thread_context_enabled*/ false,
     )
     .await
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The shared fixture varies independent review and context-mode test dimensions."
-)]
 async fn guardian_v2_routes_scoped_tool_approvals(
     risk: GuardianRisk,
     lifecycle: ThreadLifecycle,
@@ -677,7 +675,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     transcript_content: TranscriptContent,
     scope: GuardianToolScope,
     sensitive_action: Option<bool>,
-    thread_context_enabled: bool,
 ) -> Result<()> {
     let server_name = match scope {
         GuardianToolScope::AllTools => TEST_SERVER_NAME,
@@ -714,7 +711,8 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             3
         } else {
             1
-        };
+        }
+        + usize::from(late_root_restriction);
     let responses_state = Arc::new(MockResponsesState {
         luna_score,
         invalid_classification: matches!(risk, GuardianRisk::InvalidResponse),
@@ -724,7 +722,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         root_worker: lifecycle.uses_root_worker(),
         root_user_restriction: matches!(lifecycle, ThreadLifecycle::RootUserRestriction),
         root_user_input_restriction: lifecycle.has_root_user_input(),
-        thread_context_enabled,
         compact_root_after_answer: matches!(lifecycle, ThreadLifecycle::RootUserInputCompaction),
         late_root_restriction,
         user_input_restriction: lifecycle.has_user_input(),
@@ -883,7 +880,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             analytics_server.uri(),
         ))
         .with_extra_config(&format!(
-            "[mcp_servers.{server_name}]\nurl = \"{mcp_server_url}/mcp\"\ndefault_tools_approval_mode = \"{tool_approval_mode}\"\n\n[analytics]\nenabled = true\n\n[otel]\nmetrics_exporter = {{ otlp-http = {{ endpoint = \"{responses_url}/metrics\", protocol = \"json\" }} }}\n\n[features.guardianv2]\nenabled = true\nthread_context = {thread_context_enabled}{guardian_scope_config}"
+            "[mcp_servers.{server_name}]\nurl = \"{mcp_server_url}/mcp\"\ndefault_tools_approval_mode = \"{tool_approval_mode}\"\n\n[analytics]\nenabled = true\n\n[otel]\nmetrics_exporter = {{ otlp-http = {{ endpoint = \"{responses_url}/metrics\", protocol = \"json\" }} }}\n\n[features.guardianv2]\nenabled = true{guardian_scope_config}"
         ))
         .enable_feature(Feature::GuardianApproval);
     if lifecycle.has_user_input() || lifecycle.has_root_user_input() {
@@ -914,7 +911,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         | ThreadLifecycle::UserInputEmpty
         | ThreadLifecycle::UserInputHookFeedback
         | ThreadLifecycle::UserInputHookBlocked
-        | ThreadLifecycle::RootRollback
         | ThreadLifecycle::RootRestriction
         | ThreadLifecycle::RootRestrictionDuringClassification
         | ThreadLifecycle::RootTrustedSkill
@@ -963,7 +959,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         | ThreadLifecycle::UserInputEmpty
         | ThreadLifecycle::UserInputHookFeedback
         | ThreadLifecycle::UserInputHookBlocked
-        | ThreadLifecycle::RootRollback
         | ThreadLifecycle::RootRestriction
         | ThreadLifecycle::RootRestrictionDuringClassification
         | ThreadLifecycle::RootTrustedSkill
@@ -975,8 +970,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 .start_thread(ThreadStartParams {
                     approval_policy: Some(AskForApproval::OnRequest),
                     approvals_reviewer: Some(requested_reviewer),
-                    history_mode: matches!(lifecycle, ThreadLifecycle::RootRollback)
-                        .then_some(ThreadHistoryMode::Legacy),
                     ..Default::default()
                 })
                 .await?;
@@ -1040,7 +1033,9 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     }
     if mixed_evidence {
         turn_input.push(UserInput::Image {
-            url: EVIDENCE_IMAGE.to_owned(),
+            image: ImageReference::Inline {
+                url: EVIDENCE_IMAGE.to_owned(),
+            },
             detail: None,
         });
     }
@@ -1192,22 +1187,55 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                     .collect::<Vec<_>>(),
                 vec![
                     json!(["additional_tools", "developer", null]),
-                    json!(["message", "developer", null]),
+                    json!(["message", "developer", ["guardian.classifier_instructions"]]),
+                    json!(["message", "user", null]),
                     json!(["message", "developer", null]),
                     json!(["message", "developer", ["guardian.trusted_tool"]]),
                     json!(["message", "developer", ["guardian.trusted_skills"]]),
                     json!(["message", "user", null]),
                 ],
             );
-            let content = input[5]["content"].as_array().expect("untrusted evidence");
-            let texts = content
+            let history = input[2]["content"].as_array().expect("untrusted history");
+            let history_texts = history
                 .iter()
                 .filter_map(|item| item["text"].as_str())
                 .collect::<Vec<_>>();
-            assert_eq!(texts.first().copied(), Some(">>> TRANSCRIPT START\n"));
-            assert!(texts.iter().any(|text| text.contains(USER_CONTEXT)));
-            assert!(texts.iter().any(|text| text.contains("guardian-0")));
-            assert_eq!(texts.last().copied(), Some(">>> APPROVAL REQUEST END\n"));
+            assert_eq!(
+                history_texts.first().and_then(|text| text.lines().next()),
+                Some(">>> RETAINED USER INSTRUCTIONS START")
+            );
+            assert!(history_texts.contains(&">>> TRANSCRIPT START\n"));
+            assert!(history_texts.iter().any(|text| text.contains(USER_CONTEXT)));
+            assert!(history_texts.iter().any(|text| text.contains("guardian-0")));
+            assert!(history_texts.windows(2).any(|texts| {
+                texts
+                    == [
+                        ">>> TRANSCRIPT END\n\n",
+                        "\n>>> PARENT TURN PERMISSION CONTEXT START\n",
+                    ]
+            }));
+            assert_eq!(
+                history_texts.last().copied(),
+                Some(">>> PARENT TURN PERMISSION CONTEXT END\n")
+            );
+            assert!(history.iter().all(|item| item["type"] == "input_text"));
+
+            let content = input[6]["content"].as_array().expect("action and images");
+            let action_texts = content
+                .iter()
+                .filter_map(|item| item["text"].as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                &action_texts[..2],
+                &[
+                    "The Codex agent has requested the following action:\n",
+                    ">>> APPROVAL REQUEST START\n",
+                ],
+            );
+            assert_eq!(
+                action_texts.last().copied(),
+                Some(">>> APPROVAL REQUEST END\n")
+            );
             assert!(
                 content[..content.len() - 1]
                     .iter()
@@ -1270,10 +1298,16 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 );
             }
         } else if late_root_restriction {
-            assert!(
-                reviews.is_empty(),
-                "the first review predates root revocation"
+            assert_eq!(reviews.len(), 1);
+            let decision = reviews[0]
+                .lines()
+                .find_map(|line| line.strip_prefix("Decision: "))
+                .expect("refreshed review should include a decision");
+            assert_eq!(
+                serde_json::from_str::<Value>(decision)?,
+                json!({"status": "denied", "risk_level": "high", "user_authorization": "unknown"}),
             );
+            assert!(reviews[0].contains("guardian-0"));
         } else if matches!(review_outcome, ReviewOutcome::Malformed) {
             assert!(
                 reviews.is_empty(),
@@ -1560,17 +1594,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         && (lifecycle.uses_root_worker()
             || matches!(lifecycle, ThreadLifecycle::RootUserRestriction))
     {
-        if matches!(lifecycle, ThreadLifecycle::RootRollback) {
-            let rollback_id = app_server
-                .send_thread_rollback_request(ThreadRollbackParams {
-                    thread_id: thread_id.clone(),
-                    num_turns: 1,
-                })
-                .await?;
-            let _: ThreadRollbackResponse =
-                timeout(TIMEOUT, app_server.read_response(rollback_id)).await??;
-        }
-
         if lifecycle.has_root_user_input() {
             submit_user_input_response(
                 &mut app_server,
@@ -1760,6 +1783,38 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         })
         .await?;
         timeout(TIMEOUT, app_server.shutdown_gracefully()).await??;
+        let reviewer_id = responses_state
+            .guardian_requests
+            .lock()
+            .expect("Guardian requests")[0]["client_metadata"]["thread_id"]
+            .as_str()
+            .expect("reviewer ID")
+            .to_owned();
+        let state_db = StateRuntime::init(
+            codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+            "mock_provider".to_owned(),
+        )
+        .await?;
+        let metadata = state_db
+            .get_thread(codex_protocol::ThreadId::from_string(&reviewer_id)?)
+            .await?
+            .expect("reviewer metadata should be persisted");
+        assert_eq!(
+            (
+                metadata.source.as_str(),
+                metadata.title.as_str(),
+                metadata.name.as_deref(),
+                metadata.preview.as_deref(),
+                metadata.first_user_message.as_deref(),
+            ),
+            (
+                r#"{"subagent":{"other":"guardian"}}"#,
+                "Guardian review",
+                Some("Guardian review"),
+                Some("Approval review"),
+                None
+            ),
+        );
         let events = captured_analytics_events(&analytics_server).await;
         let turn = &turn["event_params"];
         assert_eq!(turn["guardian_v2_enabled"], classifier_in_scope);
@@ -2062,7 +2117,6 @@ async fn guardian_v2_inherits_root_user_skills_for_delegated_workers() -> Result
             server_name: "node_repl",
         },
         /*sensitive_action*/ None,
-        /*thread_context_enabled*/ false,
     )
     .await
 }
@@ -2085,7 +2139,6 @@ async fn guardian_v2_computer_use_only_scopes_classification_and_fast_reviews(
         TranscriptContent::Normal,
         GuardianToolScope::ComputerUseOnly { server_name },
         /*sensitive_action*/ None,
-        /*thread_context_enabled*/ false,
     )
     .await
 }
@@ -2383,7 +2436,6 @@ async fn guardian_v2_required_model_computer_use_preserves_strict_approval(
         TranscriptContent::Normal,
         GuardianToolScope::ComputerUseOnly { server_name },
         sensitive_action,
-        /*thread_context_enabled*/ false,
     )
     .await
 }
@@ -2405,7 +2457,6 @@ async fn guardian_v2_discards_sync_reviews_after_user_input_answer(
             server_name: "node_repl",
         },
         /*sensitive_action*/ None,
-        /*thread_context_enabled*/ false,
     )
     .await
 }
@@ -2428,20 +2479,16 @@ async fn guardian_v2_validates_user_input_before_history_truncation(
             server_name: "node_repl",
         },
         /*sensitive_action*/ None,
-        /*thread_context_enabled*/ false,
     )
     .await
 }
 
-#[test_case(ThreadLifecycle::RootUserInputRestriction, false; "legacy root answer reaches worker")]
-#[test_case(ThreadLifecycle::RootUserInputHookBlocked, false; "legacy blocked root answer reaches worker")]
-#[test_case(ThreadLifecycle::RootUserInputRestriction, true; "root answer reaches worker")]
-#[test_case(ThreadLifecycle::RootUserInputHookBlocked, true; "blocked root answer reaches worker")]
-#[test_case(ThreadLifecycle::RootUserInputCompaction, true; "root answer survives parent compaction")]
+#[test_case(ThreadLifecycle::RootUserInputRestriction; "root answer reaches worker")]
+#[test_case(ThreadLifecycle::RootUserInputHookBlocked; "blocked root answer reaches worker")]
+#[test_case(ThreadLifecycle::RootUserInputCompaction; "root answer survives parent compaction")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardian_v2_propagates_root_user_input_to_worker_reviews(
     lifecycle: ThreadLifecycle,
-    thread_context_enabled: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     guardian_v2_routes_scoped_tool_approvals(
@@ -2454,7 +2501,6 @@ async fn guardian_v2_propagates_root_user_input_to_worker_reviews(
             server_name: "node_repl",
         },
         /*sensitive_action*/ None,
-        thread_context_enabled,
     )
     .await
 }
@@ -2548,7 +2594,6 @@ async fn forked_thread_ignores_persisted_guardian_score() -> Result<()> {
     .await
 }
 
-#[test_case(ThreadLifecycle::RootRollback; "worker_root_rollback")]
 #[test_case(ThreadLifecycle::RootRestriction; "worker_root_restriction")]
 #[test_case(ThreadLifecycle::RootUserRestriction; "root_user_restriction")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2587,10 +2632,6 @@ async fn guardian_v2_low_scores_require_current_authorization(
             server_name: "node_repl",
         },
         /*sensitive_action*/ None,
-        matches!(
-            lifecycle,
-            ThreadLifecycle::RootRestrictionDuringClassification
-        ),
     )
     .await
 }

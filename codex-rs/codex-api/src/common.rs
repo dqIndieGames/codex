@@ -22,6 +22,7 @@ use std::task::Context;
 use std::task::Poll;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tokio::sync::oneshot;
 
 pub const WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY: &str = "ws_request_header_traceparent";
 pub const WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY: &str = "ws_request_header_tracestate";
@@ -73,7 +74,7 @@ pub struct MemorySummarizeOutput {
     pub memory_summary: String,
 }
 
-/// The server response currently being handled, shared with tool-review extensions.
+/// The latest server response ID received in this turn, shared with tool-review extensions.
 #[derive(Clone, Debug)]
 pub struct ResponseId(pub String);
 
@@ -175,12 +176,30 @@ pub enum ReasoningContext {
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Reasoning {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_reasoning_effort"
+    )]
     pub effort: Option<ReasoningEffortConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ReasoningSummaryConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<ReasoningContext>,
+}
+
+fn serialize_reasoning_effort<S>(
+    effort: &Option<ReasoningEffortConfig>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if let Some(ReasoningEffortConfig::Custom(value)) = effort
+        && let Ok(value) = value.parse::<u64>()
+    {
+        return serializer.serialize_u64(value);
+    }
+    effort.serialize(serializer)
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -418,6 +437,14 @@ pub struct ResponseStream {
     /// Cancels the background producer so a caller can actively drop an in-flight
     /// HTTP or WebSocket response instead of only dropping its event receiver.
     pub cancellation_token: CancellationToken,
+    /// Requests a graceful interrupt. Keep consuming events through completion.
+    pub interrupt: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for ResponseStream {
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
+    }
 }
 
 impl Stream for ResponseStream {

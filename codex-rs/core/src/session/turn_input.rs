@@ -6,7 +6,7 @@
 //! rollout persistence, or sampling.
 //!
 //! Persistent thread settings apply on Started and Steered. Turn start
-//! options only apply on Started.
+//! options only update turn context on Started; input provenance follows each request.
 //! Host shutdown admission is checked before reserving or starting a new turn.
 //! Parent-delegated subagent input bypasses drain; automatic starts remain gated.
 //! Realtime drain refusals are returned to the fanout for ordered session teardown.
@@ -21,6 +21,9 @@ use super::turn_context::TurnContext;
 use crate::state::ActiveTurn;
 use crate::state::TurnState;
 use crate::tasks::RegularTask;
+use codex_history::CodexHarnessMetadata;
+use codex_history::ResponseItemEnvelope;
+use codex_history::UserInputOrigin;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -216,7 +219,31 @@ pub(super) async fn handle(
                 | SubmittedTurnInput::ResponseItem(_)
                 | SubmittedTurnInput::InterAgentCommunication(_) => TurnStartKind::Automatic,
             };
-            start_if_idle(session, request, submission_id, kind).await
+            start_if_idle(
+                session,
+                request,
+                submission_id,
+                kind,
+                /*expected_previous_turn_id*/ None,
+            )
+            .await
+        }
+        TurnInputMode::ContinueIfIdle {
+            expected_previous_turn_id,
+        } => {
+            if !matches!(&request.input, SubmittedTurnInput::ResponseItem(_)) {
+                return Err(CodexErr::InvalidRequest(
+                    "continuation requires internal response input".to_string(),
+                ));
+            }
+            start_if_idle(
+                session,
+                request,
+                submission_id,
+                TurnStartKind::Recovery,
+                Some(expected_previous_turn_id),
+            )
+            .await
         }
         TurnInputMode::Steer { expected_turn_id } => {
             steer(session, request, expected_turn_id, submission_id).await
@@ -236,7 +263,14 @@ pub(super) async fn handle_recovery(
             turn_trigger: Some("retry".to_string()),
             ..start_options
         });
-    start_if_idle(session, request, submission_id, TurnStartKind::Recovery).await
+    start_if_idle(
+        session,
+        request,
+        submission_id,
+        TurnStartKind::Recovery,
+        /*expected_previous_turn_id*/ None,
+    )
+    .await
 }
 
 async fn start_or_steer(
@@ -252,6 +286,7 @@ async fn start_or_steer(
         responsesapi_client_metadata,
         ..
     } = request;
+    let origin = UserInputOrigin::from_turn_trigger(start.turn_trigger.as_deref());
     let has_explicit_input = match &input {
         SubmittedTurnInput::UserInput { content, .. } => !content.is_empty(),
         SubmittedTurnInput::ResponseItem(ResponseItem::FunctionCallOutput {
@@ -273,6 +308,7 @@ async fn start_or_steer(
             /*expected_turn_id*/ None,
             settings.required_active_final_output_json_schema(),
             responsesapi_client_metadata.clone(),
+            origin,
         )
         .await
     {
@@ -322,7 +358,8 @@ async fn start_or_steer(
             }
             let mut task_input = merge_additional_context_input(session, additional_context).await;
             if has_explicit_input {
-                task_input.push(pending_turn_input(session, input).await);
+                task_input
+                    .push(pending_turn_input(session, input, &turn_context.sub_id, origin).await);
             }
             session
                 .spawn_task(turn_context, task_input, RegularTask::new())
@@ -335,11 +372,16 @@ async fn start_or_steer(
     }
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the previous turn check and idle reservation must be atomic"
+)]
 async fn start_if_idle(
     session: &Arc<Session>,
     request: TurnInputRequest,
     submission_id: String,
     kind: TurnStartKind,
+    expected_previous_turn_id: Option<String>,
 ) -> CodexResult<TurnInputSubmission> {
     let TurnInputRequest {
         input,
@@ -349,6 +391,7 @@ async fn start_if_idle(
         responsesapi_client_metadata,
         ..
     } = request;
+    let origin = UserInputOrigin::from_turn_trigger(start.turn_trigger.as_deref());
     if session.input_queue.has_trigger_turn_mailbox_items().await {
         return Ok(TurnInputSubmission::NotSubmitted {
             reason: NotSubmittedReason::PendingTriggerTurn,
@@ -390,6 +433,13 @@ async fn start_if_idle(
         if active_turn.is_some() {
             return Ok(TurnInputSubmission::NotSubmitted {
                 reason: NotSubmittedReason::NotIdle,
+            });
+        }
+        if let Some(expected) = expected_previous_turn_id
+            && session.state.lock().await.last_started_turn_id.as_ref() != Some(&expected)
+        {
+            return Ok(TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::Superseded,
             });
         }
         let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
@@ -443,22 +493,21 @@ async fn start_if_idle(
             if let SubmittedTurnInput::UserInput { content, .. } = &input {
                 turn_context.session_telemetry.user_prompt(content);
             }
-            task_input.push(pending_turn_input(session, input).await);
+            task_input.push(pending_turn_input(session, input, &turn_context.sub_id, origin).await);
         }
-        TurnStartKind::Automatic => {
+        TurnStartKind::Automatic | TurnStartKind::Recovery => {
             // Empty automatic user input resumes sampling without a new message.
             if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
                 session
                     .input_queue
                     .extend_pending_input_for_turn_state(
                         turn_state.as_ref(),
-                        vec![pending_turn_input(session, input).await],
+                        vec![
+                            pending_turn_input(session, input, &turn_context.sub_id, origin).await,
+                        ],
                     )
                     .await;
             }
-        }
-        TurnStartKind::Recovery => {
-            // Recovery resumes an existing turn without a new empty user message.
         }
     }
     session
@@ -483,6 +532,7 @@ async fn steer(
         responsesapi_client_metadata,
         ..
     } = request;
+    let origin = UserInputOrigin::from_turn_trigger(start.turn_trigger.as_deref());
     if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
         return Err(CodexErr::InvalidRequest(
             "only user input can steer a turn".to_string(),
@@ -496,6 +546,7 @@ async fn steer(
             Some(expected_turn_id.as_str()),
             settings.required_active_final_output_json_schema(),
             responsesapi_client_metadata,
+            origin,
         )
         .await
     {
@@ -508,6 +559,11 @@ async fn steer(
 }
 
 impl Session {
+    /// Called under the active-turn lock before running any task or lifecycle callback.
+    pub(crate) async fn record_started_turn(&self, turn_id: &str) {
+        self.state.lock().await.last_started_turn_id = Some(turn_id.to_string());
+    }
+
     pub(crate) async fn route_realtime_text_input(
         self: &Arc<Self>,
         text: String,
@@ -580,6 +636,7 @@ impl Session {
         expected_turn_id: Option<&str>,
         required_final_output_json_schema: Option<&Value>,
         responsesapi_client_metadata: Option<HashMap<String, String>>,
+        origin: UserInputOrigin,
     ) -> Result<String, NotSubmittedReason> {
         let mut active = self.active_turn.lock().await;
         let Some(active_turn) = active.as_mut() else {
@@ -643,10 +700,13 @@ impl Session {
                 TurnInput::UserInput {
                     content: std::mem::take(content),
                     client_id: client_id.clone(),
-                    acceptance_order: self.reserve_user_input_order().await,
+                    metadata: super::UserInputMetadata {
+                        acceptance_order: Some(self.reserve_user_input_order().await),
+                        origin,
+                    },
                 }
             }
-            input => pending_turn_input(self, input.clone()).await,
+            input => pending_turn_input(self, input.clone(), active_turn_id, origin).await,
         };
         pending_input.push(input);
         self.input_queue
@@ -674,12 +734,20 @@ async fn merge_additional_context_input(
         .collect()
 }
 
-async fn pending_turn_input(session: &Session, input: SubmittedTurnInput) -> TurnInput {
+async fn pending_turn_input(
+    session: &Session,
+    input: SubmittedTurnInput,
+    turn_id: &str,
+    origin: UserInputOrigin,
+) -> TurnInput {
     match input {
         SubmittedTurnInput::UserInput { content, client_id } => TurnInput::UserInput {
             content,
             client_id,
-            acceptance_order: session.reserve_user_input_order().await,
+            metadata: super::UserInputMetadata {
+                acceptance_order: Some(session.reserve_user_input_order().await),
+                origin,
+            },
         },
         SubmittedTurnInput::ResponseItem(mut item)
             if matches!(
@@ -688,7 +756,21 @@ async fn pending_turn_input(session: &Session, input: SubmittedTurnInput) -> Tur
             ) =>
         {
             Session::assign_missing_response_item_id(&mut item);
-            TurnInput::FunctionCallOutput(item)
+            let metadata = if let Some(messages) = session
+                .services
+                .local_agent_runtime
+                .capture_sender_user_messages(&item, session.thread_id, turn_id)
+                .await
+            {
+                Some(CodexHarnessMetadata {
+                    user_input_order: Some(session.reserve_user_input_order().await),
+                    sender_user_messages: Some(Box::new(messages)),
+                    ..Default::default()
+                })
+            } else {
+                None
+            };
+            TurnInput::FunctionCallOutput(ResponseItemEnvelope { item, metadata })
         }
         SubmittedTurnInput::ResponseItem(item) => TurnInput::ResponseItem(item.into()),
         SubmittedTurnInput::InterAgentCommunication(communication) => {

@@ -21,6 +21,14 @@ impl ChatWidget {
             return;
         }
         let was_replaying_turn_completion = self.thread_usage.replaying_turn_completion;
+        if replay_kind.is_some()
+            || matches!(
+                &notification,
+                ServerNotification::TurnStarted(_) | ServerNotification::ItemStarted(_)
+            )
+        {
+            self.empty_state_animation.borrow_mut().dismiss();
+        }
         self.thread_usage.replaying_turn_completion = replay_kind.is_some();
         let from_replay = replay_kind.is_some();
         let is_resume_initial_replay =
@@ -65,6 +73,11 @@ impl ChatWidget {
                 self.on_thread_settings_updated(notification);
             }
             ServerNotification::TurnStarted(notification) => {
+                if from_replay {
+                    self.restore_realtime_transcripts_before_turn(&notification.turn.id);
+                } else {
+                    self.anchor_realtime_transcripts_before_turn(&notification.turn.id);
+                }
                 if replay_kind.is_none() {
                     self.clear_misalignment_for_new_turn(
                         &notification.turn.id,
@@ -79,6 +92,7 @@ impl ChatWidget {
                 }
             }
             ServerNotification::TurnCompleted(notification) => {
+                self.restore_realtime_transcripts_before_turn(&notification.turn.id);
                 self.handle_turn_completed_notification(notification, replay_kind);
             }
             ServerNotification::ItemStarted(notification) => {
@@ -88,6 +102,7 @@ impl ChatWidget {
                 self.handle_item_completed_notification(notification, replay_kind);
             }
             ServerNotification::AgentMessageDelta(notification) => {
+                self.restore_realtime_transcripts_before_turn(&notification.turn_id);
                 if !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
                     && (from_replay
                         || !self.is_realtime_delegated_agent_item(
@@ -98,7 +113,10 @@ impl ChatWidget {
                     self.on_agent_message_delta(notification.delta);
                 }
             }
-            ServerNotification::PlanDelta(notification) => self.on_plan_delta(notification.delta),
+            ServerNotification::PlanDelta(notification) => {
+                self.restore_realtime_transcripts_before_turn(&notification.turn_id);
+                self.on_plan_delta(notification.delta);
+            }
             ServerNotification::ReasoningSummaryTextDelta(notification) => {
                 if !self.is_realtime_delegated_reasoning_item(
                     &notification.turn_id,
@@ -212,7 +230,22 @@ impl ChatWidget {
                     vec!["✓ ".green(), notification.message.into()].into(),
                 ]);
             }
-            ServerNotification::Warning(notification) => self.on_warning(notification.message),
+            ServerNotification::Warning(notification) => {
+                if self.warning_display_state.startup_complete {
+                    self.on_warning(notification.message);
+                } else if self
+                    .warning_display_state
+                    .should_display(&notification.message)
+                {
+                    // Unstable-feature and skill-budget notices arrive as ordinary warnings.
+                    // Coalesce initialization diagnostics by lifecycle, not message wording.
+                    // Both startup and runtime warnings retain details in the transcript.
+                    self.add_to_history(history_cell::StartupWarningsCell::new(vec![
+                        notification.message,
+                    ]));
+                    self.request_redraw();
+                }
+            }
             ServerNotification::GuardianWarning(notification) => {
                 if !notification
                     .message
@@ -241,6 +274,9 @@ impl ChatWidget {
                 if self.warning_display_state.startup_complete {
                     self.on_warning(message);
                 } else if self.warning_display_state.should_display(&message) {
+                    self.warning_display_state
+                        .startup_config_warnings
+                        .insert(message.clone());
                     self.add_to_history(history_cell::StartupWarningsCell::new(vec![message]));
                     self.request_redraw();
                 }
@@ -305,6 +341,7 @@ impl ChatWidget {
             }
             ServerNotification::ServerRequestResolved(_)
             | ServerNotification::AccountUpdated(_)
+            | ServerNotification::GatewayOAuthChanged(_)
             | ServerNotification::AccountRateLimitsUpdated(_)
             | ServerNotification::ThreadStarted(_)
             | ServerNotification::ThreadStatusChanged(_)
@@ -371,6 +408,7 @@ impl ChatWidget {
         // this TUI already rendered locally. Once that turn ends, another
         // client can submit the same text and it still needs its own user cell.
         self.last_rendered_user_message_display = None;
+        let mut question_drafts = None;
         let was_replaying_turn_completion = self.thread_usage.replaying_turn_completion;
         self.thread_usage.replaying_turn_completion = replay_kind.is_some();
         match notification.turn.status {
@@ -416,6 +454,9 @@ impl ChatWidget {
                 {
                     self.speak_completed_realtime_delegation(&notification.turn.id, item);
                 }
+                if replay_kind.is_none() {
+                    question_drafts = self.take_question_drafts();
+                }
                 self.last_non_retry_error = None;
                 let completion = self.completion_cell(&notification.turn, replay_kind);
                 self.on_task_complete(
@@ -425,6 +466,9 @@ impl ChatWidget {
                 );
             }
             TurnStatus::Interrupted => {
+                if replay_kind.is_none() {
+                    question_drafts = self.take_question_drafts();
+                }
                 self.last_non_retry_error = None;
                 let reason = if self
                     .turn_lifecycle
@@ -437,6 +481,9 @@ impl ChatWidget {
                 self.on_interrupted_turn(reason);
             }
             TurnStatus::Failed => {
+                if replay_kind.is_none() {
+                    question_drafts = self.take_question_drafts();
+                }
                 if let Some(error) = notification.turn.error {
                     if replay_kind.is_none()
                         && error.codex_error_info
@@ -463,6 +510,14 @@ impl ChatWidget {
             }
             TurnStatus::InProgress => {}
         }
+        if let Some(drafts) = question_drafts
+            && !self.has_misalignment_policy_violation()
+        {
+            // Interruption can restore queued input into the composer during finalization.
+            self.bottom_pane.append_question_drafts(&drafts);
+            self.refresh_pending_input_preview();
+            self.request_redraw();
+        }
         if replay_kind.is_none() {
             self.finish_realtime_turn(&notification.turn.id);
         }
@@ -474,6 +529,7 @@ impl ChatWidget {
         notification: ItemStartedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        self.restore_realtime_transcripts_before_turn(&notification.turn_id);
         match notification.item {
             ThreadItem::UserMessage { content, .. } if replay_kind.is_none() => {
                 self.note_realtime_user_item_started(&notification.turn_id, &content);
@@ -523,6 +579,7 @@ impl ChatWidget {
                 self.on_patch_apply_begin(file_update_changes_to_display(changes));
             }
             item @ ThreadItem::McpToolCall { .. } => self.on_mcp_tool_call_started(item),
+            item @ ThreadItem::DynamicToolCall { .. } => self.on_dynamic_tool_item(item),
             ThreadItem::WebSearch(item) => {
                 self.on_web_search_begin(item.id);
             }
@@ -562,6 +619,7 @@ impl ChatWidget {
         notification: ItemCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        self.restore_realtime_transcripts_before_turn(&notification.turn_id);
         if replay_kind.is_none()
             && self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
             && realtime::is_private_realtime_agent_item(&notification.item)

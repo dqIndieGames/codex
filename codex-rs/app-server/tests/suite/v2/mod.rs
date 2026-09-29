@@ -1,9 +1,13 @@
 mod account;
+#[path = "account_system_proxy_tests.rs"]
+mod account_system_proxy;
 mod account_thread_usage;
+mod agent_message_board;
 mod analytics;
 mod app_installed;
 mod app_list;
 mod app_read;
+mod application_network;
 mod attestation;
 mod auto_env;
 mod bedrock_setup;
@@ -13,10 +17,15 @@ mod collaboration_mode_list;
 #[cfg(unix)]
 mod command_exec;
 mod compaction;
+#[path = "config_model_provider_requirements_tests.rs"]
+mod config_model_provider_requirements;
 mod config_requirements_application;
 #[path = "config_requirements_browser_use_tests.rs"]
 mod config_requirements_browser_use;
+#[path = "config_requirements_exec_tests.rs"]
+mod config_requirements_exec;
 mod config_requirements_in_app_browser;
+mod config_requirements_login;
 mod config_rpc;
 #[cfg(unix)]
 #[path = "connection_handling_stdio_tests.rs"]
@@ -44,6 +53,8 @@ mod external_agent_config;
 mod external_agent_import_sync;
 mod feedback;
 mod fs;
+#[path = "gateway_oauth_tests.rs"]
+mod gateway_oauth;
 mod git_attribution;
 mod guardian_v2;
 mod history_notes_extension;
@@ -67,7 +78,10 @@ mod memory_reset;
 mod misalignment_policy;
 mod model_auto_review;
 mod model_list;
+mod model_list_requirements_tests;
 mod model_provider_capabilities_read;
+#[path = "model_provider_enforcement_tests.rs"]
+mod model_provider_enforcement;
 mod multi_agent_v2_developer_instructions;
 mod otel;
 mod output_schema;
@@ -84,6 +98,8 @@ mod process_exec;
 mod projects;
 mod rate_limit_reset_credits;
 mod rate_limits;
+#[path = "rate_limits_identity_tests.rs"]
+mod rate_limits_identity;
 mod realtime_conversation;
 mod recommended_plugins;
 mod remote_control;
@@ -94,6 +110,8 @@ mod request_user_input;
 mod request_validation;
 mod residency;
 mod review;
+#[path = "rollout_compress_tests.rs"]
+mod rollout_compress;
 mod rollout_migration;
 mod safety_check_downgrade;
 #[cfg(not(target_os = "windows"))]
@@ -122,7 +140,6 @@ mod thread_queue;
 mod thread_read;
 mod thread_resume;
 mod thread_revert;
-mod thread_rollback;
 mod thread_sections;
 mod thread_settings_update;
 mod thread_shell_command;
@@ -140,6 +157,7 @@ mod turn_steer;
 mod view_image;
 mod web_search;
 mod windows_sandbox_setup;
+mod workspace_routing;
 
 mod user_verification;
 mod user_verification_mcp;

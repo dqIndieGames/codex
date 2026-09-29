@@ -33,6 +33,7 @@ async fn closing_voice_before_turn_completion_restores_the_delegated_answer_once
     );
 
     let mut visible_answers = 0;
+    commit_realtime_history_events(&mut chat, &mut events);
     while let Ok(event) = events.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
             visible_answers += cell
@@ -104,6 +105,7 @@ async fn delegated_voice_work_speaks_only_the_completed_final_answer_once() {
             if spoken_thread_id == thread_id && text.as_str() == "Lucali in Brooklyn"
     ));
     assert!(ops.try_recv().is_err());
+    commit_realtime_history_events(&mut chat, &mut events);
     while let Ok(event) = events.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
             assert!(
@@ -152,8 +154,11 @@ async fn delegation_started_before_peer_connection_keeps_its_voice_origin() {
     ));
     assert!(ops.try_recv().is_err());
     let mut rendered_history = Vec::new();
+    commit_realtime_history_events(&mut chat, &mut events);
     while let Ok(event) = events.try_recv() {
-        if let AppEvent::InsertHistoryCell(cell) = event {
+        if let AppEvent::InsertHistoryCell(cell) = event
+            && !cell.as_any().is::<FinalMessageSeparator>()
+        {
             let rendered = cell
                 .transcript_lines(/*width*/ 80)
                 .iter()
@@ -166,12 +171,12 @@ async fn delegation_started_before_peer_connection_keeps_its_voice_origin() {
     }
     insta::assert_snapshot!(
         "voice_delegation_during_connection",
-        without_completion_metadata(&rendered_history.join("\n"))
+        rendered_history.join("\n")
     );
 }
 
 #[tokio::test]
-async fn delegated_answer_with_async_question_opens_the_editor_instead_of_speech() {
+async fn delegated_async_question_stays_local_and_expires_when_its_turn_ends() {
     let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
     let thread_id = activate_voice(&mut chat);
     let turn_id = "question-turn";
@@ -194,6 +199,13 @@ async fn delegated_answer_with_async_question_opens_the_editor_instead_of_speech
     };
     start_item(&mut chat, thread_id, turn_id, answer.clone());
     complete_item(&mut chat, thread_id, turn_id, answer.clone());
+    assert_eq!(
+        chat.bottom_pane
+            .questions
+            .as_ref()
+            .map(|editor| editor.unanswered_count()),
+        Some(1)
+    );
     finish_turn(
         &mut chat,
         thread_id,
@@ -207,7 +219,7 @@ async fn delegated_answer_with_async_question_opens_the_editor_instead_of_speech
             .questions
             .as_ref()
             .map(|editor| editor.unanswered_count()),
-        Some(1)
+        Some(0)
     );
     assert!(
         ops.try_recv().is_err(),
@@ -269,6 +281,7 @@ async fn delegated_item_that_becomes_final_at_turn_completion_is_recoverable() {
     };
     assert_eq!(text.as_str(), "Public answer");
     chat.restore_undelivered_realtime_speech(delivery_id);
+    commit_realtime_history_events(&mut chat, &mut events);
     while let Ok(event) = events.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
             for line in cell.display_lines(/*width*/ 80) {
@@ -315,23 +328,23 @@ async fn explicit_final_answer_can_explain_private_channel_markers() {
     );
     assert!(ops.try_recv().is_err());
     chat.restore_undelivered_realtime_speech(delivery_id);
+    commit_realtime_history_events(&mut chat, &mut events);
     let rendered = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|event| match event {
-            AppEvent::InsertHistoryCell(cell) => Some(
-                cell.transcript_lines(/*width*/ 80)
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
+            AppEvent::InsertHistoryCell(cell) if !cell.as_any().is::<FinalMessageSeparator>() => {
+                Some(
+                    cell.transcript_lines(/*width*/ 80)
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("\n");
-    insta::assert_snapshot!(
-        "explicit_final_answer_with_channel_marker",
-        without_completion_metadata(&rendered)
-    );
+    insta::assert_snapshot!("explicit_final_answer_with_channel_marker", rendered);
 }
 
 #[tokio::test]
@@ -416,7 +429,7 @@ async fn newer_voice_delegation_on_the_same_turn_speaks_only_its_own_answer() {
             if text.as_str() == "answer to the newer question"
     ));
     let owner = chat.realtime_conversation.speaker_suppression_generation;
-    assert_eq!(owner, Some(chat.realtime_conversation.input_generation));
+    assert_eq!(owner, None);
     chat.on_realtime_transcript_delta("assistant".to_string(), "answer".to_string());
     let owner = chat.realtime_conversation.speaker_suppression_generation;
     assert!(owner.is_none());

@@ -2,6 +2,7 @@
 
 use codex_protocol::protocol::ReviewDecision;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use super::ApprovalRequestReasons;
 use super::GuardianApprovalRequest;
@@ -37,7 +38,10 @@ impl ReviewAction {
         let category = action.guardian_scope();
         let original = serde_json::to_value(&action).map_err(|error| error.to_string());
         match action.into_guardian_request(exec_command_cwd_convention) {
-            Ok(request) => Self::from(request),
+            Ok(request) => Self {
+                category,
+                ..Self::from(request)
+            },
             Err(error) => Self {
                 action: original,
                 category,
@@ -57,15 +61,18 @@ impl ReviewAction {
             tracing::error!(%error, "failed to build automatic approval action");
             ReviewDecision::denied("automatic approval review could not prepare the action")
         })?;
-        if let GuardianApprovalRequest::WriteStdin { environment_id, .. } = request
+        if let Some(environment_id) = request.target_environment_id()
             && !context
                 .environments()
                 .turn_environments()
-                .any(|environment| environment.selection.environment_id == *environment_id)
+                .any(|environment| environment.selection.environment_id == environment_id)
         {
-            return Err(ReviewDecision::denied(
-                "automatic approval review cannot access the terminal's environment; select it before retrying",
-            ));
+            let message = if matches!(request, GuardianApprovalRequest::WriteStdin { .. }) {
+                "automatic approval review cannot access the terminal's environment; select it before retrying"
+            } else {
+                "automatic approval review cannot access the request's environment"
+            };
+            return Err(ReviewDecision::denied(message));
         }
         Ok(request)
     }
@@ -74,8 +81,8 @@ impl ReviewAction {
 #[derive(Clone)]
 pub(super) struct ReviewRuntime {
     pub(super) session: Arc<Session>,
+    pub(super) history_reset: CancellationToken,
     pub(super) context: GuardianReviewContext,
-    pub(super) review_id: String,
     pub(super) request: ReviewAction,
     pub(super) reasons: ApprovalRequestReasons,
     pub(super) options: GuardianReviewOptions,

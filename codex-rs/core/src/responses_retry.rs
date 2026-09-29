@@ -46,9 +46,9 @@ pub(crate) struct ExhaustedResponseRetry {
     pub(crate) retry_at: Option<tokio::time::Instant>,
 }
 
-/// Handles a retryable stream error and returns `Ok(())` when the caller should
-/// retry the request loop.
-pub(crate) async fn handle_retryable_response_stream_error(
+/// Returns `Ok(())` when the caller should retry the request loop, or the original error when
+/// it is terminal or the retry budget is exhausted.
+pub(crate) async fn handle_response_stream_error(
     retry_state: &mut ResponsesStreamRetryState,
     max_retries: u64,
     err: CodexErr,
@@ -171,9 +171,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
         .thread_extension_data
         .insert(ExhaustedResponseRetry {
             turn_id: turn_context.sub_id.clone(),
-            retry_at: err
-                .retry_delay()
-                .and_then(|delay| tokio::time::Instant::now().checked_add(delay)),
+            retry_at: Some(tokio::time::Instant::now() + delay),
         });
     Err(err)
 }

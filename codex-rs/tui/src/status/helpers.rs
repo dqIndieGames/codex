@@ -1,3 +1,4 @@
+use crate::clock_format::ClockFormat;
 use crate::exec_command::relativize_to_home;
 use crate::legacy_core::config::Config;
 use crate::status::StatusAccountDisplay;
@@ -105,8 +106,12 @@ pub(crate) fn plan_type_display_name(plan_type: PlanType) -> String {
         "Business".to_string()
     } else if plan_type.is_business_like() {
         "Enterprise".to_string()
+    } else if plan_type == PlanType::Pro {
+        "Pro (More)".to_string()
+    } else if plan_type == PlanType::ProMax {
+        "Pro (Max)".to_string()
     } else if plan_type == PlanType::ProLite {
-        "Pro Lite".to_string()
+        "Pro".to_string()
     } else if plan_type == PlanType::EduPlus {
         "Edu Plus".to_string()
     } else if plan_type == PlanType::EduPro {
@@ -180,8 +185,12 @@ pub(crate) fn format_directory_display(directory: &Path, max_width: Option<usize
     formatted
 }
 
-pub(crate) fn format_reset_timestamp(dt: DateTime<Local>, captured_at: DateTime<Local>) -> String {
-    let time = dt.format("%H:%M").to_string();
+pub(crate) fn format_reset_timestamp(
+    dt: DateTime<Local>,
+    captured_at: DateTime<Local>,
+    clock_format: ClockFormat,
+) -> String {
+    let time = dt.format(clock_format.time_format()).to_string();
     if dt.date_naive() == captured_at.date_naive() {
         time
     } else {
@@ -224,8 +233,9 @@ mod tests {
             (PlanType::Free, "Free"),
             (PlanType::Go, "Go"),
             (PlanType::Plus, "Plus"),
-            (PlanType::Pro, "Pro"),
-            (PlanType::ProLite, "Pro Lite"),
+            (PlanType::Pro, "Pro (More)"),
+            (PlanType::ProLite, "Pro"),
+            (PlanType::ProMax, "Pro (Max)"),
             (PlanType::Team, "Business"),
             (PlanType::SelfServeBusinessUsageBased, "Business"),
             (PlanType::Business, "Enterprise"),

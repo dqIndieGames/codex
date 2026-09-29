@@ -1,12 +1,14 @@
 use super::ResponsesStreamRequest;
 use super::ResponsesStreamRetryState;
-use super::handle_retryable_response_stream_error;
+use super::handle_response_stream_error;
 use super::log_retry;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
 use codex_login::CodexAuth;
+use codex_http_client::RetryAfter;
 use codex_protocol::error::CodexErr;
 use std::time::Duration;
+use tokio::time::Instant;
 use tracing_test::internal::MockWriter;
 
 // Product contract: local3 checklist transport recovery, three consecutive
@@ -40,7 +42,7 @@ async fn websocket_transport_fallback_covers_sampling_and_both_compaction_paths(
             let mut state = ResponsesStreamRetryState::default();
             for attempt in 1..=6 {
                 let start = tokio::time::Instant::now();
-                handle_retryable_response_stream_error(
+                handle_response_stream_error(
                     &mut state,
                     u64::MAX,
                     CodexErr::Stream("websocket closed before completion".to_string()),
@@ -84,7 +86,7 @@ async fn websocket_recovery_keeps_cancellation_terminal() {
         CodexErr::TurnAborted,
         CodexErr::SessionBudgetExceeded,
     ] {
-        let result = handle_retryable_response_stream_error(
+        let result = handle_response_stream_error(
             &mut state,
             u64::MAX,
             error,
@@ -134,4 +136,21 @@ async fn sampling_retry_does_not_warn_on_intermediate_stream_error() {
         logs.is_empty(),
         "retry intermediate state must not write warn/error logs: {logs}"
     );
+}
+
+/// Product truth: local3 checklist item 3 fixes every retry wait at five seconds.
+#[tokio::test(start_paused = true)]
+async fn stream_retry_ignores_short_and_long_server_advice() {
+    let (session, context) = make_session_and_context().await;
+    let mut client = session.services.model_client.new_session();
+    let mut state = ResponsesStreamRetryState::default();
+    for advised in [Duration::ZERO, Duration::from_secs(30)] {
+        let advice = RetryAfter::from_delay(advised).expect("retry deadline");
+        let start = tokio::time::Instant::now();
+        handle_response_stream_error(
+            &mut state, 4, CodexErr::InternalServerError.with_retry_after(advice),
+            &mut client, &session, &context, ResponsesStreamRequest::Sampling,
+        ).await.expect("retry allowed");
+        assert!((Duration::from_secs(5)..=Duration::from_millis(5001)).contains(&start.elapsed()));
+    }
 }

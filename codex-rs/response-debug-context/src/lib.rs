@@ -19,10 +19,7 @@ pub struct ResponseDebugContext {
 pub fn extract_response_debug_context(transport: &TransportError) -> ResponseDebugContext {
     let mut context = ResponseDebugContext::default();
 
-    let TransportError::Http {
-        headers, body: _, ..
-    } = transport
-    else {
+    let TransportError::Http { headers, .. } = transport else {
         return context;
     };
 
@@ -65,10 +62,12 @@ pub fn telemetry_transport_error_message(error: &TransportError) -> String {
         TransportError::Http { status, .. } => format!("http {}", status.as_u16()),
         TransportError::RetryLimit => "retry limit reached".to_string(),
         TransportError::RetryInterrupted(err) => err.to_string(),
+        TransportError::ResponseTooLarge { .. } => "response body too large".to_string(),
         TransportError::Timeout => "timeout".to_string(),
         TransportError::Connection(err) => err.to_string(),
         TransportError::Network(err) => err.to_string(),
         TransportError::Build(err) => err.to_string(),
+        TransportError::Policy(denied) => denied.to_string(),
     }
 }
 
@@ -172,10 +171,14 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::Retryable { .. } => "retryable error".to_string(),
         ApiError::RateLimitExceeded { .. } => "rate limit exceeded".to_string(),
         ApiError::RateLimit(_) => "rate limit".to_string(),
-        ApiError::InvalidRequest { .. } => "invalid request".to_string(),
+        ApiError::InvalidRequest { .. } | ApiError::InvalidPrompt { .. } => {
+            "invalid request".to_string()
+        }
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
+        ApiError::BioPolicy { .. } => "bio policy".to_string(),
         ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
-        ApiError::ServerOverloaded => "server overloaded".to_string(),
+        ApiError::ServerOverloaded { .. } => "server overloaded".to_string(),
+        ApiError::FlexUnavailable => "flex capacity unavailable".to_string(),
     }
 }
 
@@ -208,6 +211,7 @@ mod tests {
         );
 
         let context = extract_response_debug_context(&TransportError::Http {
+            retry_after: None,
             status: StatusCode::UNAUTHORIZED,
             url: Some("https://chatgpt.com/backend-api/codex/models".to_string()),
             headers: Some(headers),
@@ -228,6 +232,7 @@ mod tests {
     #[test]
     fn telemetry_error_messages_omit_upstream_bodies() {
         let transport = TransportError::Http {
+            retry_after: None,
             status: StatusCode::UNAUTHORIZED,
             url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
             headers: None,
@@ -242,7 +247,7 @@ mod tests {
         assert_eq!(
             telemetry_api_error_message(&ApiError::RateLimitExceeded {
                 message: "private upstream diagnostic".to_string(),
-                delay: Some(std::time::Duration::from_secs(1)),
+                retry_after: None,
             }),
             "rate limit exceeded"
         );
@@ -254,6 +259,7 @@ mod tests {
         headers.insert("x-request-id", HeaderValue::from_static("req-429"));
         headers.insert("cf-ray", HeaderValue::from_static("ray-429"));
         let transport = TransportError::Http {
+            retry_after: None,
             status: StatusCode::TOO_MANY_REQUESTS,
             url: Some("https://user:secret@example.com/v1/responses?api_key=secret".to_string()),
             headers: Some(headers),
