@@ -7,8 +7,8 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build minimal Windows package
+  test:
+    name: Test transport and shared recovery
     runs-on: windows-2022
     timeout-minutes: 120
     defaults:
@@ -28,12 +28,26 @@ jobs:
 
       - name: Test stream configuration and transport behavior
         shell: pwsh
-        run: just test --release --target x86_64-pc-windows-msvc -p codex-api -p codex-model-provider-info --lib
+        run: just test --profile ci-test --target x86_64-pc-windows-msvc -p codex-api -p codex-model-provider-info --lib
 
       - name: Test shared WebSocket and compaction recovery
         shell: pwsh
         run: |
-          just test --release --target x86_64-pc-windows-msvc -p codex-core --lib responses_retry::tests::
+          just test --profile ci-test --target x86_64-pc-windows-msvc -p codex-core --lib responses_retry::tests::
+
+  build:
+    name: Build minimal Windows package
+    runs-on: windows-2022
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
 
       - name: Build codex.exe
         shell: bash
