@@ -682,7 +682,7 @@ impl ModelClient {
         let activated =
             websocket_enabled && !self.state.disable_websockets.swap(true, Ordering::Relaxed);
         if activated {
-            debug!("falling back to HTTP");
+            tracing::debug!("falling back to HTTP");
             session_telemetry.counter(
                 "codex.transport.fallback_to_http",
                 /*inc*/ 1,

@@ -30,14 +30,14 @@ jobs:
         shell: pwsh
         run: just test --release --target x86_64-pc-windows-msvc -p codex-api -p codex-model-provider-info --lib
 
-      - name: Build codex.exe
-        shell: bash
-        run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
-
       - name: Test shared WebSocket and compaction recovery
         shell: pwsh
         run: |
           just test --release --target x86_64-pc-windows-msvc -p codex-core --lib responses_retry::tests::
+
+      - name: Build codex.exe
+        shell: bash
+        run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
 
       - name: Verify WebSocket recovery against the built CLI
         shell: pwsh
