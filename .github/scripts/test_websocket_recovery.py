@@ -185,8 +185,11 @@ def command(binary, fixture):
         "compact_prompt": "COMPACT_FIXTURE",
         "model_auto_compact_token_limit": 20000 if fixture.scenario == "compact" else 200000,
     }
+    # This isolated process talks only to our loopback fixture, whose sole tool
+    # call prints a literal marker. Do not depend on machine sandbox setup or
+    # permit product-policy rejection to masquerade as a completed tool.
     args = [binary, "exec", "--ignore-user-config", "--ephemeral",
-            "--skip-git-repo-check", "--sandbox", "read-only", "--json", "-m", "gpt-5.4"]
+            "--skip-git-repo-check", "--sandbox", "danger-full-access", "--json", "-m", "gpt-5.4"]
     for key, value in config.items():
         args.extend(["-c", f"{key}={json.dumps(value)}"])
     args.append("Run the read-only marker command once if requested, then reply with WS_RECOVERY_OK.")
@@ -243,6 +246,8 @@ def verify(binary, scenario, output_dir=None):
             commands = [e for e in events if e.get("type") == "item.completed"
                         and e.get("item", {}).get("type") == "command_execution"]
             assert len(commands) == 1, "completed tool must not execute again during recovery"
+            assert commands[0]["item"]["exit_code"] == 0, "marker command must actually succeed"
+            assert "WS_TOOL_ONCE" in commands[0]["item"]["aggregated_output"]
         report = {"scenario": scenario, "passed": True,
                   "ws_failures": len(server.failures), "http_requests": len(http)}
         print(json.dumps(report), flush=True)
