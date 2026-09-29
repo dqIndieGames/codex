@@ -28,12 +28,12 @@ jobs:
 
       - name: Test stream configuration and transport behavior
         shell: pwsh
-        run: just test --profile ci-test --target x86_64-pc-windows-msvc -p codex-api -p codex-model-provider-info --lib
+        run: just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-api -p codex-model-provider-info --lib
 
       - name: Test shared WebSocket and compaction recovery
         shell: pwsh
         run: |
-          just test --profile ci-test --target x86_64-pc-windows-msvc -p codex-core --lib responses_retry::tests::
+          just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-core --lib responses_retry::tests::
 
   build:
     name: Build minimal Windows package
