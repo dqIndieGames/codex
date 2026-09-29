@@ -682,7 +682,7 @@ impl ModelClient {
         let activated =
             websocket_enabled && !self.state.disable_websockets.swap(true, Ordering::Relaxed);
         if activated {
-            warn!("falling back to HTTP");
+            debug!("falling back to HTTP");
             session_telemetry.counter(
                 "codex.transport.fallback_to_http",
                 /*inc*/ 1,
@@ -2204,8 +2204,8 @@ impl ModelClientSession {
 
     /// Permanently disables WebSockets for this Codex session and resets WebSocket state.
     ///
-    /// This is used after exhausting the provider retry budget, to force subsequent requests onto
-    /// the HTTP transport.
+    /// This is used after repeated transport failures or an exhausted provider retry budget,
+    /// to force subsequent requests onto the HTTP transport without changing sticky routing.
     ///
     /// Returns `true` if this call activated fallback, or `false` if fallback was already active.
     pub(crate) fn try_switch_fallback_transport(

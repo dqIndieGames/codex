@@ -854,10 +854,16 @@ async fn run_websocket_response_stream(
             Message::Binary(_) => {
                 return Err(ApiError::Stream("unexpected binary websocket event".into()));
             }
-            Message::Close(_) => {
-                return Err(ApiError::Stream(
-                    "websocket closed by server before response.completed".into(),
-                ));
+            Message::Close(frame) => {
+                // Close reasons are untrusted server text and may contain credentials.
+                // Preserve the protocol close code without exposing the raw reason.
+                let code = frame
+                    .as_ref()
+                    .map(|frame| u16::from(frame.code).to_string())
+                    .unwrap_or_else(|| "none".to_string());
+                return Err(ApiError::Stream(format!(
+                    "websocket closed by server before response.completed (close code: {code})"
+                )));
             }
             Message::Frame(_) => {}
             Message::Ping(_) | Message::Pong(_) => {}

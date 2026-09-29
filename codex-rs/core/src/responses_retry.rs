@@ -17,12 +17,15 @@ const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
     Sampling,
+    LocalCompaction,
     RemoteCompactionV2,
 }
 
 pub(crate) struct ResponsesStreamRetryState {
     pub(crate) retries: u64,
     connection_retries: u64,
+    websocket_failures: u64,
+    display_retries: u64,
 }
 
 impl Default for ResponsesStreamRetryState {
@@ -30,6 +33,8 @@ impl Default for ResponsesStreamRetryState {
         Self {
             retries: 0,
             connection_retries: 0,
+            websocket_failures: 0,
+            display_retries: 0,
         }
     }
 }
@@ -54,14 +59,49 @@ pub(crate) async fn handle_retryable_response_stream_error(
 ) -> Result<(), CodexErr> {
     let operation = match request {
         ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
+        ResponsesStreamRequest::LocalCompaction => RetryOperation::LocalCompaction,
         ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
     };
     let delay = fixed_retry_delay();
+    if matches!(
+        err.details(),
+        CodexErrorDetails::Interrupted
+            | CodexErrorDetails::TurnAborted
+            | CodexErrorDetails::SessionBudgetExceeded
+    ) {
+        return Err(err);
+    }
 
-    if turn_context
-        .config
-        .features
-        .enabled(Feature::UnboundedConnectionRetries)
+    // Transport recovery must not depend on an unbounded turn retry budget or
+    // the relay-only sticky routing policy. In particular, official ChatGPT
+    // connections must also escape a repeatedly broken WebSocket.
+    if matches!(
+        err.details(),
+        CodexErrorDetails::Stream(_)
+            | CodexErrorDetails::ConnectionFailed(_)
+            | CodexErrorDetails::ResponseStreamFailed(_)
+            | CodexErrorDetails::RequestTimeout
+            | CodexErrorDetails::RetryTimeBudgetInterrupted(_)
+    ) {
+        retry_state.websocket_failures = retry_state.websocket_failures.saturating_add(1);
+    } else {
+        retry_state.websocket_failures = 0;
+    }
+    let transport_fallback = max_retries > 0
+        && retry_state.websocket_failures == ROUTE_RECOVERY_RETRY_THRESHOLD
+        && client_session.try_switch_fallback_transport(
+            &turn_context.session_telemetry,
+            turn_context.model_info(),
+        );
+    if transport_fallback {
+        retry_state.retries = 0;
+    }
+
+    if max_retries > 0
+        && turn_context
+            .config
+            .features
+            .enabled(Feature::UnboundedConnectionRetries)
         && matches!(request, ResponsesStreamRequest::Sampling)
         && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_))
         && !turn_context.session_source.is_internal()
@@ -69,10 +109,18 @@ pub(crate) async fn handle_retryable_response_stream_error(
     {
         retry_state.connection_retries = retry_state.connection_retries.saturating_add(1);
         maybe_activate_route_recovery(client_session, retry_state.connection_retries);
-        log_retry(request, turn_context, &err, retry_state.connection_retries, max_retries, delay);
+        retry_state.display_retries = retry_state.display_retries.saturating_add(1);
+        log_retry(
+            request,
+            turn_context,
+            &err,
+            retry_state.display_retries,
+            max_retries,
+            delay,
+        );
         sess.notify_stream_error(
             turn_context,
-            retry_status_message(&err, retry_state.connection_retries),
+            retry_status_message(&err, retry_state.display_retries, transport_fallback),
             err,
         )
         .await;
@@ -81,24 +129,36 @@ pub(crate) async fn handle_retryable_response_stream_error(
         return Ok(());
     }
 
-    if retry_state.retries >= max_retries
+    let budget_fallback = max_retries > 0
+        && retry_state.retries >= max_retries
         && client_session.try_switch_fallback_transport(
             &turn_context.session_telemetry,
             turn_context.model_info(),
-        )
-    {
+        );
+    if budget_fallback {
         retry_state.retries = 0;
-        return Ok(());
     }
 
-    if retry_state.retries < max_retries {
-        retry_state.retries += 1;
+    if retry_state.retries < max_retries || budget_fallback {
+        retry_state.retries = retry_state.retries.saturating_add(1);
         let retry_count = retry_state.retries;
-        maybe_activate_route_recovery(client_session, retry_count);
-        log_retry(request, turn_context, &err, retry_count, max_retries, delay);
+        retry_state.display_retries = retry_state.display_retries.saturating_add(1);
+        maybe_activate_route_recovery(client_session, retry_state.display_retries);
+        log_retry(
+            request,
+            turn_context,
+            &err,
+            retry_state.display_retries,
+            max_retries,
+            delay,
+        );
         sess.notify_stream_error(
             turn_context,
-            retry_status_message(&err, retry_count),
+            retry_status_message(
+                &err,
+                retry_state.display_retries,
+                transport_fallback || budget_fallback,
+            ),
             err,
         )
         .await;
@@ -124,8 +184,10 @@ fn maybe_activate_route_recovery(client_session: &mut ModelClientSession, retry_
     }
 }
 
-fn retry_status_message(err: &CodexErr, retry_count: u64) -> String {
-    if err.is_retry_time_budget_interrupted() {
+fn retry_status_message(err: &CodexErr, retry_count: u64, switched_to_http: bool) -> String {
+    if switched_to_http {
+        format!("Reconnecting... {retry_count} (auto retry) - switching to HTTP")
+    } else if err.is_retry_time_budget_interrupted() {
         err.to_string()
     } else {
         format!("Reconnecting... {retry_count} (auto retry)")
@@ -151,14 +213,15 @@ fn log_retry(
                 "stream disconnected - retrying sampling request",
             );
         }
-        ResponsesStreamRequest::RemoteCompactionV2 => {
+        ResponsesStreamRequest::LocalCompaction | ResponsesStreamRequest::RemoteCompactionV2 => {
             debug!(
                 turn_id = %turn_context.sub_id,
                 retries,
                 max_retries,
                 compact_error = %err,
                 delay_ms = delay.as_millis() as u64,
-                "remote compaction v2 stream failed; retrying request after delay"
+                request = ?request,
+                "compaction stream failed; retrying request after delay"
             );
         }
     }

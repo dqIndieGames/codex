@@ -34,6 +34,14 @@ jobs:
         shell: bash
         run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
 
+      - name: Test shared WebSocket and compaction recovery
+        shell: pwsh
+        run: just test --release --target x86_64-pc-windows-msvc -p codex-core --lib responses_retry::tests::
+
+      - name: Verify WebSocket recovery against the built CLI
+        shell: pwsh
+        run: python ../.github/scripts/test_websocket_recovery.py target/x86_64-pc-windows-msvc/release/codex.exe
+
       - name: Verify delayed response headers against the built CLI
         shell: pwsh
         run: python ../.github/scripts/test_response_header_wait.py target/x86_64-pc-windows-msvc/release/codex.exe
