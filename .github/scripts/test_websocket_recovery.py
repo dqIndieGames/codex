@@ -224,7 +224,9 @@ def verify(binary, scenario, output_dir=None):
             assert http, "broken WS must automatically switch to HTTP"
         if scenario in ("close", "compact"):
             assert len(server.failures) == 3, "third failed WS request must trigger fallback"
-            assert all(b - a >= 4.5 for a, b in zip(server.failures, server.failures[1:])), +                "reconnect must retain the fixed five-second wait"
+            assert all(b - a >= 4.5 for a, b in zip(server.failures, server.failures[1:])), (
+                "reconnect must retain the fixed five-second wait"
+            )
             assert "fixture-private-reason" not in result.stdout + result.stderr
         if scenario == "handshake":
             attempts = [r for r in server.requests if r["transport"] == "handshake_eof"]
