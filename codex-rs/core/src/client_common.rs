@@ -5,6 +5,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_tools::ToolSpec;
@@ -72,8 +73,8 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
         match item {
             ResponseItem::Message { content, .. } => {
                 for content_item in content {
-                    if let ContentItem::InputImage { detail, .. } = content_item {
-                        normalize_image_detail(detail, model_info);
+                    if let ContentItem::InputImage { image, detail } = content_item {
+                        normalize_image_detail(image, detail, model_info);
                     }
                 }
             }
@@ -81,10 +82,10 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
             | ResponseItem::CustomToolCallOutput { output, .. } => {
                 if let Some(content) = output.content_items_mut() {
                     for content_item in content {
-                        if let FunctionCallOutputContentItem::InputImage { detail, .. } =
+                        if let FunctionCallOutputContentItem::InputImage { image, detail } =
                             content_item
                         {
-                            normalize_image_detail(detail, model_info);
+                            normalize_image_detail(image, detail, model_info);
                         }
                     }
                 }
@@ -108,7 +109,24 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
     }
 }
 
-fn normalize_image_detail(detail: &mut Option<ImageDetail>, model_info: &ModelInfo) {
+fn normalize_image_detail(
+    image: &mut ImageReference,
+    detail: &mut Option<ImageDetail>,
+    model_info: &ModelInfo,
+) {
+    // Overflow tiers change durable detail markers after media was prepared for
+    // history. Apply the new budget to the request copy before Lite drops detail.
+    // History/replay and source files retain their original bytes.
+    if *detail == Some(ImageDetail::High)
+        && let ImageReference::Inline { image_url } = image
+        && let Ok(Some(prepared)) = crate::image_preparation::resize_image(
+            image_url,
+            detail,
+            crate::image_preparation::ImagePreparationMode::DetailBased,
+        )
+    {
+        *image_url = prepared.into_data_url();
+    }
     if model_info.use_responses_lite {
         *detail = None;
     } else if *detail == Some(ImageDetail::Original) && !model_info.supports_image_detail_original {

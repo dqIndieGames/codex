@@ -270,3 +270,31 @@ fn serializes_flex_service_tier_when_set() {
         Some("flex")
     );
 }
+
+#[test_case::test_case(false; "responses")]
+#[test_case::test_case(true; "responses_lite")]
+fn request_high_image_budget_survives_history_preparation(use_lite: bool) {
+    use base64::Engine;
+    use image::GenericImageView;
+    let source = image::DynamicImage::new_rgb8(2048, 2048);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    source.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    let url = codex_utils_image::data_url_from_bytes("image/png", &bytes.into_inner());
+    let mut prompt = prompt_with_image_outputs(Some(ImageDetail::High));
+    let ResponseItem::Message { content, .. } = &mut prompt.input[0] else { panic!("message") };
+    let ContentItem::InputImage { image, .. } = &mut content[1] else { panic!("image") };
+    *image = ImageReference::Inline { image_url: url };
+    let history = prompt.input.clone();
+    let mut model = model_info_from_slug("gpt-5.5");
+    model.use_responses_lite = use_lite;
+    model.supports_image_detail_original = true;
+    let request = prompt.get_formatted_input_for_request(&model);
+    let ResponseItem::Message { content, .. } = &request[0] else { panic!("message") };
+    let ContentItem::InputImage { image: ImageReference::Inline { image_url }, detail } = &content[1] else { panic!("inline image") };
+    let data = base64::engine::general_purpose::STANDARD.decode(image_url.split_once(',').unwrap().1).unwrap();
+    let encoded = image::load_from_memory(&data).unwrap();
+    assert!(encoded.width() < source.width());
+    assert!(encoded.height() < source.height());
+    assert_eq!(*detail, if use_lite { None } else { Some(ImageDetail::High) });
+    assert_eq!(prompt.input, history);
+}

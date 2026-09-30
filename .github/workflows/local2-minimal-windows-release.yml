@@ -46,7 +46,7 @@ jobs:
         if: success() || failure()
         shell: pwsh
         run: |
-          just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-core --lib -E 'test(responses_retry::tests::) | test(context_overflow_image_ladder) | test(image_preparation::tests::) | test(images_shrunk) | test(provider_runtime_refresh) | test(build_latest_agent_spawn_config)'
+          just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-core --lib -E 'test(responses_retry::tests::) | test(context_overflow_image_ladder) | test(image_preparation::tests::) | test(client_common::tests::request_) | test(images_shrunk) | test(provider_runtime_refresh) | test(build_latest_agent_spawn_config)'
 
       - name: Test realtime WebSocket and WebRTC handshakes
         if: success() || failure()
