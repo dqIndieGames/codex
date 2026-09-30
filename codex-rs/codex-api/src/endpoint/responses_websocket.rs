@@ -715,7 +715,10 @@ async fn run_websocket_response_stream(
         let response = tokio::select! {
             response = tokio::time::timeout_at(progress_deadline, ws_stream.next()) => {
                 response.map_err(|_| ApiError::Stream(
-                    codex_protocol::error::retry_stream_idle_interrupted_message(seen_model_event).into()
+                    codex_protocol::error::retry_stream_idle_interrupted_message(
+                        seen_model_event,
+                        if seen_model_event { idle_timeout } else { first_event_timeout },
+                    )
                 ))
             }
             Ok(()) = &mut interrupt, if response_id.is_some() => {

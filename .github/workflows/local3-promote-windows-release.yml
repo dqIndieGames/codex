@@ -80,7 +80,7 @@ jobs:
       - name: Run downloaded codex.exe smoke and account isolation
         shell: pwsh
         env:
-          EXPECTED_VERSION: 0.159.1-local3
+          EXPECTED_VERSION: 0.159.3-local3
           ZIP_PATH: ${{ steps.archive.outputs.zip_path }}
         run: |
           $ErrorActionPreference = 'Stop'

@@ -278,32 +278,16 @@ fn retry_time_budget_interruption_stays_retryable_and_keeps_its_message() {
 }
 
 #[test]
-fn phase_watchdog_messages_match_local3_checklist() {
-    // Ground truth: docs/local3-custom-feature-checklist-2026-05-10.md item 3.
-    assert_eq!(
-        RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE,
-        "等待响应头超过 1 分钟，已自动中断，正在自动重试。"
-    );
-    assert_eq!(
-        RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE,
-        "等待首个模型事件超过 6.5 分钟，已自动中断，正在自动重试。"
-    );
-    assert_eq!(
-        RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE,
-        "已有输出后超过 1 分钟无新事件，已自动中断，正在自动重试。"
-    );
-    assert!(is_retry_watchdog_interrupted_message(
-        RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE
-    ));
-    assert!(is_retry_watchdog_interrupted_message(
-        RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE
-    ));
-    assert!(is_retry_watchdog_interrupted_message(
-        RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE
-    ));
-    assert!(!is_retry_watchdog_interrupted_message(
-        "本次网络请求连续 5 分钟无进展，已自动中断，正在自动重试。"
-    ));
+fn stream_timeout_messages_report_the_effective_configuration() {
+    // The displayed duration must follow the caller's effective timeout.
+    for timeout in [Duration::from_secs(300), Duration::from_secs(600), Duration::from_millis(250)] {
+        for seen_model_event in [false, true] {
+            let message = retry_stream_idle_interrupted_message(seen_model_event, timeout);
+            assert!(message.contains(&timeout.as_secs_f64().to_string()));
+            assert!(is_retry_watchdog_interrupted_message(&message));
+        }
+    }
+    assert!(!is_retry_watchdog_interrupted_message("ordinary transport failure"));
 }
 
 #[test]

@@ -850,19 +850,16 @@ refresh_interval_ms = 0
 }
 
 #[test]
-fn configured_stream_timeouts_respect_local3_stage_limits() {
-    // Product truth: docs/local3-custom-feature-checklist-2026-05-10.md, item 3.
-    // Explicit shorter limits survive; longer values cannot disable either watchdog.
+fn configured_stream_timeouts_preserve_provider_values() {
+    // Contract: checklist item 3 and the user's 2026-09-30 requirement.
+    // Each phase must preserve the independent configuration input, even above old caps.
     for millis in [5_000, 120_000, 300_000, 600_000] {
         let config = format!("name = \"test\"\nstream_idle_timeout_ms = {millis}");
         let provider: ModelProviderInfo = toml::from_str(&config).unwrap();
         let requested = Duration::from_millis(millis);
-        assert_eq!(provider.stream_idle_timeout(), requested.min(Duration::from_secs(60)));
-        assert_eq!(provider.first_model_event_timeout(), requested.min(Duration::from_secs(390)));
+        assert_eq!(provider.stream_idle_timeout(), requested);
+        assert_eq!(provider.first_model_event_timeout(), requested);
     }
-    let provider: ModelProviderInfo = toml::from_str("name = 'test'").unwrap();
-    assert_eq!(provider.stream_idle_timeout(), Duration::from_secs(60));
-    assert_eq!(provider.first_model_event_timeout(), Duration::from_secs(390));
 }
 
 #[test]

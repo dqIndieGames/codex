@@ -60,7 +60,7 @@ pub fn read_managed_residency_requirement() -> Option<ResidencyRequirement> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
 /// Cap for unary compact / realtime / WebRTC connect.
 pub const MAX_MODEL_NETWORK_ATTEMPT_TIMEOUT_MS: u64 = 390_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
@@ -213,9 +213,8 @@ pub struct ModelProviderInfo {
     pub request_max_retries: Option<u64>,
     /// Number of times to retry reconnecting a dropped streaming response before failing.
     pub stream_max_retries: Option<u64>,
-    /// Idle timeout in milliseconds after the first model event (phase 3).
-    /// Default 60s; an explicit shorter value can fire earlier. This does not
-    /// cap the 390s first-event thinking window.
+    /// Stream idle timeout in milliseconds, before and after the first model event.
+    /// Defaults to 300s; explicit values are used without a local3 hard cap.
     pub stream_idle_timeout_ms: Option<u64>,
     /// Maximum time (in milliseconds) to wait for a websocket connection attempt before treating
     /// it as failed.
@@ -595,20 +594,16 @@ other non-default provider fields are not supported"
         matches!(current_retry_mode(), RetryMode::Unbounded)
     }
 
-    /// local3 checklist: after model progress, each idle window is at most 60s.
+    /// Effective stream idle timeout, preserving the provider's explicit value.
     pub fn stream_idle_timeout(&self) -> Duration {
         self.stream_idle_timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
-            .min(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
     }
 
-    /// First model progress receives 390s unless the user explicitly selects less.
+    /// Both streaming phases use the configured stream idle timeout.
     pub fn first_model_event_timeout(&self) -> Duration {
-        self.stream_idle_timeout_ms
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_secs(390))
-            .min(Duration::from_secs(390))
+        self.stream_idle_timeout()
     }
 
     /// Effective timeout for websocket connect attempts.

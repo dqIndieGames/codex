@@ -585,7 +585,10 @@ async fn process_sse_with_treatment(
             Err(_) => {
                 let _ = tx_event
                     .send(Err(ApiError::Stream(
-                        codex_protocol::error::retry_stream_idle_interrupted_message(seen_model_event).to_string(),
+                        codex_protocol::error::retry_stream_idle_interrupted_message(
+                            seen_model_event,
+                            if seen_model_event { idle_timeout } else { first_event_timeout },
+                        ),
                     )))
                     .await;
                 return;
@@ -728,21 +731,22 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn first_model_event_watchdog_does_not_reset_for_metadata() {
-        // Product truth: local3 checklist item 3, 390s from opening the stream.
+        // Metadata must not reset the configured first-event window.
+        let timeout = Duration::from_secs(300);
         let stream = futures::stream::once(async {
-            tokio::time::sleep(Duration::from_secs(350)).await;
+            tokio::time::sleep(Duration::from_secs(260)).await;
             Ok(bytes::Bytes::from_static(b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"test\"}}\n\n"))
         }).chain(futures::stream::pending());
         let (tx, mut rx) = mpsc::channel(16);
         let started = tokio::time::Instant::now();
         tokio::spawn(process_sse_with_treatment(
-            Box::pin(stream), tx, Duration::from_secs(390), Duration::from_secs(60),
+            Box::pin(stream), tx, timeout, timeout,
             None, SafetyBufferingTreatment::default(),
         ));
         while let Some(event) = rx.recv().await {
             if let Err(ApiError::Stream(message)) = event {
-                assert_eq!(tokio::time::Instant::now() - started, Duration::from_secs(390));
-                assert_eq!(message, codex_protocol::error::RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE);
+                assert_eq!(tokio::time::Instant::now() - started, timeout);
+                assert!(message.contains(&timeout.as_secs_f64().to_string()));
                 return;
             }
         }
@@ -751,15 +755,16 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn model_progress_starts_a_fresh_post_output_idle_window() {
-        // Wait past 60s before output; each subsequent delta resets only the 60s idle window.
-        let stream = futures::stream::iter([350, 59, 59]).then(|seconds| async move {
+        // Progress refreshes the configured idle window; total duration is unbounded.
+        let timeout = Duration::from_secs(300);
+        let stream = futures::stream::iter([260, 299, 299]).then(|seconds| async move {
             tokio::time::sleep(Duration::from_secs(seconds)).await;
             Ok(bytes::Bytes::from_static(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n"))
         }).chain(futures::stream::pending());
         let (tx, mut rx) = mpsc::channel(16);
         let started = tokio::time::Instant::now();
         tokio::spawn(process_sse_with_treatment(
-            Box::pin(stream), tx, Duration::from_secs(390), Duration::from_secs(60),
+            Box::pin(stream), tx, timeout, timeout,
             None, SafetyBufferingTreatment::default(),
         ));
         let mut deltas = 0;
@@ -768,8 +773,8 @@ mod tests {
                 Ok(ResponseEvent::OutputTextDelta(_)) => deltas += 1,
                 Err(ApiError::Stream(message)) => {
                     assert_eq!(deltas, 3);
-                    assert_eq!(tokio::time::Instant::now() - started, Duration::from_secs(350 + 59 + 59 + 60));
-                    assert_eq!(message, codex_protocol::error::RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE);
+                    assert_eq!(tokio::time::Instant::now() - started, Duration::from_secs(260 + 299 + 299) + timeout);
+                    assert!(message.contains(&timeout.as_secs_f64().to_string()));
                     return;
                 }
                 _ => {}

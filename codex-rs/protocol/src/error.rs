@@ -31,30 +31,18 @@ use tokio::task::JoinError;
 
 pub type Result<T> = std::result::Result<T, CodexErr>;
 
-/// Waiting for HTTP response headers on one streaming attempt.
-pub const RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE: &str =
-    "等待响应头超过 1 分钟，已自动中断，正在自动重试。";
-/// Streaming is open but the first model event has not arrived.
-pub const RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE: &str =
-    "等待首个模型事件超过 6.5 分钟，已自动中断，正在自动重试。";
-/// At least one model event arrived, then the stream idled.
-pub const RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE: &str =
-    "已有输出后超过 1 分钟无新事件，已自动中断，正在自动重试。";
-
 pub fn is_retry_watchdog_interrupted_message(message: &str) -> bool {
-    matches!(
-        message,
-        RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE
-            | RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE
-            | RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE
-    )
+    (message.starts_with("等待首个模型事件超过 ") || message.starts_with("已有输出后超过 "))
+        && message.ends_with("已自动中断，正在自动重试。")
 }
 
-pub fn retry_stream_idle_interrupted_message(seen_model_event: bool) -> &'static str {
+/// Describes a streaming timeout using the provider's effective duration.
+pub fn retry_stream_idle_interrupted_message(seen_model_event: bool, timeout: Duration) -> String {
+    let seconds = timeout.as_secs_f64();
     if seen_model_event {
-        RETRY_POST_OUTPUT_IDLE_INTERRUPTED_MESSAGE
+        format!("已有输出后超过 {seconds} 秒无新事件，已自动中断，正在自动重试。")
     } else {
-        RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE
+        format!("等待首个模型事件超过 {seconds} 秒，已自动中断，正在自动重试。")
     }
 }
 

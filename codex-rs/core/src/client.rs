@@ -160,7 +160,6 @@ use codex_model_provider_info::WireApi;
 use codex_model_provider_info::is_chatgpt_codex_base_url;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
-use codex_protocol::error::RETRY_FIRST_EVENT_INTERRUPTED_MESSAGE;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::extract_response_debug_context_from_api_error;
 use codex_response_debug_context::telemetry_api_error_message;
@@ -3027,11 +3026,6 @@ impl ApiTelemetry {
 }
 
 impl RequestTelemetry for ApiTelemetry {
-    fn request_retry_timeout(&self) -> Option<Duration> {
-        (self.request_route_telemetry.endpoint == RESPONSES_ENDPOINT)
-            .then_some(Duration::from_secs(60))
-    }
-
     fn on_request(
         &self,
         attempt: u64,
@@ -3113,8 +3107,7 @@ impl RequestTelemetry for ApiTelemetry {
                 max_attempts,
                 status,
                 details: user_visible_transport_retry_details(error),
-                message_override: matches!(error, TransportError::Timeout)
-                    .then(|| codex_protocol::error::RETRY_HEADER_WAIT_INTERRUPTED_MESSAGE.to_string()),
+                message_override: None,
             });
         }
     }
