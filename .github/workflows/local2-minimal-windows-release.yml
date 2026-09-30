@@ -26,7 +26,9 @@ jobs:
             ~/.cargo/git
             codex-rs/target
           key: local3-159-windows-latest-test-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: local3-159-windows-latest-test-${{ hashFiles('codex-rs/Cargo.lock') }}-
+          restore-keys: |
+            local3-159-windows-latest-test-${{ hashFiles('codex-rs/Cargo.lock') }}-
+            local3-159-windows-latest-test-
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -80,7 +82,9 @@ jobs:
             ~/.cargo/git
             codex-rs/target
           key: local3-159-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: local3-159-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-
+          restore-keys: |
+            local3-159-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-
+            local3-159-windows-latest-build-
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:

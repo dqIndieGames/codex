@@ -103,6 +103,8 @@ pub fn user_visible_transport_retry_details(error: &TransportError) -> String {
         TransportError::Connection(_) => "Connection error, retrying".to_string(),
         TransportError::Network(_) => "Network error, retrying".to_string(),
         TransportError::Build(_) => "Request build error".to_string(),
+        TransportError::Policy(_) => "Request blocked by network policy".to_string(),
+        TransportError::ResponseTooLarge { .. } => "Response body too large, retrying".to_string(),
     }
 }
 
