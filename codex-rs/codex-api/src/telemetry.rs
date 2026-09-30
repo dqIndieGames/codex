@@ -305,6 +305,7 @@ mod tests {
                 async move {
                     send_count.fetch_add(1, Ordering::AcqRel);
                     Err(codex_client::TransportError::Http {
+                        retry_after: None,
                         status: StatusCode::SERVICE_UNAVAILABLE,
                         url: Some("https://old.example/v1/responses".to_string()),
                         headers: None,

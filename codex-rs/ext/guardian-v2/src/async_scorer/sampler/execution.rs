@@ -59,6 +59,7 @@ impl SamplingExecution {
             )
             | LunaSamplerError::Api(ApiError::Transport(
                 TransportError::RetryLimit
+                | TransportError::RetryInterrupted(_)
                 | TransportError::Timeout
                 | TransportError::Connection(_)
                 | TransportError::Network(_),
@@ -267,13 +268,13 @@ impl SamplingExecution {
                         // Later output cannot revise that decision; drain it only
                         // to preserve connection reuse and token accounting.
                         scored.store(true, Ordering::Relaxed);
-                        let mut remaining_events = stream.rx_event;
+                        let mut remaining_stream = stream;
                         let metrics = self.config.metrics.clone();
                         tokio::spawn(async move {
                             while let Some(event) = tokio::select! {
                                 biased;
                                 _ = &mut superseded => None,
-                                event = remaining_events.recv() => event,
+                                event = remaining_stream.rx_event.recv() => event,
                             } {
                                 match event {
                                     Ok(ResponseEvent::Completed { token_usage, .. }) => {

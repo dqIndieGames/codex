@@ -590,10 +590,11 @@ mod tests {
     fn provider_bearer_token_reports_command_auth_for_model_refresh() {
         let endpoint = OpenAiModelsEndpoint::new(
             ModelProviderInfo {
-                experimental_bearer_token: Some("provider-token".to_string()),
+                experimental_bearer_token: Some("provider-token".into()),
                 ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
             },
             /*auth_manager*/ None,
+            /*gateway_auth_manager*/ None,
         );
 
         assert!(endpoint.has_command_auth());

@@ -90,6 +90,7 @@ impl ProviderSource for Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_client::RetryOn;
     use http::StatusCode;
 
     #[test]
