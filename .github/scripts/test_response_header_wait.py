@@ -54,6 +54,8 @@ class DelayedResponses(BaseHTTPRequestHandler):
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     binary = str(Path(sys.argv[1]).resolve(strict=True))
     server = ThreadingHTTPServer(("127.0.0.1", 0), DelayedResponses)
     worker = threading.Thread(target=server.serve_forever, daemon=True)

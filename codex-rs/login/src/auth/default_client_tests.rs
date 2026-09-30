@@ -38,7 +38,6 @@ impl Write for TestLogSink {
     }
 }
 
-#[test]
 fn version_token(user_agent: &str) -> &str {
     user_agent
         .split_once('/')

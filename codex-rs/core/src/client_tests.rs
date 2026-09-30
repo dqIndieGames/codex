@@ -186,10 +186,12 @@ async fn workspace_routed_http_rejects_redirects_without_a_routing_header() {
         let resolver: Arc<dyn WorkspaceRoutingResolver> = Arc::new(Routing(routing_override));
         manager.set_workspace_routing_resolver(Arc::downgrade(&resolver));
         let mut client = test_model_client(SessionSource::Exec);
-        Arc::get_mut(&mut client.state).unwrap().provider = create_model_provider(
-            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
-            Some(manager),
-        );
+        client.state.provider.store(Arc::new(super::ModelProviderHandle {
+            provider: create_model_provider(
+                ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+                Some(manager),
+            ),
+        }));
         let mut setup = client
             .current_client_setup(super::ClientRouting::Workspace)
             .await
@@ -335,7 +337,9 @@ async fn client_setup_accepts_command_credential_refresh() {
         });
         let manager = provider.auth_manager().unwrap();
         let mut client = test_model_client(SessionSource::Exec);
-        Arc::get_mut(&mut client.state).unwrap().provider = provider;
+        client.state.provider.store(Arc::new(super::ModelProviderHandle {
+            provider,
+        }));
 
         let setup = client.current_client_setup(routing).await.unwrap();
         let mut headers = http::HeaderMap::new();
@@ -395,7 +399,9 @@ async fn client_setup_rebuilds_chatgpt_refresh_but_rejects_account_switches() {
             setup_calls: AtomicUsize::new(/*v*/ 0),
         });
         let mut client = test_model_client(SessionSource::Exec);
-        Arc::get_mut(&mut client.state).unwrap().provider = provider.clone();
+        client.state.provider.store(Arc::new(super::ModelProviderHandle {
+            provider: provider.clone(),
+        }));
         let result = client
             .current_client_setup(super::ClientRouting::ConfiguredProvider)
             .await;
@@ -598,13 +604,12 @@ async fn responses_request_includes_internal_metadata_for_provider_grant_or_firs
         (true, "http://provider.example/v1", true),
     ] {
         provider.include_internal_metadata = provider_grant;
-        Arc::get_mut(&mut client.state)
-            .expect("test client should have unique session state")
-            .provider = create_model_provider(provider.clone(), /*auth_manager*/ None);
+        client.state.provider.store(Arc::new(super::ModelProviderHandle {
+            provider: create_model_provider(provider.clone(), /*auth_manager*/ None),
+        }));
         api_provider.base_url = base_url.to_string();
         let include_internal = client
-            .state
-            .provider
+            .current_provider()
             .include_internal_metadata(&api_provider);
         for responses_lite in [false, true] {
             let mut model = test_model_info();
@@ -770,9 +775,9 @@ fn responses_request_preserves_result_metadata_above_previous_aggregate_budget()
         ModelProviderInfo::create_openai_provider(Some("https://api.openai.com/v1".to_string()));
     let api_provider = provider.to_api_provider(/*auth_mode*/ None)?;
     let mut client = test_model_client(SessionSource::Cli);
-    Arc::get_mut(&mut client.state)
-        .expect("test client should have unique session state")
-        .provider = create_model_provider(provider, /*auth_manager*/ None);
+    client.state.provider.store(Arc::new(super::ModelProviderHandle {
+        provider: create_model_provider(provider, /*auth_manager*/ None),
+    }));
     let responses_metadata = test_responses_metadata_for_client(
         &client,
         /*turn_id*/ None,
@@ -788,8 +793,7 @@ fn responses_request_preserves_result_metadata_above_previous_aggregate_budget()
         /*service_tier*/ None,
         &responses_metadata,
         client
-            .state
-            .provider
+            .current_provider()
             .include_internal_metadata(&api_provider),
     )?;
     let body = serde_json::to_value(&request)?;
@@ -817,9 +821,9 @@ fn websocket_incremental_reuse_tracks_raw_result_metadata() -> anyhow::Result<()
     };
     let mut api_provider = provider.to_api_provider(/*auth_mode*/ None)?;
     let mut client = test_model_client(SessionSource::Cli);
-    Arc::get_mut(&mut client.state)
-        .expect("test client should have unique session state")
-        .provider = create_model_provider(provider, /*auth_manager*/ None);
+    client.state.provider.store(Arc::new(super::ModelProviderHandle {
+        provider: create_model_provider(provider, /*auth_manager*/ None),
+    }));
     let responses_metadata = test_responses_metadata_for_client(
         &client,
         /*turn_id*/ None,
@@ -886,8 +890,7 @@ fn websocket_incremental_reuse_tracks_raw_result_metadata() -> anyhow::Result<()
         current_output.set_turn_id_if_missing("current-turn");
         api_provider.base_url = base_url.to_string();
         let include_internal = client
-            .state
-            .provider
+            .current_provider()
             .include_internal_metadata(&api_provider);
         let previous = client.build_responses_request(
             &Prompt {
