@@ -92,6 +92,11 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Configure official sandboxed V8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-pc-windows-msvc
+
       - name: Build codex.exe
         shell: bash
         run: cargo build --target x86_64-pc-windows-msvc --release --bin codex

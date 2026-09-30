@@ -4707,14 +4707,14 @@ async fn build_latest_agent_spawn_config_applies_pending_provider_runtime_refres
     tokio::fs::write(
         codex_home.join("config.toml"),
         r#"
-model_provider = "openai"
+model_provider = "local3-refresh-test"
 service_tier = "fast"
 force_service_tier_priority = false
 
 [features]
 fast_mode = true
 
-[model_providers.openai]
+[model_providers.local3-refresh-test]
 name = "OpenAI refreshed"
 base_url = "https://new-provider.example/v1"
 experimental_bearer_token = "new-token"
