@@ -2,28 +2,10 @@ pub use codex_client::Provider;
 pub use codex_client::RetryConfig;
 use codex_client::{RetryPolicy, TransportError};
 use http::StatusCode;
-use url::Url;
+pub use codex_client::is_chatgpt_codex_route;
 
 pub trait ProviderSource: Send + Sync {
     fn snapshot(&self) -> Provider;
-}
-
-pub fn is_chatgpt_codex_route(base_url: &str) -> bool {
-    let Ok(url) = Url::parse(base_url.trim()) else {
-        return false;
-    };
-    if url.scheme() != "https" && url.scheme() != "wss" {
-        return false;
-    }
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    if !host.eq_ignore_ascii_case("chatgpt.com")
-        && !host.to_ascii_lowercase().ends_with(".chatgpt.com")
-    {
-        return false;
-    }
-    url.path() == "/backend-api/codex" || url.path().starts_with("/backend-api/codex/")
 }
 
 pub fn responses_http_status_is_retryable(status: StatusCode) -> bool {

@@ -103,7 +103,7 @@ pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
 pub fn is_chatgpt_codex_base_url(base_url: &str) -> bool {
-    codex_api::is_chatgpt_codex_route(base_url)
+    codex_client::is_chatgpt_codex_route(base_url)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

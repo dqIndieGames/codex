@@ -946,9 +946,7 @@ impl RealtimeWebsocketClient {
             match connect_result {
                 Ok(connection) => return Ok(connection),
                 Err(err @ ApiError::Transport(TransportError::Policy(_))) => return Err(err),
-                Err(err)
-                    if retry_number < max_attempts
-                        && should_retry_realtime_connect_error(&err) =>
+                Err(_) if retry_number < max_attempts =>
                 {
                     retry_number = retry_number.saturating_add(1);
                     if route_recovery_allowed && retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0
@@ -1217,21 +1215,6 @@ impl RealtimeWebsocketClient {
         }
         Ok(connection)
     }
-}
-
-fn webrtc_sideband_session_ended(err: &ApiError) -> bool {
-    matches!(
-        err,
-        ApiError::Api { status, .. }
-            if matches!(*status, StatusCode::NOT_FOUND | StatusCode::GONE)
-    )
-}
-
-fn should_retry_realtime_connect_error(err: &ApiError) -> bool {
-    if webrtc_sideband_session_ended(err) {
-        return false;
-    }
-    true
 }
 
 fn realtime_retry_details(transport_label: &str, recovery_generation: u64) -> String {
@@ -1655,18 +1638,41 @@ mod tests {
         assert!(tail[0].text.ends_with("new"));
     }
 
-    #[test]
-    fn terminal_sideband_handshake_statuses_are_not_retryable() {
-        for status in [StatusCode::NOT_FOUND, StatusCode::GONE] {
-            assert!(webrtc_sideband_session_ended(&ApiError::Api {
-                status,
-                message: "session ended".to_string(),
-            }));
+    // Checklist sections 3 and 11: remote status does not bypass the configured
+    // retry budget. This checks attempts against the supplied budget, not source text.
+    #[tokio::test(start_paused = true)]
+    async fn remote_handshake_statuses_consume_the_same_retry_budget() {
+        for status in [StatusCode::NOT_FOUND, StatusCode::GONE, StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS, StatusCode::INTERNAL_SERVER_ERROR] {
+            for transport in ["websocket", "sideband"] {
+                let budget = 4;
+                let client = test_client(Provider {
+                    name: "test".to_string(),
+                    base_url: "http://127.0.0.1:1".to_string(),
+                    query_params: None,
+                    headers: HeaderMap::new(),
+                    retry: RetryConfig {
+                        max_attempts: budget,
+                        retry_402: false,
+                        retry_429: false,
+                        retry_5xx: false,
+                        retry_transport: false,
+                    },
+                    stream_idle_timeout: Duration::from_secs(60),
+                    first_model_event_timeout: Duration::from_secs(390),
+                });
+                let mut attempts = 0;
+                let result = client.connect_with_retry(transport, || {
+                    attempts += 1;
+                    async move { Err(ApiError::Api {
+                        status,
+                        message: "fixture remote error".to_string(),
+                    }) }
+                }).await;
+                assert!(result.is_err());
+                assert_eq!(attempts, budget + 1);
+            }
         }
-        assert!(!webrtc_sideband_session_ended(&ApiError::Api {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "retry".to_string(),
-        }));
     }
 
     enum TestRealtimeTermination {

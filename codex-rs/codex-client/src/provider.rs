@@ -7,6 +7,24 @@ use std::collections::HashMap;
 use std::time::Duration;
 use url::Url;
 
+pub fn is_chatgpt_codex_route(base_url: &str) -> bool {
+    let Ok(url) = Url::parse(base_url.trim()) else {
+        return false;
+    };
+    if url.scheme() != "https" && url.scheme() != "wss" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if !host.eq_ignore_ascii_case("chatgpt.com")
+        && !host.to_ascii_lowercase().ends_with(".chatgpt.com")
+    {
+        return false;
+    }
+    url.path() == "/backend-api/codex" || url.path().starts_with("/backend-api/codex/")
+}
+
 /// High-level retry configuration for a provider.
 ///
 /// This is converted into a `RetryPolicy` used by `codex-client` to drive

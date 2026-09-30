@@ -5,6 +5,7 @@ mod telemetry;
 
 pub use crate::provider::Provider;
 pub use crate::provider::RetryConfig;
+pub use crate::provider::is_chatgpt_codex_route;
 pub use crate::retry::RetryOn;
 pub use crate::retry::RetryOperation;
 pub use crate::retry::RetryPolicy;

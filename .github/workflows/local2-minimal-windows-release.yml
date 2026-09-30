@@ -45,6 +45,10 @@ jobs:
         run: |
           just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-core --lib -E 'test(responses_retry::tests::) | test(context_overflow_image_ladder) | test(images_shrunk) | test(provider_runtime_refresh) | test(build_latest_agent_spawn_config)'
 
+      - name: Test realtime WebSocket and WebRTC handshakes
+        shell: pwsh
+        run: just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-api --test realtime_websocket_e2e
+
       - name: Save Rust build cache
         if: always()
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7
