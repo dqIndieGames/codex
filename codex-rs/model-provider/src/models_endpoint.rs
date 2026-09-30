@@ -38,7 +38,6 @@ use tokio::time::timeout;
 use crate::auth::ResolvedProviderAuth;
 use crate::auth::agent_identity_telemetry;
 use crate::auth::resolve_provider_auth_with_manager;
-use crate::provider::enforce_managed_residency;
 use crate::combined_auth::compose_auth;
 
 const MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -122,7 +121,6 @@ impl OpenAiModelsEndpoint {
             // Codex metadata is served by the Codex backend, not the public /v1/models API.
             api_provider.base_url = CHATGPT_CODEX_BASE_URL.to_string();
         }
-        enforce_managed_residency(&mut api_provider);
         let resolved = compose_auth(
             &self.provider_info,
             self.gateway_auth_manager.as_ref(),

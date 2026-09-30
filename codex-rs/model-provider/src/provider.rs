@@ -240,11 +240,8 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
             } else {
                 self.auth().await
             };
-            let mut provider = self
-                .info()
-                .to_api_provider(auth.as_ref().map(CodexAuth::auth_mode))?;
-            enforce_managed_residency(&mut provider);
-            Ok(provider)
+            self.info()
+                .to_api_provider(auth.as_ref().map(CodexAuth::auth_mode))
         })
     }
 
