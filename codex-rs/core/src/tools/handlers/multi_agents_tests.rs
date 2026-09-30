@@ -4697,7 +4697,7 @@ async fn build_latest_agent_spawn_config_applies_pending_provider_runtime_refres
             |_| {},
         )
         .await;
-    let mut turn = (*turn).clone();
+    let mut turn = Arc::try_unwrap(turn).expect("unshared test turn context");
     let old_provider = turn.provider.info();
     assert_ne!(
         old_provider.base_url.as_deref(),
