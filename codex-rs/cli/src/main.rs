@@ -1025,6 +1025,17 @@ fn stage_str(stage: Stage) -> &'static str {
 
 fn main() -> anyhow::Result<()> {
     codex_build_info::initialize!();
+    // The minimal local3 package ships one executable. Run the official host in
+    // a separate stdio child, preserving its normal process isolation.
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(codex_code_mode::BUNDLED_HOST_ARG))
+    {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(codex_code_mode_host::run_stdio());
+    }
+    codex_code_mode::register_bundled_host(std::env::current_exe()?);
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         // Keep the CLI dispatcher off the runtime's stack while the TUI rebuilds a thread.

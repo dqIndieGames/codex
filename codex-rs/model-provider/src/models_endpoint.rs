@@ -586,7 +586,12 @@ mod tests {
     }
 
     #[test]
-    fn provider_bearer_token_reports_command_auth_for_model_refresh() {
+    fn provider_bearer_token_does_not_change_command_auth_discovery_gate() {
+        let without_token = OpenAiModelsEndpoint::new(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            /*auth_manager*/ None,
+            /*gateway_auth_manager*/ None,
+        );
         let endpoint = OpenAiModelsEndpoint::new(
             ModelProviderInfo {
                 experimental_bearer_token: Some("provider-token".into()),
@@ -596,7 +601,9 @@ mod tests {
             /*gateway_auth_manager*/ None,
         );
 
-        assert!(endpoint.has_command_auth());
+        // A static token changes request credentials, not the opt-in discovery
+        // gate reserved for an explicitly configured auth command.
+        assert_eq!(endpoint.has_command_auth(), without_token.has_command_auth());
     }
 
     #[tokio::test]

@@ -4688,7 +4688,16 @@ async fn build_agent_spawn_config_uses_captured_step_settings_and_turn_context_v
 
 #[tokio::test]
 async fn build_latest_agent_spawn_config_applies_pending_provider_runtime_refresh() {
-    let (session, mut turn) = make_session_and_context().await;
+    let home = tempfile::tempdir().expect("create live test home");
+    let (session, turn, _rx) =
+        crate::session::tests::make_session_and_context_with_auth_config_home_and_rx(
+            CodexAuth::from_api_key("Test API Key"),
+            Vec::new(),
+            home.path(),
+            |_| {},
+        )
+        .await;
+    let mut turn = (*turn).clone();
     let old_provider = turn.provider.info();
     assert_ne!(
         old_provider.base_url.as_deref(),

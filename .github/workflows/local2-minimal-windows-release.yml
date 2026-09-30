@@ -100,6 +100,10 @@ jobs:
         shell: pwsh
         run: python ../.github/scripts/test_websocket_recovery.py target/x86_64-pc-windows-msvc/release/codex.exe
 
+      - name: Verify bundled Code Mode host and nested tool
+        shell: pwsh
+        run: python ../.github/scripts/test_bundled_code_mode.py target/x86_64-pc-windows-msvc/release/codex.exe
+
       - name: Verify delayed response headers against the built CLI
         shell: pwsh
         run: python ../.github/scripts/test_response_header_wait.py target/x86_64-pc-windows-msvc/release/codex.exe

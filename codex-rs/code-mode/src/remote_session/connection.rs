@@ -156,6 +156,9 @@ impl Drop for CallerCancellation {
 impl Connection {
     pub(super) async fn spawn(host_program: &Path) -> Result<Self, ConnectionError> {
         let mut command = Command::new(host_program);
+        if super::BUNDLED_HOST_PROGRAM.get().map(PathBuf::as_path) == Some(host_program) {
+            command.arg(super::BUNDLED_HOST_ARG);
+        }
         #[cfg(unix)]
         command.process_group(0);
         #[cfg(windows)]
