@@ -14,6 +14,12 @@ pub(crate) fn identity(
     provider_info: &ModelProviderInfo,
     auth: Option<&CodexAuth>,
 ) -> CoreResult<String> {
+    // Provider credentials must isolate routing and cache identity from global login.
+    let auth = if provider_info.experimental_bearer_token_is_non_empty() {
+        None
+    } else {
+        auth
+    };
     let mut api_provider = provider_info.to_api_provider(auth.map(CodexAuth::auth_mode))?;
     let mut digest = Sha256::new();
     // Length-prefix every field to avoid ambiguity between adjacent values.

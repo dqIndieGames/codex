@@ -387,6 +387,15 @@ pub(crate) fn resize_image(
         return Ok(None);
     }
 
+    // Checklist #18: explicit high (including overflow ladder downgrades) must
+    // survive preparation even when the model uses the unified image budget.
+    let mode = if mode == ImagePreparationMode::UnifiedBudget
+        && matches!(*detail, Some(ImageDetail::High))
+    {
+        ImagePreparationMode::DetailBased
+    } else {
+        mode
+    };
     let (effective_detail, image_mode) = match mode {
         ImagePreparationMode::UnifiedBudget => (
             ImageDetailSetting::Original,

@@ -101,3 +101,20 @@ fn cache_identity_tracks_catalog_url() {
     assert_ne!(bundled, first);
     assert_ne!(first, second);
 }
+
+#[test]
+fn provider_bearer_catalog_identity_ignores_global_login() {
+    // Checklist #16: provider token owns auth and routing, independent of global login.
+    let mut provider = ModelProviderInfo::create_openai_provider(None);
+    provider.experimental_bearer_token = Some("provider-token".into());
+    let isolated = identity(&provider, None).unwrap();
+    for auth in [
+        CodexAuth::from_api_key("global-key"),
+        chatgpt_auth("one@example.com", "user", "account", "team", "first"),
+        chatgpt_auth("two@example.com", "other", "other-account", "plus", "second"),
+    ] {
+        assert_eq!(identity(&provider, Some(&auth)).unwrap(), isolated);
+    }
+    provider.experimental_bearer_token = Some("different-provider-token".into());
+    assert_ne!(identity(&provider, None).unwrap(), isolated);
+}

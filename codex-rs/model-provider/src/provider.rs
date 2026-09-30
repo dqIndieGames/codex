@@ -578,21 +578,26 @@ impl ModelProvider for ConfiguredModelProvider {
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
+        let auth_manager = if self.info.experimental_bearer_token_is_non_empty() {
+            None
+        } else {
+            self.auth_manager.clone()
+        };
         match config_model_catalog {
             Some(model_catalog) => Arc::new(StaticModelsManager::new(
-                self.auth_manager.clone(),
+                auth_manager.clone(),
                 model_catalog,
             )),
             None => {
                 let endpoint = Arc::new(OpenAiModelsEndpoint::new(
                     self.info.clone(),
-                    self.auth_manager.clone(),
+                    auth_manager.clone(),
                     self.gateway_auth_manager.clone(),
                 ));
                 Arc::new(OpenAiModelsManager::new(
                     codex_home,
                     endpoint,
-                    self.auth_manager.clone(),
+                    auth_manager.clone(),
                 ))
             }
         }
@@ -602,20 +607,25 @@ impl ModelProvider for ConfiguredModelProvider {
         &self,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
+        let auth_manager = if self.info.experimental_bearer_token_is_non_empty() {
+            None
+        } else {
+            self.auth_manager.clone()
+        };
         match config_model_catalog {
             Some(model_catalog) => Arc::new(StaticModelsManager::new(
-                self.auth_manager.clone(),
+                auth_manager.clone(),
                 model_catalog,
             )),
             None => {
                 let endpoint = Arc::new(OpenAiModelsEndpoint::new(
                     self.info.clone(),
-                    self.auth_manager.clone(),
+                    auth_manager.clone(),
                     self.gateway_auth_manager.clone(),
                 ));
                 Arc::new(OpenAiModelsManager::new_without_cache(
                     endpoint,
-                    self.auth_manager.clone(),
+                    auth_manager.clone(),
                 ))
             }
         }

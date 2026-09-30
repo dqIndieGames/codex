@@ -562,7 +562,7 @@ async fn responses_request_includes_internal_metadata_for_provider_grant_or_firs
         .expect("test client should have unique session state")
         .provider
         .store(Arc::new(super::ModelProviderHandle {
-            provider: create_model_provider(provider, /*auth_manager*/ None),
+            provider: create_model_provider(provider.clone(), /*auth_manager*/ None),
         }));
     let output = output_with_tool_result_metadata(ToolResultMetadata::new(&json!({
         "private": { "resource": "raw-result-metadata" },

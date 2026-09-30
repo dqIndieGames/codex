@@ -12,7 +12,7 @@ fn map_api_error_maps_server_overloaded() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn map_api_error_preserves_retry_delay() {
+async fn map_api_error_preserves_server_advice_independently_of_fixed_retry() {
     let retry_delay = std::time::Duration::from_secs(17);
     let retry_after = RetryAfter::from_delay(retry_delay).expect("retry advice");
     for (error, expected_code, expected_message) in [
@@ -34,10 +34,13 @@ async fn map_api_error_preserves_retry_delay() {
         ),
     ] {
         let err = map_api_error(error);
+        // Checklist #3: advice is retained, but never changes local retry policy.
+        assert!(err.is_retryable());
+        assert_eq!(err.retry_delay(1), err.retry_delay(99));
+        assert_ne!(err.retry_delay(1), Some(retry_delay));
         assert_eq!(
             (
                 err.to_codex_protocol_error(),
-                err.retry_delay(/*retry_count*/ 1),
                 err.retry_after(),
                 err.server_retry_delay(),
                 err.http_status_code_value(),
@@ -45,7 +48,6 @@ async fn map_api_error_preserves_retry_delay() {
             ),
             (
                 expected_code,
-                Some(retry_delay),
                 Some(retry_after),
                 Some(retry_delay),
                 None,
@@ -57,19 +59,17 @@ async fn map_api_error_preserves_retry_delay() {
 
 #[test]
 fn map_api_error_distinguishes_capacity_from_slow_down() {
-    for (code, expected, retryable) in [
+    for (code, expected) in [
         (
             "server_is_overloaded",
             CodexErrorInfo::ServerOverloaded,
-            false,
         ),
-        ("slow_down", CodexErrorInfo::RateLimitExceeded, true),
+        ("slow_down", CodexErrorInfo::RateLimitExceeded),
         (
             "unknown_error",
             CodexErrorInfo::HttpConnectionFailed {
                 http_status_code: Some(503),
             },
-            true,
         ),
     ] {
         let err = map_api_error(ApiError::Transport(TransportError::Http {
@@ -81,18 +81,14 @@ fn map_api_error_distinguishes_capacity_from_slow_down() {
                 serde_json::json!({"error": {"code": code, "message": "retry later"}}).to_string(),
             ),
         }));
-        assert_eq!(
-            (
-                err.to_codex_protocol_error(),
-                err.retry_delay(/*retry_count*/ 1).is_some()
-            ),
-            (expected, retryable)
-        );
+        assert_eq!(err.to_codex_protocol_error(), expected);
+        // Checklist #3: capacity and slow-down both remain retryable.
+        assert!(err.is_retryable());
     }
 }
 
 #[test]
-fn map_responses_stream_api_error_preserves_typed_overloaded_503_body() {
+fn map_responses_stream_api_error_preserves_typed_503_classification() {
     for code in ["server_is_overloaded", "slow_down"] {
         let body = serde_json::json!({
             "error": {
@@ -100,17 +96,18 @@ fn map_responses_stream_api_error_preserves_typed_overloaded_503_body() {
             }
         })
         .to_string();
-        let err = map_responses_stream_api_error(ApiError::Transport(TransportError::Http {
+        let make_error = || ApiError::Transport(TransportError::Http {
             retry_after: None,
             status: http::StatusCode::SERVICE_UNAVAILABLE,
             url: Some("ws://example.com/v1/responses".to_string()),
             headers: None,
-            body: Some(body),
-        }));
-
-        assert!(
-            matches!(err.details(), CodexErrorDetails::ServerOverloaded),
-            "expected typed overload error for {code}, got {err:?}"
+            body: Some(body.clone()),
+        });
+        let err = map_responses_stream_api_error(make_error());
+        // Both entry points preserve the service's capacity/rate-limit distinction.
+        assert_eq!(
+            err.to_codex_protocol_error(),
+            map_api_error(make_error()).to_codex_protocol_error()
         );
         assert!(err.is_retryable(), "typed overload must remain retryable");
     }
@@ -318,7 +315,8 @@ fn map_api_error_preserves_typed_errors() {
         let err = map_api_error(error);
         assert_eq!(err.to_codex_protocol_error(), expected_info);
         assert_eq!(err.to_string(), message);
-        assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
+        assert!(err.is_retryable());
+        assert_eq!(err.server_retry_delay(), None);
     }
 }
 
@@ -364,7 +362,8 @@ fn map_api_error_maps_http_and_wrapped_websocket_typed_errors() {
 
                 assert_eq!(err.to_string(), expected);
                 assert_eq!(err.to_codex_protocol_error(), expected_info);
-                assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
+                assert!(err.is_retryable());
+                assert_eq!(err.server_retry_delay(), None);
             }
         }
     }
@@ -406,7 +405,8 @@ fn assert_misalignment_policy_violation_from_http_body(status: http::StatusCode)
     };
     assert_eq!(message, "This request violated the misalignment policy.");
     assert_eq!(misalignment, &None);
-    assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
+    assert!(err.is_retryable());
+    assert_eq!(err.server_retry_delay(), None);
 }
 
 #[test]
@@ -449,7 +449,8 @@ fn map_api_error_preserves_misalignment_details_from_403_body() {
             }),
         })
     );
-    assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
+    assert!(err.is_retryable());
+    assert_eq!(err.server_retry_delay(), None);
 }
 
 #[test]
@@ -497,7 +498,8 @@ fn map_api_error_preserves_misalignment_details_from_wrapped_websocket_error() {
             }),
         })
     );
-    assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
+    assert!(err.is_retryable());
+    assert_eq!(err.server_retry_delay(), None);
 }
 
 #[test]

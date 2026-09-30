@@ -639,3 +639,19 @@ fn preparation_errors_use_bounded_actionable_placeholders() {
         assert_eq!(error.placeholder(), expected);
     }
 }
+
+#[test]
+fn unified_preparation_preserves_context_overflow_high_downgrade() {
+    // Checklist #18: the next wire image must retain the ladder's lower detail.
+    let (url, _) = png_data_url(2048, 2048);
+    let mut original = Some(ImageDetail::Original);
+    let original_image = resize_image(&url, &mut original, ImagePreparationMode::UnifiedBudget)
+        .unwrap().unwrap();
+    let mut downgraded = Some(ImageDetail::High);
+    let smaller = resize_image(&url, &mut downgraded, ImagePreparationMode::UnifiedBudget)
+        .unwrap().unwrap();
+    assert_eq!(downgraded, Some(ImageDetail::High));
+    assert!(smaller.encoded.width < original_image.encoded.width);
+    assert!(smaller.encoded.height < original_image.encoded.height);
+    assert_eq!(original, Some(ImageDetail::Original));
+}
