@@ -2613,6 +2613,7 @@ dependencies = [
  "codex-agent-identity",
  "codex-async-utils",
  "codex-backend-client",
+ "codex-client",
  "codex-config",
  "codex-core",
  "codex-http-client",

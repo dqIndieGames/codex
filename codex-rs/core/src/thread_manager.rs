@@ -1035,8 +1035,8 @@ impl ThreadManager {
                 .iter()
                 .filter_map(|(thread_id, thread)| {
                     thread
-                        .session_configured()
-                        .parent_thread_id
+                        .startup_metadata()
+                        .parent_thread_id()
                         .map(|parent_thread_id| (*thread_id, parent_thread_id))
                 })
                 .collect::<HashMap<_, _>>();
@@ -1047,7 +1047,7 @@ impl ThreadManager {
                         || matches_parented_subagent_scope(
                             scope,
                             &thread.session_source,
-                            parent_thread_ids.get(thread_id).copied(),
+                            parent_thread_ids.get(*thread_id).copied(),
                             &root_sources,
                             &parent_thread_ids,
                         )

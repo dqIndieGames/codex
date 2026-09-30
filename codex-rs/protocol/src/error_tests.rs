@@ -203,6 +203,7 @@ fn server_overloaded_maps_to_protocol() {
 #[test]
 fn remote_model_request_errors_are_retryable() {
     let usage_limit = UsageLimitReachedError {
+        limit_window_minutes: None,
         plan_type: None,
         resets_at: None,
         rate_limits: None,
@@ -215,8 +216,7 @@ fn remote_model_request_errors_are_retryable() {
         .unwrap();
     let source = HttpResponse::from(response)
         .error_for_status_ref()
-        .unwrap_err()
-        .with_url("http://example.com".parse().unwrap());
+        .unwrap_err();
 
     let errors = [
         CodexErr::ContextWindowExceeded,

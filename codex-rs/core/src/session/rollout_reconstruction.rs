@@ -214,6 +214,7 @@ impl Session {
                 | RolloutItem::TokenUsageRecord(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::Compacted(_)
+                | RolloutItem::ImagesShrunk(_)
                 | RolloutItem::EventMsg(_) => None,
             })
             .or_else(|| resume_metadata.and_then(|metadata| metadata.last_started_turn_id.clone()));

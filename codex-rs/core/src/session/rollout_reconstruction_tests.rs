@@ -261,7 +261,7 @@ fn user_image_message(image_url: &str, detail: ImageDetail) -> ResponseItem {
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputImage {
-            image_url: image_url.to_string(),
+            image: codex_protocol::models::ImageReference::Inline { image_url: image_url.to_string() },
             detail: Some(detail),
         }],
         phase: None,

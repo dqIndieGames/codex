@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use codex_protocol::protocol::Event;
 
 use crate::client::ModelClientSession;
 use crate::client::RequestRetryEvent;
@@ -1766,6 +1767,7 @@ async fn run_sampling_request(
                 SamplingRequestResult {
                     needs_follow_up: true,
                     last_agent_message: None,
+                    executed_tools: false,
                 },
                 std::mem::take(original_input),
             ));
@@ -2804,6 +2806,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up: true,
                     last_agent_message,
+                    executed_tools,
                 });
             }
             Err(_) => break Err(CodexErr::TurnAborted),

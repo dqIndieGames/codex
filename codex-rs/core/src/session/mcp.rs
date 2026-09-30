@@ -148,18 +148,20 @@ impl Session {
             .project_selected_environment_mcp_servers(config, &environments, mcp_projection)
             .await
             .config;
-        let runtime_context = self.mcp_runtime_context(&environments, &host_fallback_cwd);
+        let runtime_context = self.mcp_runtime_context(config, &environments, &host_fallback_cwd);
         (mcp_config, runtime_context)
     }
 
     pub(crate) async fn current_mcp_runtime_context(&self) -> McpRuntimeContext {
+        let config = self.get_config().await;
         let host_fallback_cwd = self.state.lock().await.session_configuration.cwd().clone();
         let environments = self.services.turn_environments.snapshot().await;
-        self.mcp_runtime_context(&environments, &host_fallback_cwd)
+        self.mcp_runtime_context(&config, &environments, &host_fallback_cwd)
     }
 
     fn mcp_runtime_context(
         &self,
+        config: &Config,
         environments: &TurnEnvironmentSnapshot,
         host_fallback_cwd: &std::path::Path,
     ) -> McpRuntimeContext {

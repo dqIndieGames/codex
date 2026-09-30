@@ -1262,7 +1262,7 @@ impl RealtimeConversationManager {
     pub(crate) async fn shutdown_for_provider_runtime_refresh(&self) -> bool {
         let state = {
             let mut guard = self.state.lock().await;
-            guard.take()
+            guard.conversation.take()
         };
 
         if let Some(state) = state {

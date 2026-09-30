@@ -21,6 +21,7 @@
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 
 const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
@@ -96,8 +97,8 @@ fn tiny_png_data_url() -> String {
     format!("data:image/png;base64,{TINY_PNG_BASE64}")
 }
 
-fn is_placeholder_url(image_url: &str) -> bool {
-    image_url == tiny_png_data_url()
+fn is_placeholder_image(image: &ImageReference) -> bool {
+    matches!(image, ImageReference::Inline { image_url } if image_url == &tiny_png_data_url())
 }
 
 fn collect_slots(items: &[ResponseItem]) -> Vec<ImageSlot> {
@@ -142,7 +143,7 @@ fn collect_slots(items: &[ResponseItem]) -> Vec<ImageSlot> {
 fn image_parts_mut<'a>(
     items: &'a mut [ResponseItem],
     slot: ImageSlot,
-) -> Option<(&'a mut String, &'a mut Option<ImageDetail>)> {
+) -> Option<(&'a mut ImageReference, &'a mut Option<ImageDetail>)> {
     let item = items.get_mut(slot.item_idx)?;
     if slot.in_tool_output {
         let content = match item {
@@ -151,8 +152,8 @@ fn image_parts_mut<'a>(
             _ => return None,
         };
         match content.get_mut(slot.content_idx)? {
-            FunctionCallOutputContentItem::InputImage { image_url, detail } => {
-                Some((image_url, detail))
+            FunctionCallOutputContentItem::InputImage { image, detail } => {
+                Some((image, detail))
             }
             _ => None,
         }
@@ -162,7 +163,7 @@ fn image_parts_mut<'a>(
             _ => return None,
         };
         match content.get_mut(slot.content_idx)? {
-            ContentItem::InputImage { image_url, detail } => Some((image_url, detail)),
+            ContentItem::InputImage { image, detail } => Some((image, detail)),
             _ => None,
         }
     }
@@ -180,10 +181,10 @@ fn downgrade_except_last(items: &mut [ResponseItem], keep_last: usize) -> usize 
     let cut = slots.len() - keep_last;
     let mut changed = 0;
     for slot in slots.into_iter().take(cut) {
-        let Some((image_url, detail)) = image_parts_mut(items, slot) else {
+        let Some((image, detail)) = image_parts_mut(items, slot) else {
             continue;
         };
-        if is_placeholder_url(image_url) {
+        if is_placeholder_image(image) {
             continue;
         }
         if !is_original_detail(*detail) {
@@ -204,13 +205,13 @@ fn placeholder_except_last(items: &mut [ResponseItem], keep_last: usize) -> usiz
     let placeholder = tiny_png_data_url();
     let mut changed = 0;
     for slot in slots.into_iter().take(cut) {
-        let Some((image_url, detail)) = image_parts_mut(items, slot) else {
+        let Some((image, detail)) = image_parts_mut(items, slot) else {
             continue;
         };
-        if is_placeholder_url(image_url) {
+        if is_placeholder_image(image) {
             continue;
         }
-        *image_url = placeholder.clone();
+        *image = ImageReference::Inline { image_url: placeholder.clone() };
         *detail = Some(ImageDetail::High);
         changed += 1;
     }
@@ -226,14 +227,14 @@ mod tests {
 
     fn original_image(url: &str) -> ContentItem {
         ContentItem::InputImage {
-            image_url: url.to_string(),
+            image: ImageReference::Inline { image_url: url.to_string() },
             detail: Some(ImageDetail::Original),
         }
     }
 
     fn high_image(url: &str) -> ContentItem {
         ContentItem::InputImage {
-            image_url: url.to_string(),
+            image: ImageReference::Inline { image_url: url.to_string() },
             detail: Some(ImageDetail::High),
         }
     }
@@ -274,14 +275,14 @@ mod tests {
                 let item = &items[slot.item_idx];
                 match item {
                     ResponseItem::Message { content, .. } => match &content[slot.content_idx] {
-                        ContentItem::InputImage { image_url, .. } => image_url.clone(),
+                        ContentItem::InputImage { image: ImageReference::Inline { image_url }, .. } => image_url.clone(),
                         _ => String::new(),
                     },
                     ResponseItem::FunctionCallOutput { output, .. }
                     | ResponseItem::CustomToolCallOutput { output, .. } => output
                         .content_items()
                         .and_then(|content| match &content[slot.content_idx] {
-                            FunctionCallOutputContentItem::InputImage { image_url, .. } => {
+                            FunctionCallOutputContentItem::InputImage { image: ImageReference::Inline { image_url }, .. } => {
                                 Some(image_url.clone())
                             }
                             _ => None,
@@ -396,7 +397,7 @@ mod tests {
             output: FunctionCallOutputPayload {
                 body: FunctionCallOutputBody::ContentItems(vec![
                     FunctionCallOutputContentItem::InputImage {
-                        image_url: "tool-a".to_string(),
+                        image: ImageReference::Inline { image_url: "tool-a".to_string() },
                         detail: Some(ImageDetail::Original),
                     },
                 ]),
@@ -416,7 +417,7 @@ mod tests {
             output: FunctionCallOutputPayload {
                 body: FunctionCallOutputBody::ContentItems(vec![
                     FunctionCallOutputContentItem::InputImage {
-                        image_url: "tool-b".to_string(),
+                        image: ImageReference::Inline { image_url: "tool-b".to_string() },
                         detail: Some(ImageDetail::Original),
                     },
                 ]),

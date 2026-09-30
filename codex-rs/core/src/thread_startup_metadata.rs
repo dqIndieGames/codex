@@ -82,6 +82,10 @@ impl From<&SessionConfiguredEvent> for ThreadStartupMetadata {
 }
 
 impl ThreadStartupMetadata {
+    pub(crate) fn parent_thread_id(&self) -> Option<ThreadId> {
+        self.parent_thread_id
+    }
+
     pub(crate) fn to_session_configured_event(
         &self,
         initial_messages: Option<Vec<EventMsg>>,

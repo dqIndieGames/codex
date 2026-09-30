@@ -1880,10 +1880,6 @@ impl ModelClientSession {
                 include_internal,
             )?;
             self.apply_route_recovery_to_request(&mut request);
-            ModelClient::filter_tool_result_metadata(
-                &mut request.input,
-                &client_setup.api_provider,
-            );
             self.client.set_guardian_metadata(
                 &mut request.client_metadata,
                 responses_metadata.parent_response_id.as_deref(),
@@ -2070,10 +2066,6 @@ impl ModelClientSession {
                 include_internal,
             )?;
             self.apply_route_recovery_to_request(&mut request);
-            ModelClient::filter_tool_result_metadata(
-                &mut request.input,
-                &client_setup.api_provider,
-            );
             if is_guardian_reviewer(&responses_headers) {
                 request.service_tier = None;
             }
