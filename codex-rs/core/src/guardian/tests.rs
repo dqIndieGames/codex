@@ -3048,6 +3048,16 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
 
     seed_guardian_parent_history(&session, &turn).await;
 
+    fn one_attempt_reviewer_config(parent: &crate::config::Config) -> anyhow::Result<crate::config::Config> {
+        let mut config = crate::guardian::test_host::build_reviewer_config(parent)?;
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(0);
+        Ok(config)
+    }
+    session.services.thread_extension_data.insert(
+        codex_guardian_reviewer::ReviewerConfig::<crate::config::Config>(one_attempt_reviewer_config),
+    );
+
     let decision = review_approval_request(
         &session,
         &turn,

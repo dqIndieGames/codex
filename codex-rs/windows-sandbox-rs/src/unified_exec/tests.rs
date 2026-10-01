@@ -94,7 +94,7 @@ fn sandbox_cwd() -> PathBuf {
                     .expect("current user SID")
             };
             unsafe {
-                crate::acl::add_allow_ace(workspace.path(), user_sid.as_mut_ptr().cast())
+                crate::acl::ensure_allow_write_aces(workspace.path(), &[user_sid.as_mut_ptr().cast()])
                     .expect("ordinary user workspace access");
             }
             workspace
@@ -113,10 +113,11 @@ fn sandbox_env(codex_home: &Path) -> HashMap<String, String> {
 
 fn sandbox_home(name: &str) -> TempDir {
     let id = TEST_HOME_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("codex-windows-sandbox-{name}-{id}"));
-    let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).expect("create sandbox home");
-    tempfile::TempDir::new_in(&path).expect("create sandbox home tempdir")
+    // Writable markers and TEMP must not fall under AppData deny roots.
+    tempfile::Builder::new()
+        .prefix(&format!("codex-windows-sandbox-{name}-{id}-"))
+        .tempdir_in(sandbox_cwd())
+        .expect("create isolated sandbox home outside profile exclusions")
 }
 
 fn sandbox_log(codex_home: &Path) -> String {

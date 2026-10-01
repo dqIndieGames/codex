@@ -5,6 +5,11 @@ use super::*;
 #[test]
 fn owned_startup_keeps_the_live_bottom_geometry() {
     let mut pump = crate::startup_draft::tests::quiet_startup_test_pump();
+    let mut header = crate::history_cell::SessionHeaderHistoryCell::new(
+        "loading".to_string(), /*reasoning_effort*/ None, PathBuf::from("loading"), "0.0.0",
+    );
+    crate::history_cell::set_session_greeting(&mut header, &pump.blossom.borrow().greeting);
+    pump.header = Box::new(header);
     pump.bottom_pane.set_status_line_enabled(/*enabled*/ true);
     pump.bottom_pane
         .set_composer_text("first line\nsecond line".into(), Vec::new(), Vec::new());
@@ -29,7 +34,7 @@ fn owned_startup_keeps_the_live_bottom_geometry() {
     insta::assert_snapshot!(
         "owned_startup_layout",
         format!("cursor={:?}\n{frame}", layout.cursor_pos(area))
-            .replace(crate::version::CODEX_CLI_DISPLAY_VERSION, "<VERSION>")
+            .replace("0.0.0", "<VERSION>")
     );
 }
 
