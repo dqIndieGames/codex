@@ -17,7 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
         with:
           components: rustfmt
-      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
         with:
           tool: uv
       - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86
@@ -66,7 +66,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
           tool: just,cargo-nextest,uv
 
