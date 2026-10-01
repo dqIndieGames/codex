@@ -7,6 +7,11 @@ on:
         description: Successful local3-minimal-windows-build run containing the verified artifact.
         required: true
         type: string
+      build_only:
+        description: Require the Windows build job to succeed without gating on the full test suite.
+        required: false
+        default: false
+        type: boolean
       tag:
         description: Release tag to create or update at the verified build commit.
         required: true
@@ -33,13 +38,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          BUILD_ONLY: ${{ inputs.build_only }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $run = gh run view "$env:BUILD_RUN_ID" --repo "$env:GITHUB_REPOSITORY" --json headSha,status,conclusion,workflowName | ConvertFrom-Json
+          $run = gh run view "$env:BUILD_RUN_ID" --repo "$env:GITHUB_REPOSITORY" --json headSha,status,conclusion,workflowName,jobs | ConvertFrom-Json
           if ($run.workflowName -ne 'local3-minimal-windows-build') {
             throw "Build run $env:BUILD_RUN_ID is workflow $($run.workflowName), expected local3-minimal-windows-build"
           }
-          if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') {
+          $buildJobs = @($run.jobs | Where-Object { $_.name -eq 'Build minimal Windows package' })
+          if ($buildJobs.Count -ne 1 -or $buildJobs[0].status -ne 'completed' -or $buildJobs[0].conclusion -ne 'success') {
+            throw "Build run $env:BUILD_RUN_ID does not have one successful completed Windows build job"
+          }
+          if ($env:BUILD_ONLY -ne 'true' -and ($run.status -ne 'completed' -or $run.conclusion -ne 'success')) {
             throw "Build run $env:BUILD_RUN_ID is $($run.status)/$($run.conclusion), expected completed/success"
           }
           if ([string]::IsNullOrWhiteSpace($run.headSha)) {
@@ -155,6 +165,8 @@ jobs:
           name: ${{ inputs.release_name || inputs.tag }}
           body: |
             Minimal local3 Windows package generated and promoted by GitHub Actions after artifact verification.
+
+            ${{ inputs.build_only && 'Verification scope: successful Windows compilation, minimal packaging, and artifact smoke checks. The full test suite is not a release gate for this build.' || 'Verification scope: successful complete build and test workflow, followed by artifact smoke checks.' }}
 
             Contents:
             - codex.exe
