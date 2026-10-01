@@ -3086,15 +3086,15 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     assert!(
         warnings
             .iter()
-            .any(|message| message.contains(error_message)),
-        "warning should include the underlying responses api error"
+            .any(|message| message.contains(&http::StatusCode::BAD_REQUEST.as_u16().to_string())),
+        "warning should include the underlying HTTP status"
     );
     assert!(
         denial_rationales
             .iter()
             .flatten()
-            .any(|message| message.contains(error_message)),
-        "denial rationale should include the underlying responses api error"
+            .any(|message| message.contains(&http::StatusCode::BAD_REQUEST.as_u16().to_string())),
+        "denial rationale should include the underlying HTTP status"
     );
     assert!(
         denial_rationales.iter().flatten().all(|message| {
@@ -3104,9 +3104,13 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     );
     assert!(
         rejection.starts_with("Automatic approval review failed:")
-            && rejection.contains(error_message),
+            && rejection.contains(&http::StatusCode::BAD_REQUEST.as_u16().to_string()),
         "rejection message should include guardian rationale: {rejection}"
     );
+    // Checklist retry diagnostics: raw HTTP bodies must not leak through user-visible errors.
+    assert!(warnings.iter().all(|message| !message.contains(error_message)));
+    assert!(denial_rationales.iter().flatten().all(|message| !message.contains(error_message)));
+    assert!(!rejection.contains(error_message));
 
     Ok(())
 }
@@ -3575,7 +3579,11 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
         ])
         .await;
 
-        let (mut session, turn) = guardian_test_session_and_turn_with_base_url(server.uri()).await;
+        let (mut session, mut turn) = guardian_test_session_and_turn_with_base_url(server.uri()).await;
+        // This test explicitly exercises opt-in feedback capture; local3 defaults it off.
+        let turn_config = &mut Arc::get_mut(&mut turn).expect("unique turn").config;
+        Arc::make_mut(turn_config).feedback_enabled = true;
+        crate::guardian::test_host::install(&session, turn_config);
         // Isolate feedback from other tests using the fixed parent session ID.
         Arc::get_mut(&mut session)
             .expect("session should be uniquely owned")

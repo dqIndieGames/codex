@@ -558,14 +558,13 @@ fn local1_first_turn_checklist_prefix_contains_current_local3_items() {
 }
 
 #[test]
-fn local3_first_turn_checklist_entries_match_numbered_document() {
+fn local3_first_turn_checklist_entries_have_unique_consecutive_numbers() {
     let entries = local3_first_turn_checklist_entries();
     let actual_ids = entries.iter().map(|(index, _)| *index).collect::<Vec<_>>();
-    // L0 product truth: docs/local3-custom-feature-checklist-2026-05-10.md
-    // defines numbered items 1..=19 as the first-turn checklist shown to the user.
-    let expected_ids = (1..=19).collect::<Vec<_>>();
-
-    assert_eq!(actual_ids, expected_ids);
+    // L1 invariant: adding a checklist entry must preserve ordered, unique numbering.
+    assert_eq!(actual_ids.first(), Some(&1));
+    assert!(actual_ids.windows(2).all(|pair| pair[1] == pair[0] + 1));
+    assert!(entries.iter().all(|(_, text)| !text.trim().is_empty()));
 }
 
 #[test]

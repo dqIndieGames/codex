@@ -378,25 +378,28 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
         nickname: Option<String>,
     }
 
-    let (mut session, mut turn) = make_session_and_context().await;
+    // Keep the live session provider and turn configuration consistent. Child startup
+    // intentionally reads the latest live provider, including runtime refreshes.
+    let (mut session, turn, _rx) =
+        crate::session::tests::make_session_and_context_with_auth_and_config_and_rx(
+            codex_login::CodexAuth::from_api_key("Test API Key"),
+            Vec::new(),
+            |config| {
+                config.model_provider_id = "ollama".to_string();
+                config.model_provider =
+                    built_in_model_providers(/*openai_base_url*/ None)["ollama"].clone();
+                config.permissions.approval_policy.set(AskForApproval::OnRequest)
+                    .expect("approval policy should be set");
+            },
+        ).await;
     let manager = thread_manager();
-    set_agent_control(&mut session, manager.agent_control());
-    let mut config = (*turn.config).clone();
-    let provider_info =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["ollama"].clone();
-    config.model_provider_id = "ollama".to_string();
-    config.model_provider = provider_info.clone();
-    config
-        .permissions
-        .approval_policy
-        .set(AskForApproval::OnRequest)
-        .expect("approval policy should be set");
-    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
-    turn.config = Arc::new(config);
-
+    set_agent_control(
+        Arc::get_mut(&mut session).expect("session should be uniquely owned"),
+        manager.agent_control(),
+    );
     let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
+        session,
+        turn,
         "spawn_agent",
         function_payload(json!({
             "message": "inspect this repo",

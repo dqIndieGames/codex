@@ -11599,6 +11599,9 @@ async fn make_remote_compaction_session(
     let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     provider.base_url = Some(format!("{server_uri}/v1"));
     provider.supports_websockets = false;
+    // This fixture tests model fallback, explicitly disabling local3 automatic retries.
+    provider.request_max_retries = Some(0);
+    provider.stream_max_retries = Some(0);
     make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::create_dummy_chatgpt_auth_for_testing(),
         Vec::new(),
@@ -12143,7 +12146,8 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
             image: ImageReference::Inline {
                 image_url: image_url.clone(),
             },
-            detail: Some(ImageDetail::High),
+            // Unspecified detail follows current model rules; explicit high is preserved by #18.
+            detail: None,
         },
     ];
     let submission = submit_steer_only(&sess, pending_user_input.clone(), &tc.sub_id).await;

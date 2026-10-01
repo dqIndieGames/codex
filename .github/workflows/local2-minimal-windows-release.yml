@@ -30,7 +30,7 @@ jobs:
       - name: Export relevant formatting changes
         if: always()
         run: |
-          git diff --binary -- MODULE.bazel.lock codex-rs/core/src/client.rs codex-rs/model-provider-info/src/lib.rs codex-rs/model-provider-info/src/model_provider_info_tests.rs codex-rs/protocol/src/error.rs codex-rs/protocol/src/error_tests.rs codex-rs/codex-api/src/sse/responses.rs codex-rs/codex-api/src/endpoint/responses_websocket.rs .github/scripts/test_response_header_wait.py .github/scripts/test_stream_timeout_config.py > "$RUNNER_TEMP/local3-format.patch"
+          git diff --binary -- MODULE.bazel.lock codex-rs/core/src/client.rs codex-rs/model-provider-info/src/lib.rs codex-rs/model-provider-info/src/model_provider_info_tests.rs codex-rs/protocol/src/error.rs codex-rs/protocol/src/error_tests.rs codex-rs/codex-api/src/sse/responses.rs codex-rs/codex-api/src/endpoint/responses_websocket.rs .github/scripts/test_response_header_wait.py .github/scripts/test_stream_timeout_config.py codex-rs/tui/src/chatwidget/tests/app_server.rs codex-rs/core/src/stream_events_utils_tests.rs codex-rs/core/src/session/tests.rs codex-rs/core/src/guardian/tests.rs codex-rs/core/src/tools/handlers/multi_agents_tests.rs > "$RUNNER_TEMP/local3-format.patch"
           test ! -s "$RUNNER_TEMP/local3-format.patch"
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         if: always()
@@ -76,6 +76,10 @@ jobs:
           target: x86_64-pc-windows-msvc
 
       - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a
+
+      - name: Generate config schema on GitHub
+        shell: pwsh
+        run: cargo run --profile ci-test --target x86_64-pc-windows-msvc -p codex-config-schema --bin codex-write-config-schema
 
       - name: Test stream configuration and transport behavior
         shell: pwsh

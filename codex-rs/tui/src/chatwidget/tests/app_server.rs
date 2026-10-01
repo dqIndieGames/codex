@@ -4,6 +4,7 @@ use codex_app_server_protocol::AuthRecoveryNotification;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use pretty_assertions::assert_eq;
+use crate::version::CODEX_CLI_DISPLAY_VERSION;
 
 const SAFETY_BUFFERING_HEADER_TEXT: &str = "Giving this request a little extra thought";
 
@@ -95,7 +96,7 @@ async fn session_header_uses_catalog_display_name_without_changing_model() {
             .iter()
             .map(|lines| lines_to_single_string(lines))
             .collect::<String>()
-            .replace(CODEX_CLI_VERSION, "<VERSION>")
+            .replace(CODEX_CLI_DISPLAY_VERSION, "<VERSION>")
             .replace("C:\\tmp\\thread-settings", "/tmp/thread-settings");
         assert_chatwidget_snapshot!(format!("catalog_model_session_header_{name}"), rendered);
         assert_eq!(chat.current_model(), slug);
