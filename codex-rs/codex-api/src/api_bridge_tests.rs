@@ -60,10 +60,7 @@ async fn map_api_error_preserves_server_advice_independently_of_fixed_retry() {
 #[test]
 fn map_api_error_distinguishes_capacity_from_slow_down() {
     for (code, expected) in [
-        (
-            "server_is_overloaded",
-            CodexErrorInfo::ServerOverloaded,
-        ),
+        ("server_is_overloaded", CodexErrorInfo::ServerOverloaded),
         ("slow_down", CodexErrorInfo::RateLimitExceeded),
         (
             "unknown_error",
@@ -96,13 +93,15 @@ fn map_responses_stream_api_error_preserves_typed_503_classification() {
             }
         })
         .to_string();
-        let make_error = || ApiError::Transport(TransportError::Http {
-            retry_after: None,
-            status: http::StatusCode::SERVICE_UNAVAILABLE,
-            url: Some("ws://example.com/v1/responses".to_string()),
-            headers: None,
-            body: Some(body.clone()),
-        });
+        let make_error = || {
+            ApiError::Transport(TransportError::Http {
+                retry_after: None,
+                status: http::StatusCode::SERVICE_UNAVAILABLE,
+                url: Some("ws://example.com/v1/responses".to_string()),
+                headers: None,
+                body: Some(body.clone()),
+            })
+        };
         let err = map_responses_stream_api_error(make_error());
         // Both entry points preserve the service's capacity/rate-limit distinction.
         assert_eq!(
