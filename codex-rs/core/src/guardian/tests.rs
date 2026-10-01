@@ -3028,6 +3028,8 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     let mut config = (*turn.config).clone();
     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
     // This case inspects one terminal error, rather than the retry deadline.
+    // The fixture serves HTTP errors, not a WebSocket handshake.
+    config.model_provider.supports_websockets = false;
     config.model_provider.request_max_retries = Some(0);
     config.model_provider.stream_max_retries = Some(0);
     let config = Arc::new(config);

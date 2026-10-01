@@ -1,6 +1,7 @@
 //! Verify provisional composer geometry while startup owns the terminal.
 
 use super::*;
+use std::path::PathBuf;
 
 #[test]
 fn owned_startup_keeps_the_live_bottom_geometry() {
