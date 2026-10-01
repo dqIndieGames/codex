@@ -31,9 +31,11 @@ impl ProjectTrustLookup {
             PathConvention::native(),
             ProjectTrustPath {
                 original: path.to_string_lossy().into_owned(),
-                canonical: normalize_for_path_comparison(path)
-                    .ok()
-                    .map(|path| normalize_for_native_workdir(path).to_string_lossy().into_owned()),
+                canonical: normalize_for_path_comparison(path).ok().map(|path| {
+                    normalize_for_native_workdir(path)
+                        .to_string_lossy()
+                        .into_owned()
+                }),
             },
             /*repo_root*/ None,
         )
