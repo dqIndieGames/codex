@@ -299,7 +299,9 @@ mod tests {
 
     #[test]
     fn update_prompt_snapshot() {
-        let screen = new_prompt();
+        let mut screen = new_prompt();
+        // Keep the layout fixture stable across package versions.
+        screen.current_version = "0.0.0-local3".into();
         let mut terminal =
             Terminal::new(VT100Backend::new(/*width*/ 80, /*height*/ 12)).expect("terminal");
         terminal
@@ -355,6 +357,7 @@ mod tests {
     #[test]
     fn long_update_command_keeps_selected_skip_visible_in_a_short_viewport() {
         let mut screen = new_prompt();
+        screen.current_version = "0.0.0".into();
         screen.update_action = UpdateAction::StandaloneWindows;
         screen.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         let (width, height) = (28, 12);

@@ -30,7 +30,7 @@ jobs:
       - name: Export relevant formatting changes
         if: always()
         run: |
-          git diff --binary -- MODULE.bazel.lock codex-rs/core/src/client.rs codex-rs/model-provider-info/src/lib.rs codex-rs/model-provider-info/src/model_provider_info_tests.rs codex-rs/protocol/src/error.rs codex-rs/protocol/src/error_tests.rs codex-rs/codex-api/src/sse/responses.rs codex-rs/codex-api/src/endpoint/responses_websocket.rs .github/scripts/test_response_header_wait.py .github/scripts/test_stream_timeout_config.py codex-rs/tui/src/chatwidget/tests/app_server.rs codex-rs/core/src/stream_events_utils_tests.rs codex-rs/core/src/session/tests.rs codex-rs/core/src/guardian/tests.rs codex-rs/core/src/tools/handlers/multi_agents_tests.rs > "$RUNNER_TEMP/local3-format.patch"
+          git diff --binary -- MODULE.bazel.lock codex-rs/core/src/client.rs codex-rs/model-provider-info/src/lib.rs codex-rs/model-provider-info/src/model_provider_info_tests.rs codex-rs/protocol/src/error.rs codex-rs/protocol/src/error_tests.rs codex-rs/codex-api/src/sse/responses.rs codex-rs/codex-api/src/endpoint/responses_websocket.rs .github/scripts/test_response_header_wait.py .github/scripts/test_stream_timeout_config.py codex-rs/tui/src/chatwidget/tests/app_server.rs codex-rs/core/src/stream_events_utils_tests.rs codex-rs/core/src/session/tests.rs codex-rs/core/src/guardian/tests.rs codex-rs/core/src/tools/handlers/multi_agents_tests.rs codex-rs/config/src/project_trust.rs codex-rs/config/src/project_trust_tests.rs codex-rs/tui/src/update_prompt.rs codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs > "$RUNNER_TEMP/local3-format.patch"
           test ! -s "$RUNNER_TEMP/local3-format.patch"
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         if: always()
@@ -80,6 +80,16 @@ jobs:
       - name: Generate config schema on GitHub
         shell: pwsh
         run: cargo run --profile ci-test --target x86_64-pc-windows-msvc -p codex-config-schema --bin codex-write-config-schema
+
+      - name: Prepare Windows sandbox helpers for library tests
+        shell: pwsh
+        run: |
+          cargo build --profile ci-test --target x86_64-pc-windows-msvc -p codex-windows-sandbox --bins
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $profileDir = 'target/x86_64-pc-windows-msvc/ci-test'
+          foreach ($helper in 'codex-windows-sandbox-setup.exe', 'codex-command-runner.exe', 'codex-windows-managed-deny-probe.exe') {
+            Copy-Item -LiteralPath (Join-Path $profileDir $helper) -Destination (Join-Path $profileDir 'deps') -Force
+          }
 
       - name: Test stream configuration and transport behavior
         shell: pwsh

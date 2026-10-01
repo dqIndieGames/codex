@@ -30,6 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -72,14 +73,24 @@ fn pwsh_path() -> Option<PathBuf> {
 }
 
 fn sandbox_cwd() -> PathBuf {
-    if let Ok(workspace_root) = std::env::var("INSTA_WORKSPACE_ROOT") {
-        return PathBuf::from(workspace_root);
-    }
-
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("repo root")
+    static WORKSPACE: OnceLock<TempDir> = OnceLock::new();
+    WORKSPACE
+        .get_or_init(|| {
+            let parent = std::env::var_os("INSTA_WORKSPACE_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+            TempDir::new_in(parent).expect("isolated sandbox workspace outside profile exclusions")
+        })
+        .path()
         .to_path_buf()
+}
+
+fn sandbox_env(codex_home: &Path) -> HashMap<String, String> {
+    // Keep ACL inheritance away from the runner's shared caches and temp tree.
+    HashMap::from([
+        ("TEMP".into(), codex_home.to_string_lossy().into_owned()),
+        ("TMP".into(), codex_home.to_string_lossy().into_owned()),
+    ])
 }
 
 fn sandbox_home(name: &str) -> TempDir {
@@ -238,7 +249,7 @@ fn restricted_token_rejects_managed_network_before_spawn() {
             codex_home: codex_home.path(),
             command: Vec::new(),
             cwd: cwd.as_path(),
-            env_map: HashMap::new(),
+            env_map: sandbox_env(codex_home.path()),
             windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
             proxy_enforced: true,
             network_proxy_restricting_sid: None,
@@ -281,7 +292,7 @@ fn legacy_non_tty_cmd_emits_output() {
                 "echo LEGACY-NONTTY-CMD".to_string(),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            sandbox_env(codex_home.path()),
             Some(5_000),
             &[],
             &[],
@@ -308,10 +319,8 @@ fn elevated_non_tty_cmd_forwards_env_output_and_exit() {
         let cwd = sandbox_cwd();
         let codex_home = sandbox_home("elevated-non-tty-cmd");
         let permission_profile = PermissionProfile::workspace_write();
-        let env_map = HashMap::from([(
-            "CODEX_ELEVATED_TEST".to_string(),
-            "ELEVATED-ENV-OK".to_string(),
-        )]);
+        let mut env_map = sandbox_env(codex_home.path());
+        env_map.insert("CODEX_ELEVATED_TEST".into(), "ELEVATED-ENV-OK".into());
         let spawned = spawn_windows_sandbox_session_elevated_for_permission_profile(
             &permission_profile,
             workspace_roots_for(cwd.as_path()).as_slice(),
@@ -425,7 +434,7 @@ fn legacy_non_tty_cmd_rejects_deny_read_overrides() {
                 "echo deny-read".to_string(),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            sandbox_env(codex_home.path()),
             Some(5_000),
             std::slice::from_ref(&secret_path),
             &[],
@@ -465,7 +474,7 @@ fn legacy_non_tty_powershell_interrupt_terminates_process() {
                 format!("{ASSERT_NO_CONSOLE} Write-Output LEGACY-NONTTY-DIRECT; [System.Threading.ManualResetEvent]::new($false).WaitOne()"),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            sandbox_env(codex_home.path()),
             /*timeout_ms*/ None,
             &[],
             &[],
@@ -698,7 +707,7 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
             parent_command,
         ],
         cwd.as_path(),
-        HashMap::new(),
+        sandbox_env(codex_home.path()),
         Some(10_000),
         /*cancellation*/ None,
     )
@@ -893,7 +902,7 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
             parent_command,
         ],
         cwd.as_path(),
-        HashMap::new(),
+        sandbox_env(codex_home.path()),
         Some(30_000),
         /*cancellation*/ Some(cancellation),
     )
@@ -972,7 +981,7 @@ async fn assert_legacy_tty_descendant_lifecycle(
             parent_command,
         ],
         cwd.as_path(),
-        HashMap::new(),
+        sandbox_env(codex_home.path()),
         Some(30_000),
         &[],
         &[],
@@ -1055,7 +1064,7 @@ fn legacy_tty_powershell_emits_output_and_accepts_input() {
                 "$PID; Write-Output ready".to_string(),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            sandbox_env(codex_home.path()),
             Some(10_000),
             &[],
             &[],
@@ -1104,7 +1113,7 @@ fn legacy_tty_cmd_emits_output_and_accepts_input() {
                 "echo ready".to_string(),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            sandbox_env(codex_home.path()),
             Some(10_000),
             &[],
             &[],

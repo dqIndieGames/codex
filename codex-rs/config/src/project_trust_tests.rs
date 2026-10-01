@@ -89,3 +89,20 @@ fn windows_prefers_exact_normalized_key_then_sorted_aliases() {
         ],
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn native_lookup_matches_persisted_key_for_extended_and_original_paths() {
+    let dir = tempfile::tempdir().expect("project directory");
+    let key = crate::loader::project_trust_key(dir.path());
+    let config = config_with_projects(&[(&key, Some(TrustLevel::Untrusted))]);
+    for path in [
+        dir.path().to_path_buf(),
+        dir.path().canonicalize().expect("canonical path"),
+    ] {
+        assert_eq!(
+            config.get_active_project(&path, None),
+            config.projects.as_ref().unwrap().get(&key).cloned(),
+        );
+    }
+}
