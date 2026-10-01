@@ -94,8 +94,11 @@ fn sandbox_cwd() -> PathBuf {
                     .expect("current user SID")
             };
             unsafe {
-                crate::acl::ensure_allow_write_aces(workspace.path(), &[user_sid.as_mut_ptr().cast()])
-                    .expect("ordinary user workspace access");
+                crate::acl::ensure_allow_write_aces(
+                    workspace.path(),
+                    &[user_sid.as_mut_ptr().cast()],
+                )
+                .expect("ordinary user workspace access");
             }
             workspace
         })

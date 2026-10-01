@@ -6,7 +6,10 @@ use super::*;
 fn owned_startup_keeps_the_live_bottom_geometry() {
     let mut pump = crate::startup_draft::tests::quiet_startup_test_pump();
     let mut header = crate::history_cell::SessionHeaderHistoryCell::new(
-        "loading".to_string(), /*reasoning_effort*/ None, PathBuf::from("loading"), "0.0.0",
+        "loading".to_string(),
+        /*reasoning_effort*/ None,
+        PathBuf::from("loading"),
+        "0.0.0",
     );
     crate::history_cell::set_session_greeting(&mut header, &pump.blossom.borrow().greeting);
     pump.header = Box::new(header);
@@ -33,8 +36,7 @@ fn owned_startup_keeps_the_live_bottom_geometry() {
         .join("\n");
     insta::assert_snapshot!(
         "owned_startup_layout",
-        format!("cursor={:?}\n{frame}", layout.cursor_pos(area))
-            .replace("0.0.0", "<VERSION>")
+        format!("cursor={:?}\n{frame}", layout.cursor_pos(area)).replace("0.0.0", "<VERSION>")
     );
 }
 
