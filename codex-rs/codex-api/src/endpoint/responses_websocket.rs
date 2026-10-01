@@ -421,9 +421,14 @@ impl ResponsesWebsocketClient {
             merge_request_headers(&self.provider.headers, extra_headers, default_headers);
         self.auth.add_auth_headers(&mut headers);
 
-        let (stream, _status, server_reasoning_included, server_model) =
-            connect_websocket(ws_url, headers, http_client_factory, turn_state.clone(), &self.auth)
-                .await?;
+        let (stream, _status, server_reasoning_included, server_model) = connect_websocket(
+            ws_url,
+            headers,
+            http_client_factory,
+            turn_state.clone(),
+            &self.auth,
+        )
+        .await?;
         Ok(ResponsesWebsocketConnection::new(
             stream,
             self.provider.stream_idle_timeout,
@@ -539,7 +544,8 @@ async fn connect_websocket(
         Err(err) => {
             error!("failed to connect to websocket: {err}, url: {url}");
             let err = map_ws_error(err, &url);
-            if matches!(&err, ApiError::Transport(TransportError::Http { status, .. }) if *status == StatusCode::UNAUTHORIZED) {
+            if matches!(&err, ApiError::Transport(TransportError::Http { status, .. }) if *status == StatusCode::UNAUTHORIZED)
+            {
                 auth.on_unauthorized().await;
             }
             return Err(err);

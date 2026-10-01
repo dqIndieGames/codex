@@ -87,15 +87,25 @@ def main():
         with tempfile.TemporaryDirectory(prefix="codex-header-fixture-") as home:
             env = os.environ.copy()
             env["CODEX_HOME"] = home
-            result = subprocess.run(args, cwd=home, env=env, capture_output=True,
-                                    text=True, encoding="utf-8", errors="replace", timeout=130,
-                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            result = subprocess.run(
+                args,
+                cwd=home,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=130,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
         print(result.stdout)
         print(result.stderr, file=sys.stderr)
         if result.returncode != 0 or "HEADER_WAIT_OK" not in result.stdout:
             raise RuntimeError("CLI did not complete after delayed response headers")
         if DelayedResponses.requests != 1:
-            raise RuntimeError("Delayed headers must complete the original request without retry")
+            raise RuntimeError(
+                "Delayed headers must complete the original request without retry"
+            )
         print("Delayed headers: PASS (90 seconds, one request)")
     finally:
         server.shutdown()

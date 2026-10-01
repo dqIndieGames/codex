@@ -49,12 +49,12 @@ use codex_api::MemoriesClient as ApiMemoriesClient;
 use codex_api::MemorySummarizeInput as ApiMemorySummarizeInput;
 use codex_api::MemorySummarizeOutput as ApiMemorySummarizeOutput;
 use codex_api::Provider as ApiProvider;
-use codex_api::RequestRetryGuard;
 use codex_api::RawMemory as ApiRawMemory;
 use codex_api::RealtimeCallClient as ApiRealtimeCallClient;
 use codex_api::RealtimeSessionConfig as ApiRealtimeSessionConfig;
 use codex_api::Reasoning;
 use codex_api::ReasoningContext;
+use codex_api::RequestRetryGuard;
 use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
 use codex_api::ResponseCreateWsRequest;
@@ -226,7 +226,6 @@ impl RequestRouteRecovery {
     fn restart_requested(&self) -> bool {
         self.restart_requested.load(Ordering::Acquire)
     }
-
 }
 
 fn session_telemetry_for_request(
@@ -1092,7 +1091,11 @@ impl ModelClient {
         let service_tier = if self.current_provider().info().is_amazon_bedrock() {
             // Bedrock only supports the implicit default tier, including with custom catalogs.
             None
-        } else if self.state.force_service_tier_priority.load(Ordering::Relaxed) {
+        } else if self
+            .state
+            .force_service_tier_priority
+            .load(Ordering::Relaxed)
+        {
             Some(ServiceTier::Fast.request_value().to_string())
         } else {
             model_info.service_tier_for_request(service_tier)
@@ -1217,7 +1220,10 @@ impl ModelClient {
             .filter(|config| {
                 config.model == model
                     && self.uses_codex_backend(auth)
-                    && self.current_provider().info().supports_codex_backend_routes()
+                    && self
+                        .current_provider()
+                        .info()
+                        .supports_codex_backend_routes()
             })
             .map(|config| config.headers.clone())
             .unwrap_or_default()
@@ -1260,7 +1266,10 @@ impl ModelClient {
                 Some(CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_))
             )
             && self.uses_codex_backend(auth)
-            && self.current_provider().info().supports_codex_backend_routes()
+            && self
+                .current_provider()
+                .info()
+                .supports_codex_backend_routes()
         {
             metadata
                 .get_or_insert_with(HashMap::new)
@@ -1845,9 +1854,9 @@ impl ModelClientSession {
                 client_setup.agent_identity_telemetry.clone(),
                 pending_retry,
             );
-            let request_route_recovery = RequestRouteRecovery::new(
-                !is_chatgpt_codex_base_url(&client_setup.api_provider.base_url),
-            );
+            let request_route_recovery = RequestRouteRecovery::new(!is_chatgpt_codex_base_url(
+                &client_setup.api_provider.base_url,
+            ));
             let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
                 session_telemetry,
                 request_auth_context,
@@ -3092,10 +3101,8 @@ impl RequestTelemetry for ApiTelemetry {
         status: Option<StatusCode>,
         error: &TransportError,
     ) {
-        if matches!(
-            self.request_route_telemetry.endpoint,
-            RESPONSES_ENDPOINT
-        ) && retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0
+        if matches!(self.request_route_telemetry.endpoint, RESPONSES_ENDPOINT)
+            && retry_number % ROUTE_RECOVERY_RETRY_THRESHOLD == 0
             && let Some(route_recovery) = self.request_route_recovery.as_ref()
         {
             route_recovery.request_restart(retry_number);

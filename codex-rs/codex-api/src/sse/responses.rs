@@ -587,7 +587,11 @@ async fn process_sse_with_treatment(
                     .send(Err(ApiError::Stream(
                         codex_protocol::error::retry_stream_idle_interrupted_message(
                             seen_model_event,
-                            if seen_model_event { idle_timeout } else { first_event_timeout },
+                            if seen_model_event {
+                                idle_timeout
+                            } else {
+                                first_event_timeout
+                            },
                         ),
                     )))
                     .await;
@@ -692,8 +696,8 @@ mod tests {
     use codex_http_client::RetryAfter;
     use codex_protocol::models::MessagePhase;
     use codex_protocol::models::ResponseItem;
-    use futures::StreamExt;
     use codex_protocol::protocol::MisalignmentErrorDetails;
+    use futures::StreamExt;
     use futures::TryStreamExt;
     use futures::stream;
     use http::HeaderMap;
@@ -735,13 +739,20 @@ mod tests {
         let timeout = Duration::from_secs(300);
         let stream = futures::stream::once(async {
             tokio::time::sleep(Duration::from_secs(260)).await;
-            Ok(bytes::Bytes::from_static(b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"test\"}}\n\n"))
-        }).chain(futures::stream::pending());
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"test\"}}\n\n",
+            ))
+        })
+        .chain(futures::stream::pending());
         let (tx, mut rx) = mpsc::channel(16);
         let started = tokio::time::Instant::now();
         tokio::spawn(process_sse_with_treatment(
-            Box::pin(stream), tx, timeout, timeout,
-            None, SafetyBufferingTreatment::default(),
+            Box::pin(stream),
+            tx,
+            timeout,
+            timeout,
+            None,
+            SafetyBufferingTreatment::default(),
         ));
         while let Some(event) = rx.recv().await {
             if let Err(ApiError::Stream(message)) = event {
@@ -757,15 +768,23 @@ mod tests {
     async fn model_progress_starts_a_fresh_post_output_idle_window() {
         // Progress refreshes the configured idle window; total duration is unbounded.
         let timeout = Duration::from_secs(300);
-        let stream = futures::stream::iter([260, 299, 299]).then(|seconds| async move {
-            tokio::time::sleep(Duration::from_secs(seconds)).await;
-            Ok(bytes::Bytes::from_static(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n"))
-        }).chain(futures::stream::pending());
+        let stream = futures::stream::iter([260, 299, 299])
+            .then(|seconds| async move {
+                tokio::time::sleep(Duration::from_secs(seconds)).await;
+                Ok(bytes::Bytes::from_static(
+                    b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n",
+                ))
+            })
+            .chain(futures::stream::pending());
         let (tx, mut rx) = mpsc::channel(16);
         let started = tokio::time::Instant::now();
         tokio::spawn(process_sse_with_treatment(
-            Box::pin(stream), tx, timeout, timeout,
-            None, SafetyBufferingTreatment::default(),
+            Box::pin(stream),
+            tx,
+            timeout,
+            timeout,
+            None,
+            SafetyBufferingTreatment::default(),
         ));
         let mut deltas = 0;
         while let Some(event) = rx.recv().await {
@@ -773,7 +792,10 @@ mod tests {
                 Ok(ResponseEvent::OutputTextDelta(_)) => deltas += 1,
                 Err(ApiError::Stream(message)) => {
                     assert_eq!(deltas, 3);
-                    assert_eq!(tokio::time::Instant::now() - started, Duration::from_secs(260 + 299 + 299) + timeout);
+                    assert_eq!(
+                        tokio::time::Instant::now() - started,
+                        Duration::from_secs(260 + 299 + 299) + timeout
+                    );
                     assert!(message.contains(&timeout.as_secs_f64().to_string()));
                     return;
                 }
@@ -824,13 +846,15 @@ mod tests {
         // Phase 2 waits for the first model event; response.created is only stream open.
         assert!(!ResponseEvent::Created { response_id: None }.is_model_progress_event());
         assert!(ResponseEvent::OutputTextDelta("hi".into()).is_model_progress_event());
-        assert!(ResponseEvent::Completed {
-            response_id: "r".into(),
-            token_usage: None,
-            usage_metadata: None,
-            end_turn: None,
-        }
-        .is_model_progress_event());
+        assert!(
+            ResponseEvent::Completed {
+                response_id: "r".into(),
+                token_usage: None,
+                usage_metadata: None,
+                end_turn: None,
+            }
+            .is_model_progress_event()
+        );
         assert!(stream_event_kind_is_model_progress(
             "response.function_call_arguments.delta"
         ));
@@ -879,10 +903,7 @@ mod tests {
             None,
             SafetyBufferingTreatment::default(),
         ));
-        assert_matches!(
-            rx.recv().await,
-            Some(Ok(ResponseEvent::OutputTextDelta(_)))
-        );
+        assert_matches!(rx.recv().await, Some(Ok(ResponseEvent::OutputTextDelta(_))));
         let err = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("stream idle timeout")

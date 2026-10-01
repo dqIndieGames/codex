@@ -419,8 +419,7 @@ impl CodexErr {
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. }
             | CodexErrorDetails::Spawn
-            | CodexErrorDetails::SessionConfiguredNotFirstEvent
-            => false,
+            | CodexErrorDetails::SessionConfiguredNotFirstEvent => false,
             CodexErrorDetails::Stream(..)
             | CodexErrorDetails::RateLimitExceeded(_)
             | CodexErrorDetails::Timeout
@@ -439,7 +438,7 @@ impl CodexErr {
             | CodexErrorDetails::UsageNotIncluded
             | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::CyberPolicy { .. }
-            | CodexErrorDetails::RetryTimeBudgetInterrupted(_) 
+            | CodexErrorDetails::RetryTimeBudgetInterrupted(_)
             | CodexErrorDetails::InvalidPrompt { .. }
             | CodexErrorDetails::BioPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. }

@@ -85,14 +85,23 @@ fn retryability_preserves_error_details_distinctions() {
 fn retry_delay_is_fixed_independent_of_advice_and_attempt() {
     for advised in [Duration::ZERO, Duration::from_secs(30)] {
         let advice = RetryAfter::from_delay(advised).expect("retry deadline");
-        for error in [CodexErr::InternalServerError, CodexErr::QuotaExceeded, CodexErr::ServerOverloaded] {
+        for error in [
+            CodexErr::InternalServerError,
+            CodexErr::QuotaExceeded,
+            CodexErr::ServerOverloaded,
+        ] {
             let error = error.with_retry_after(advice);
             for attempt in [1, 3, 6] {
                 assert_eq!(error.retry_delay(attempt), Some(Duration::from_secs(5)));
             }
             assert!(error.retry_after().is_some());
         }
-        assert_eq!(CodexErr::TurnAborted.with_retry_after(advice).retry_delay(1), None);
+        assert_eq!(
+            CodexErr::TurnAborted
+                .with_retry_after(advice)
+                .retry_delay(1),
+            None
+        );
     }
 }
 
@@ -280,14 +289,20 @@ fn retry_time_budget_interruption_stays_retryable_and_keeps_its_message() {
 #[test]
 fn stream_timeout_messages_report_the_effective_configuration() {
     // The displayed duration must follow the caller's effective timeout.
-    for timeout in [Duration::from_secs(300), Duration::from_secs(600), Duration::from_millis(250)] {
+    for timeout in [
+        Duration::from_secs(300),
+        Duration::from_secs(600),
+        Duration::from_millis(250),
+    ] {
         for seen_model_event in [false, true] {
             let message = retry_stream_idle_interrupted_message(seen_model_event, timeout);
             assert!(message.contains(&timeout.as_secs_f64().to_string()));
             assert!(is_retry_watchdog_interrupted_message(&message));
         }
     }
-    assert!(!is_retry_watchdog_interrupted_message("ordinary transport failure"));
+    assert!(!is_retry_watchdog_interrupted_message(
+        "ordinary transport failure"
+    ));
 }
 
 #[test]
