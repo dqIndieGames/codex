@@ -121,11 +121,10 @@ async fn daemon_menu_is_read_only_and_confirmation_can_cancel_or_handoff() {
             })
             .unwrap(),
         );
-        app.confirm_daemon_update(source);
+        app.confirm_daemon_update_with_version(source, "0.0.0");
         insta::assert_snapshot!(
             snapshot,
             render_bottom_popup(&app.chat_widget, width)
-                .replace(CODEX_CLI_DISPLAY_VERSION, "0.0.0")
                 .replace(r"C:\cli-build\bin\codex", "/x/cli-build/bin/codex")
         );
         // The default choice cancels without emitting an update or exiting.
@@ -133,6 +132,9 @@ async fn daemon_menu_is_read_only_and_confirmation_can_cancel_or_handoff() {
         assert!(rx.try_recv().is_err());
         assert_eq!(app.pending_update_action, None);
         app.confirm_daemon_update(source);
+        if source == DaemonUpdateSource::ThisCli {
+            assert!(render_bottom_popup(&app.chat_widget, /*width*/ 150).contains(CODEX_CLI_DISPLAY_VERSION));
+        }
         app.chat_widget.handle_key_event(KeyCode::Down.into());
         app.chat_widget.handle_key_event(KeyCode::Enter.into());
         assert!(

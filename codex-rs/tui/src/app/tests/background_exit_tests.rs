@@ -459,6 +459,7 @@ async fn exit_interrupts_before_requesting_shutdown() -> Result<()> {
         )
     };
     app_server.thread_shell_command(thread_id, command).await?;
+    let mut observed_notifications = Vec::new();
     let turn_id = time::timeout(Duration::from_secs(/*secs*/ 10), async {
         let mut turn_id = None;
         let mut output = String::new();
@@ -469,6 +470,9 @@ async fn exit_interrupts_before_requesting_shutdown() -> Result<()> {
                 .expect("app-server event stream should remain open");
             if let codex_app_server_client::AppServerEvent::ServerNotification(notification) = event
             {
+                if observed_notifications.len() < 12 {
+                    observed_notifications.push(format!("{notification:?}").chars().take(800).collect::<String>());
+                }
                 match notification.as_ref() {
                     ServerNotification::TurnStarted(notification)
                         if notification.thread_id == thread_id.to_string() =>
@@ -496,7 +500,7 @@ async fn exit_interrupts_before_requesting_shutdown() -> Result<()> {
         }
     })
     .await
-    .expect("shell command should be running before interruption");
+    .unwrap_or_else(|error| panic!("shell command should be running before interruption: {error}; notifications: {observed_notifications:?}"));
     app.thread_event_channels.insert(
         thread_id,
         ThreadEventChannel::new_with_session(
