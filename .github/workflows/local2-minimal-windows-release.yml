@@ -43,6 +43,9 @@ jobs:
     needs: format
     runs-on: windows-latest
     timeout-minutes: 120
+    env:
+      # Real shell and JSON-RPC fixtures must get CPU while their deadlines run.
+      NEXTEST_TEST_THREADS: "2"
     defaults:
       run:
         working-directory: codex-rs
