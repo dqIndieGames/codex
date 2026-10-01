@@ -19,7 +19,10 @@ jobs:
           components: rustfmt
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
         with:
-          tool: uv,bazelisk
+          tool: uv
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86
+        with:
+          bazelisk-version: 1.28.1
       - name: Format sources and refresh Bazel lock on GitHub
         run: |
           just fmt
