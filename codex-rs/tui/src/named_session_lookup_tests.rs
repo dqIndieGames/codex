@@ -255,8 +255,12 @@ async fn resolves_name_and_preview_from_server_list() -> color_eyre::Result<()> 
         ThreadParamsMode::Remote,
         /*model_provider*/ None,
     )
-    .await.expect_err("unfiltered labels spanning providers must be ambiguous");
-    assert!(matches!(remote.downcast_ref::<super::AmbiguousSessionName>(), Some(super::AmbiguousSessionName::Multiple { .. })));
+    .await
+    .expect_err("unfiltered labels spanning providers must be ambiguous");
+    assert!(matches!(
+        remote.downcast_ref::<super::AmbiguousSessionName>(),
+        Some(super::AmbiguousSessionName::Multiple { .. })
+    ));
     assert_eq!(
         (
             named.map(|thread| thread.id),

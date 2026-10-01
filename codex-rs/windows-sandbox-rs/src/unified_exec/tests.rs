@@ -85,8 +85,8 @@ fn sandbox_cwd() -> PathBuf {
             // tokens disable that group, so seed ordinary user access before
             // testing the additional capability restrictions.
             let token = unsafe {
-                let handle = crate::token::get_current_token_for_restriction()
-                    .expect("current user token");
+                let handle =
+                    crate::token::get_current_token_for_restriction().expect("current user token");
                 OwnedHandle::from_raw_handle(handle as _)
             };
             let mut user_sid = unsafe {
