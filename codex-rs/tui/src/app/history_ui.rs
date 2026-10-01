@@ -341,7 +341,7 @@ impl App {
                     || cell.as_any().is::<history_cell::SessionHeaderHistoryCell>()
             }) {
                 let header: Arc<dyn HistoryCell> =
-                    Arc::new(self.clear_ui_header_cell(CODEX_CLI_VERSION));
+                    Arc::new(self.clear_ui_header_cell(CODEX_CLI_DISPLAY_VERSION));
                 self.transcript_cells.insert(/*index*/ 0, header);
             }
             tui.frame_requester().schedule_frame();

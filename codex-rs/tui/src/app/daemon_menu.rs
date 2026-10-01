@@ -97,7 +97,7 @@ impl App {
             DaemonUpdateSource::ThisCli => {
                 let version = codex_install_context::InstallContext::current()
                     .package_manifest()
-                    .map_or_else(|| CODEX_CLI_VERSION.to_string(), |manifest| manifest.version.to_string());
+                    .map_or_else(|| CODEX_CLI_DISPLAY_VERSION.to_string(), |manifest| format!("{}-local3", manifest.version));
                 format!("Use this CLI package v{version} from {}. Copy the complete package and pin it against automatic updates.", executable.display())
             }
         };

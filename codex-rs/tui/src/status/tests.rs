@@ -190,7 +190,7 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
     lines
         .into_iter()
         .map(|line| {
-            let line = line.replace(CODEX_CLI_DISPLAY_VERSION, "0.0.0-local3");
+            let line = line.replace(CODEX_CLI_DISPLAY_VERSION, "0.0.0");
             if let Some((prefix, value)) = line.split_once("Directory:") {
                 let padding = &value[..value.len() - value.trim_start().len()];
                 format!("{prefix}Directory:{padding}[[workspace]]")

@@ -125,6 +125,7 @@ async fn daemon_menu_is_read_only_and_confirmation_can_cancel_or_handoff() {
         insta::assert_snapshot!(
             snapshot,
             render_bottom_popup(&app.chat_widget, width)
+                .replace(CODEX_CLI_DISPLAY_VERSION, "0.0.0")
                 .replace(r"C:\cli-build\bin\codex", "/x/cli-build/bin/codex")
         );
         // The default choice cancels without emitting an update or exiting.

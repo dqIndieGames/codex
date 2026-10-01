@@ -79,7 +79,25 @@ fn sandbox_cwd() -> PathBuf {
             let parent = std::env::var_os("INSTA_WORKSPACE_ROOT")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-            TempDir::new_in(parent).expect("isolated sandbox workspace outside profile exclusions")
+            let workspace = TempDir::new_in(parent)
+                .expect("isolated sandbox workspace outside profile exclusions");
+            // Azure's checkout can grant writes only through Administrators. LUA
+            // tokens disable that group, so seed ordinary user access before
+            // testing the additional capability restrictions.
+            let token = unsafe {
+                let handle = crate::token::get_current_token_for_restriction()
+                    .expect("current user token");
+                OwnedHandle::from_raw_handle(handle as _)
+            };
+            let mut user_sid = unsafe {
+                crate::token::get_user_sid_bytes(token.as_raw_handle() as _)
+                    .expect("current user SID")
+            };
+            unsafe {
+                crate::acl::add_allow_ace(workspace.path(), user_sid.as_mut_ptr().cast())
+                    .expect("ordinary user workspace access");
+            }
+            workspace
         })
         .path()
         .to_path_buf()

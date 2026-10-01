@@ -1368,9 +1368,19 @@ fn web_search_history_cell_snapshot() {
 }
 
 #[test]
+fn update_available_history_uses_display_version_in_both_views() {
+    let cell = UpdateAvailableHistoryCell::new("9.9.9".to_string(), /*update_action*/ None);
+    let displayed = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
+    let transcript = render_lines(&cell.raw_lines()).join("\n");
+    assert!(displayed.contains(CODEX_CLI_DISPLAY_VERSION));
+    assert!(transcript.contains(CODEX_CLI_DISPLAY_VERSION));
+}
+
+#[test]
 fn standalone_unix_update_available_history_cell_snapshot() {
-    let cell =
+    let mut cell =
         UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneUnix));
+    cell.current_version = "0.0.0";
     let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
@@ -1378,8 +1388,9 @@ fn standalone_unix_update_available_history_cell_snapshot() {
 
 #[test]
 fn standalone_windows_update_available_history_cell_snapshot() {
-    let cell =
+    let mut cell =
         UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneWindows));
+    cell.current_version = "0.0.0";
     let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
@@ -1387,8 +1398,9 @@ fn standalone_windows_update_available_history_cell_snapshot() {
 
 #[test]
 fn pnpm_update_available_history_cell_snapshot() {
-    let cell =
+    let mut cell =
         UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::PnpmGlobalLatest));
+    cell.current_version = "0.0.0";
     let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
@@ -1396,10 +1408,11 @@ fn pnpm_update_available_history_cell_snapshot() {
 
 #[test]
 fn vite_plus_update_available_history_cell_snapshot() {
-    let cell = UpdateAvailableHistoryCell::new(
+    let mut cell = UpdateAvailableHistoryCell::new(
         "9.9.9".to_string(),
         Some(UpdateAction::VitePlusGlobalLatest),
     );
+    cell.current_version = "0.0.0";
     let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);

@@ -12,6 +12,7 @@ const RECAP_HEADING: &str = "Conversation recap";
 #[cfg_attr(debug_assertions, allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct UpdateAvailableHistoryCell {
+    pub(super) current_version: &'static str,
     latest_version: String,
     update_action: Option<UpdateAction>,
 }
@@ -20,6 +21,7 @@ pub(crate) struct UpdateAvailableHistoryCell {
 impl UpdateAvailableHistoryCell {
     pub(crate) fn new(latest_version: String, update_action: Option<UpdateAction>) -> Self {
         Self {
+            current_version: CODEX_CLI_DISPLAY_VERSION,
             latest_version,
             update_action,
         }
@@ -51,7 +53,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
                 "✨\u{200A}".bold().fg(accent_color()),
                 "Update available!".bold().fg(accent_color()),
                 " ",
-                format!("{CODEX_CLI_DISPLAY_VERSION} -> {}", self.latest_version).bold(),
+                format!("{} -> {}", self.current_version, self.latest_version).bold(),
             ],
             update_instruction,
             "",
@@ -78,8 +80,8 @@ impl HistoryCell for UpdateAvailableHistoryCell {
         vec![
             Line::from("Update available!"),
             Line::from(format!(
-                "{CODEX_CLI_DISPLAY_VERSION} -> {}",
-                self.latest_version
+                "{} -> {}",
+                self.current_version, self.latest_version
             )),
             Line::from(update_instruction),
             Line::from(""),

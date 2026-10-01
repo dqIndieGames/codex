@@ -207,7 +207,7 @@ fn terminal_app_ssh_fallback_renders_inline_startup() {
         "terminal_app_ssh_startup",
         frames
             .join("\n---\n")
-            .replace(crate::version::CODEX_CLI_VERSION, "<VERSION>")
+            .replace(crate::version::CODEX_CLI_DISPLAY_VERSION, "<VERSION>")
     );
 }
 

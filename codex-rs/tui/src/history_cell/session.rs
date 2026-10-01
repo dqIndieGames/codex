@@ -110,6 +110,18 @@ impl HistoryCell for SessionNoticeCell {
 #[derive(Debug)]
 pub struct SessionInfoCell(CompositeHistoryCell);
 
+#[cfg(test)]
+impl SessionInfoCell {
+    pub(crate) fn with_snapshot_version(mut self, version: &'static str) -> Self {
+        for part in &mut self.0.parts {
+            if let Some(header) = part.as_any_mut().downcast_mut::<SessionHeaderHistoryCell>() {
+                header.version = version;
+            }
+        }
+        self
+    }
+}
+
 /// Bind provisional and configured banners to the thread's chosen greeting.
 pub(crate) fn set_session_greeting(cell: &mut dyn HistoryCell, greeting: &Arc<OnceLock<Greeting>>) {
     if let Some(header) = cell.as_any_mut().downcast_mut::<SessionHeaderHistoryCell>() {

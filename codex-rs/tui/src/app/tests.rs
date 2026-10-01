@@ -6506,7 +6506,7 @@ async fn app_server_thread_replacement_clears_previous_transcript_before_replay(
         .join("\n");
     assert!(!rendered.contains("Previous thread transcript"));
     assert!(!rendered.contains("Previous queued history"));
-    assert_snapshot!(rendered);
+    assert_snapshot!(rendered.replace(CODEX_CLI_DISPLAY_VERSION, "0.0.0"));
     app_server.shutdown().await?;
     Ok(())
 }
@@ -7172,6 +7172,7 @@ async fn feedback_submission_stages_logs_cleans_up_and_emits_error_history_cell(
     use tracing_subscriber::fmt::writer::MakeWriter;
 
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    app.config.feedback_enabled = true;
     let (server, requests, proxy) =
         session_lifecycle_requests::start_recording_remote_app_server(&app.config).await?;
     let diagnostic = "SQLITE LOG WRITE FAILURE: disk full\n";

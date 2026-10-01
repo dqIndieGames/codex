@@ -28,6 +28,7 @@ fn normalize_voice_snapshot_directory(rendered: &str, cwd: &Path) -> String {
         " ".repeat(cwd.len().saturating_sub(placeholder.len()))
     );
     rendered
+        .replace(crate::version::CODEX_CLI_DISPLAY_VERSION, "0.0.0")
         .replace(&cwd, &padded_placeholder)
         .lines()
         .map(str::trim_end)

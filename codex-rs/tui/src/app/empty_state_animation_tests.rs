@@ -23,6 +23,7 @@ fn text(buffer: &Buffer) -> String {
             row.iter()
                 .map(ratatui::buffer::Cell::symbol)
                 .collect::<String>()
+                .replace(crate::version::CODEX_CLI_DISPLAY_VERSION, "0.0.0")
                 .replace(&project, &normalized_project)
                 .trim_end()
                 .to_string()
