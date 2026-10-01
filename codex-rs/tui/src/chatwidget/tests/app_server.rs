@@ -1,10 +1,10 @@
 use super::helpers::drain_insert_history_transcript;
 use super::*;
+use crate::version::CODEX_CLI_DISPLAY_VERSION;
 use codex_app_server_protocol::AuthRecoveryNotification;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use pretty_assertions::assert_eq;
-use crate::version::CODEX_CLI_DISPLAY_VERSION;
 
 const SAFETY_BUFFERING_HEADER_TEXT: &str = "Giving this request a little extra thought";
 

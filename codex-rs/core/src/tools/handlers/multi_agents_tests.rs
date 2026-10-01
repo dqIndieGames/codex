@@ -388,10 +388,14 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
                 config.model_provider_id = "ollama".to_string();
                 config.model_provider =
                     built_in_model_providers(/*openai_base_url*/ None)["ollama"].clone();
-                config.permissions.approval_policy.set(AskForApproval::OnRequest)
+                config
+                    .permissions
+                    .approval_policy
+                    .set(AskForApproval::OnRequest)
                     .expect("approval policy should be set");
             },
-        ).await;
+        )
+        .await;
     let manager = thread_manager();
     set_agent_control(
         Arc::get_mut(&mut session).expect("session should be uniquely owned"),

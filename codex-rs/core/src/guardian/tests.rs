@@ -3108,8 +3108,17 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
         "rejection message should include guardian rationale: {rejection}"
     );
     // Checklist retry diagnostics: raw HTTP bodies must not leak through user-visible errors.
-    assert!(warnings.iter().all(|message| !message.contains(error_message)));
-    assert!(denial_rationales.iter().flatten().all(|message| !message.contains(error_message)));
+    assert!(
+        warnings
+            .iter()
+            .all(|message| !message.contains(error_message))
+    );
+    assert!(
+        denial_rationales
+            .iter()
+            .flatten()
+            .all(|message| !message.contains(error_message))
+    );
     assert!(!rejection.contains(error_message));
 
     Ok(())

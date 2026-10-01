@@ -550,7 +550,9 @@ fn local1_first_turn_checklist_prefix_contains_current_local3_items() {
     assert!(prefix.contains("14. `node_repl` MCP 自动继承当前 local3 CLI 路径"));
     assert!(prefix.contains("15. app-server 退出时只补已有 runtime 引用清理"));
     assert!(prefix.contains("16. 配置了 `experimental_bearer_token` 的 provider"));
-    assert!(prefix.contains("17. Windows 交付必须分为 GitHub build 和 GitHub release promotion 两段"));
+    assert!(
+        prefix.contains("17. Windows 交付必须分为 GitHub build 和 GitHub release promotion 两段")
+    );
     assert!(prefix.contains("18. context window 溢出后按图片梯子自愈"));
     assert!(prefix.contains("19. 全局 `--account <账号名>` 只切换 Codex 登录凭据"));
     assert!(!prefix.contains("-local2"));
