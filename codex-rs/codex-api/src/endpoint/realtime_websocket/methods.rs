@@ -38,7 +38,6 @@ use futures::SinkExt;
 use futures::StreamExt;
 use http::HeaderMap;
 use http::HeaderValue;
-use http::StatusCode;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::future::Future;

@@ -1,5 +1,4 @@
 use codex_http_client::Request;
-use codex_http_client::RetryAfter;
 use codex_http_client::TransportError;
 use std::future::Future;
 use std::time::Duration;
