@@ -133,7 +133,10 @@ async fn daemon_menu_is_read_only_and_confirmation_can_cancel_or_handoff() {
         assert_eq!(app.pending_update_action, None);
         app.confirm_daemon_update(source);
         if source == DaemonUpdateSource::ThisCli {
-            assert!(render_bottom_popup(&app.chat_widget, /*width*/ 150).contains(CODEX_CLI_DISPLAY_VERSION));
+            assert!(
+                render_bottom_popup(&app.chat_widget, /*width*/ 150)
+                    .contains(CODEX_CLI_DISPLAY_VERSION)
+            );
         }
         app.chat_widget.handle_key_event(KeyCode::Down.into());
         app.chat_widget.handle_key_event(KeyCode::Enter.into());

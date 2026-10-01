@@ -88,7 +88,10 @@ impl App {
     pub(super) fn confirm_daemon_update(&mut self, source: DaemonUpdateSource) {
         let version = codex_install_context::InstallContext::current()
             .package_manifest()
-            .map_or_else(|| CODEX_CLI_DISPLAY_VERSION.to_string(), |manifest| format!("{}-local3", manifest.version));
+            .map_or_else(
+                || CODEX_CLI_DISPLAY_VERSION.to_string(),
+                |manifest| format!("{}-local3", manifest.version),
+            );
         self.confirm_daemon_update_with_version(source, &version);
     }
 
