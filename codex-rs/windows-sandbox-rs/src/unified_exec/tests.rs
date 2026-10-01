@@ -1020,7 +1020,8 @@ async fn assert_legacy_tty_descendant_lifecycle(
         &[],
         /*tty*/ true,
         // Keep the terminal alive while testing the job's descendant lifetime.
-        /*stdin_open*/ true,
+        /*stdin_open*/
+        true,
     )
     .await
     .expect("spawn legacy sandbox ConPTY lifecycle test");
@@ -1029,7 +1030,10 @@ async fn assert_legacy_tty_descendant_lifecycle(
     while !ready_marker.exists() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(ready_marker.exists(), "{lifecycle:?} descendant did not start");
+    assert!(
+        ready_marker.exists(),
+        "{lifecycle:?} descendant did not start"
+    );
     let descendant_pid = fs::read_to_string(&ready_marker)
         .expect("read descendant pid")
         .trim()
