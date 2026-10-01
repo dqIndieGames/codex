@@ -206,14 +206,14 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                         match mode {
                             HttpErrorMode::Default => CodexErr::InvalidImageRequest(),
                             HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
-                                retryable_stream(body_text)
+                                retryable_stream(format!("HTTP {status}"))
                             }
                         }
                     } else {
                         match mode {
                             HttpErrorMode::Default => CodexErr::InvalidRequest(body_text),
                             HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
-                                retryable_stream(body_text)
+                                retryable_stream(format!("HTTP {status}"))
                             }
                         }
                     }
@@ -281,7 +281,7 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                             request_id: extract_request_tracking_id(headers.as_ref()),
                         }),
                         HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => {
-                            retryable_stream(body_text)
+                            retryable_stream(format!("HTTP {status}"))
                         }
                     }
                 } else {

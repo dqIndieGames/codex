@@ -165,7 +165,8 @@ fn map_responses_request_api_error_maps_invalid_image_body_to_retryable_stream()
     let CodexErrorDetails::Stream(message) = err.details() else {
         panic!("expected responses invalid image body to be retryable stream, got {err:?}");
     };
-    assert_eq!(message, &body);
+    assert!(message.contains(&http::StatusCode::BAD_REQUEST.to_string()));
+    assert!(!message.contains(&body));
     assert_eq!(err.server_retry_delay(), None);
 }
 
@@ -183,7 +184,8 @@ fn map_responses_request_api_error_maps_unknown_429_to_retryable_stream() {
     let CodexErrorDetails::Stream(message) = err.details() else {
         panic!("expected responses request 429 to be retryable stream, got {err:?}");
     };
-    assert_eq!(message, &body);
+    assert!(message.contains(&http::StatusCode::TOO_MANY_REQUESTS.to_string()));
+    assert!(!message.contains(&body));
     assert_eq!(err.server_retry_delay(), None);
 }
 
@@ -547,7 +549,10 @@ fn map_responses_request_api_error_maps_unknown_400_to_retryable_stream() {
     let CodexErrorDetails::Stream(message) = err.details() else {
         panic!("expected responses request 400 to be retryable stream, got {err:?}");
     };
-    assert_eq!(message, &body);
+    // Checklist diagnostics preserve HTTP status without exposing the response body.
+    assert!(message.contains(&http::StatusCode::BAD_REQUEST.to_string()));
+    assert!(!message.contains(&body));
+    assert!(!message.contains("Some other bad request."));
     assert_eq!(err.server_retry_delay(), None);
 }
 

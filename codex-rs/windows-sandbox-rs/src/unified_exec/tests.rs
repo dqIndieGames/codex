@@ -108,10 +108,17 @@ fn sandbox_cwd() -> PathBuf {
 
 fn sandbox_env(codex_home: &Path) -> HashMap<String, String> {
     // Keep ACL inheritance away from the runner's shared caches and temp tree.
-    HashMap::from([
+    let mut env = HashMap::from([
         ("TEMP".into(), codex_home.to_string_lossy().into_owned()),
         ("TMP".into(), codex_home.to_string_lossy().into_owned()),
-    ])
+    ]);
+    // PowerShell's .NET host and child launch need the normal Windows paths.
+    for name in ["PATH", "SystemRoot", "COMSPEC", "USERPROFILE"] {
+        if let Ok(value) = std::env::var(name) {
+            env.insert(name.to_string(), value);
+        }
+    }
+    env
 }
 
 fn sandbox_home(name: &str) -> TempDir {
