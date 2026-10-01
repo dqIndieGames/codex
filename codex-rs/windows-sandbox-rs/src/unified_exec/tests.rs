@@ -742,7 +742,11 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     )
     .expect("run legacy capture powershell");
     let descendant_pid = fs::read_to_string(&ready_marker)
-        .expect("read descendant pid")
+        .unwrap_or_else(|error| {
+            panic!("read descendant pid: {error}; exit={} timed_out={} stdout={:?} stderr={:?} child_stderr={:?}",
+                result.exit_code, result.timed_out, String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr), fs::read_to_string(codex_home.path().join("descendant.stderr")))
+        })
         .trim()
         .parse()
         .expect("parse descendant pid");
@@ -762,7 +766,8 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     );
     assert!(
         wait_for_path(&survival_marker, Duration::from_secs(10)),
-        "sandbox descendant did not survive normal capture exit"
+        "sandbox descendant did not survive normal capture exit; child_stderr={:?}",
+        fs::read_to_string(codex_home.path().join("descendant.stderr"))
     );
     wait_for_process_exit(&descendant_process, Duration::from_secs(10))
         .expect("sandbox descendant did not exit after release");
@@ -999,7 +1004,7 @@ async fn assert_legacy_tty_descendant_lifecycle(
     let parent_command =
         start_powershell_child(pwsh, codex_home.path(), &child_command, &parent_tail);
     let permission_profile = PermissionProfile::workspace_write();
-    let spawned = spawn_windows_sandbox_session_legacy(
+    let mut spawned = spawn_windows_sandbox_session_legacy(
         &permission_profile,
         workspace_roots_for(cwd.as_path()).as_slice(),
         codex_home.path(),
@@ -1019,10 +1024,19 @@ async fn assert_legacy_tty_descendant_lifecycle(
     )
     .await
     .expect("spawn legacy sandbox ConPTY lifecycle test");
-    assert!(
-        wait_for_path(&ready_marker, Duration::from_secs(10)),
-        "{lifecycle:?} descendant did not start"
-    );
+    // Yield while waiting: this fixture also owns the current-thread IO runtime.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready_marker.exists() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    if !ready_marker.exists() {
+        let mut output = Vec::new();
+        while let Ok(chunk) = spawned.stdout_rx.try_recv() {
+            output.extend(chunk);
+        }
+        panic!("{lifecycle:?} descendant did not start; output={:?}; child_stderr={:?}",
+            String::from_utf8_lossy(&output), fs::read_to_string(codex_home.path().join("descendant.stderr")));
+    }
     let descendant_pid = fs::read_to_string(&ready_marker)
         .expect("read descendant pid")
         .trim()
