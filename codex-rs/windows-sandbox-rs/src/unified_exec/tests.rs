@@ -157,7 +157,10 @@ fn start_powershell_child(
             .collect::<Vec<_>>(),
     );
     format!(
-        "Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '-NoProfile','-EncodedCommand','{encoded}' -RedirectStandardOutput '{}' -RedirectStandardError '{}'; {parent_tail}",
+        // Start-Process inherits all inheritable handles, including the original
+        // capture pipes even when the child's standard streams are redirected.
+        // A detached fixture must not hold the parent's output pipes open.
+        "Add-Type -ErrorAction Stop 'using System; using System.Runtime.InteropServices; public class DetachedOutput {{ [DllImport(\"kernel32.dll\")] public static extern IntPtr GetStdHandle(int n); [DllImport(\"kernel32.dll\")] public static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags); }}'; foreach ($n in -11,-12) {{ if (-not [DetachedOutput]::SetHandleInformation([DetachedOutput]::GetStdHandle($n),1,0)) {{ throw 'failed to detach output handles' }} }}; Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','{encoded}' -RedirectStandardOutput '{}' -RedirectStandardError '{}'; {parent_tail}",
         powershell_literal(pwsh),
         powershell_literal(&stdio_dir.join("descendant.stdout")),
         powershell_literal(&stdio_dir.join("descendant.stderr")),
@@ -742,11 +745,7 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     )
     .expect("run legacy capture powershell");
     let descendant_pid = fs::read_to_string(&ready_marker)
-        .unwrap_or_else(|error| {
-            panic!("read descendant pid: {error}; exit={} timed_out={} stdout={:?} stderr={:?} child_stderr={:?}",
-                result.exit_code, result.timed_out, String::from_utf8_lossy(&result.stdout),
-                String::from_utf8_lossy(&result.stderr), fs::read_to_string(codex_home.path().join("descendant.stderr")))
-        })
+        .expect("read descendant pid")
         .trim()
         .parse()
         .expect("parse descendant pid");
@@ -766,8 +765,7 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     );
     assert!(
         wait_for_path(&survival_marker, Duration::from_secs(10)),
-        "sandbox descendant did not survive normal capture exit; child_stderr={:?}",
-        fs::read_to_string(codex_home.path().join("descendant.stderr"))
+        "sandbox descendant did not survive normal capture exit"
     );
     wait_for_process_exit(&descendant_process, Duration::from_secs(10))
         .expect("sandbox descendant did not exit after release");
@@ -1004,13 +1002,14 @@ async fn assert_legacy_tty_descendant_lifecycle(
     let parent_command =
         start_powershell_child(pwsh, codex_home.path(), &child_command, &parent_tail);
     let permission_profile = PermissionProfile::workspace_write();
-    let mut spawned = spawn_windows_sandbox_session_legacy(
+    let spawned = spawn_windows_sandbox_session_legacy(
         &permission_profile,
         workspace_roots_for(cwd.as_path()).as_slice(),
         codex_home.path(),
         vec![
             pwsh.display().to_string(),
             "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
             "-Command".to_string(),
             parent_command,
         ],
@@ -1020,7 +1019,8 @@ async fn assert_legacy_tty_descendant_lifecycle(
         &[],
         &[],
         /*tty*/ true,
-        /*stdin_open*/ false,
+        // Keep the terminal alive while testing the job's descendant lifetime.
+        /*stdin_open*/ true,
     )
     .await
     .expect("spawn legacy sandbox ConPTY lifecycle test");
@@ -1029,14 +1029,7 @@ async fn assert_legacy_tty_descendant_lifecycle(
     while !ready_marker.exists() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    if !ready_marker.exists() {
-        let mut output = Vec::new();
-        while let Ok(chunk) = spawned.stdout_rx.try_recv() {
-            output.extend(chunk);
-        }
-        panic!("{lifecycle:?} descendant did not start; output={:?}; child_stderr={:?}",
-            String::from_utf8_lossy(&output), fs::read_to_string(codex_home.path().join("descendant.stderr")));
-    }
+    assert!(ready_marker.exists(), "{lifecycle:?} descendant did not start");
     let descendant_pid = fs::read_to_string(&ready_marker)
         .expect("read descendant pid")
         .trim()
