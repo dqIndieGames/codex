@@ -242,6 +242,17 @@ def verify(binary, scenario, output_dir=None):
         if scenario == "handshake":
             attempts = [r for r in server.requests if r["transport"] == "handshake_eof"]
             assert len(attempts) == 3, "exactly three inference handshakes must fail"
+        if scenario in ("close", "compact"):
+            # Checklist 3.5: relay recovery rotates the cache key only after the
+            # failed sequence and replays the complete input without a stale ID.
+            attempts = [r["payload"] for r in server.requests
+                        if scenario == "close" or r["compact"]]
+            failed, recovered = attempts[:-1], attempts[-1]
+            assert len(failed) == len(server.failures)
+            original_key = failed[0]["prompt_cache_key"]
+            assert all(r["prompt_cache_key"] == original_key for r in failed)
+            assert recovered["prompt_cache_key"] != original_key
+            assert not recovered.get("previous_response_id")
         if scenario == "compact":
             assert any(r["compact"] for r in server.requests), "auto compact must complete over WS"
             assert any(not r["compact"] for r in server.requests), "sampling must resume after compaction"
@@ -259,6 +270,9 @@ def verify(binary, scenario, output_dir=None):
         report = {"scenario": scenario, "passed": True,
                   "ws_failures": len(server.failures), "http_requests": len(http),
                   "failure_to_retry_seconds": waits}
+        if output_dir:
+            (output_dir / f"{scenario}.requests.json").write_text(
+                json.dumps(server.requests, indent=2), encoding="utf-8")
         print(json.dumps(report), flush=True)
         return report
     finally:
