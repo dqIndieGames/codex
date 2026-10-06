@@ -2,19 +2,20 @@ use super::ResponsesStreamRequest;
 use super::ResponsesStreamRetryState;
 use super::handle_response_stream_error;
 use super::log_retry;
+use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
 use codex_login::CodexAuth;
 use codex_http_client::RetryAfter;
 use codex_protocol::error::CodexErr;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::Instant;
 use tracing_test::internal::MockWriter;
 
 // Product contract: local3 checklist transport recovery, three consecutive
-// WS failures even with an unlimited task budget; official sticky state stays intact.
+// WS failures preserve protocol even with an unlimited budget; official sticky state stays intact.
 #[tokio::test(start_paused = true)]
-async fn websocket_transport_fallback_covers_sampling_and_both_compaction_paths() {
+async fn websocket_recovery_preserves_protocol_for_sampling_and_both_compaction_paths() {
     for official in [true, false] {
         for request in [
             ResponsesStreamRequest::Sampling,
@@ -34,6 +35,7 @@ async fn websocket_transport_fallback_covers_sampling_and_both_compaction_paths(
                 },
             )
             .await;
+            let context = StepContext::for_test(Arc::new(context));
             let mut client = session.services.model_client.new_session();
             client
                 .turn_state()
@@ -55,14 +57,14 @@ async fn websocket_transport_fallback_covers_sampling_and_both_compaction_paths(
                 .unwrap();
                 assert_eq!(
                     state.display_retries, attempt,
-                    "fallback must not reset visible retries"
+                    "recovery must not reset visible retries"
                 );
                 assert_eq!(
                     session.services.model_client.responses_websocket_enabled(),
-                    attempt < 3,
-                    "the third failed WS attempt must select HTTP, independent of retry budget",
+                    true,
+                    "WS recovery must preserve protocol, independent of retry budget",
                 );
-                assert!(start.elapsed() >= Duration::from_secs(5));
+                assert!(start.elapsed() >= Duration::from_secs(10));
                 if official {
                     assert_eq!(
                         client.turn_state().get().map(String::as_str),
@@ -79,6 +81,7 @@ async fn websocket_transport_fallback_covers_sampling_and_both_compaction_paths(
 #[tokio::test(start_paused = true)]
 async fn websocket_recovery_keeps_cancellation_terminal() {
     let (session, context) = make_session_and_context().await;
+    let context = StepContext::for_test(Arc::new(context));
     let mut client = session.services.model_client.new_session();
     let mut state = ResponsesStreamRetryState::default();
     for error in [
@@ -122,7 +125,7 @@ async fn sampling_retry_does_not_warn_on_intermediate_stream_error() {
         &CodexErr::Stream("websocket closed by server before response.completed".to_string()),
         /*retries*/ 2,
         /*max_retries*/ 5,
-        Duration::from_secs(5),
+        Duration::from_secs(10),
     );
 
     let logs = String::from_utf8(
@@ -138,10 +141,11 @@ async fn sampling_retry_does_not_warn_on_intermediate_stream_error() {
     );
 }
 
-/// Product truth: local3 checklist item 3 fixes every retry wait at five seconds.
+/// Product truth: local3 checklist item 3 fixes every retry wait at ten seconds.
 #[tokio::test(start_paused = true)]
 async fn stream_retry_ignores_short_and_long_server_advice() {
     let (session, context) = make_session_and_context().await;
+    let context = StepContext::for_test(Arc::new(context));
     let mut client = session.services.model_client.new_session();
     let mut state = ResponsesStreamRetryState::default();
     for advised in [Duration::ZERO, Duration::from_secs(30)] {
@@ -151,6 +155,6 @@ async fn stream_retry_ignores_short_and_long_server_advice() {
             &mut state, 4, CodexErr::InternalServerError.with_retry_after(advice),
             &mut client, &session, &context, ResponsesStreamRequest::Sampling,
         ).await.expect("retry allowed");
-        assert!((Duration::from_secs(5)..=Duration::from_millis(5001)).contains(&start.elapsed()));
+        assert!((Duration::from_secs(10)..=Duration::from_millis(10001)).contains(&start.elapsed()));
     }
 }

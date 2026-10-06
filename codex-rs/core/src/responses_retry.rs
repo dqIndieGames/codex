@@ -1,9 +1,13 @@
-//! Shared retry and transport fallback decisions for Responses requests.
+//! Shared retry and protocol-preserving recovery for Responses requests.
+//! Content-filter guidance is recorded for sampling requests before retry decisions.
 
 use std::time::Duration;
 
 use crate::client::ModelClientSession;
+use crate::context::ContentFilterGuidance;
+use crate::context::ContextualUserFragment;
 use crate::session::session::Session;
+use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::util::fixed_retry_delay;
 use codex_client::RetryOperation;
@@ -24,7 +28,6 @@ pub(crate) enum ResponsesStreamRequest {
 pub(crate) struct ResponsesStreamRetryState {
     pub(crate) retries: u64,
     connection_retries: u64,
-    websocket_failures: u64,
     display_retries: u64,
 }
 
@@ -33,7 +36,6 @@ impl Default for ResponsesStreamRetryState {
         Self {
             retries: 0,
             connection_retries: 0,
-            websocket_failures: 0,
             display_retries: 0,
         }
     }
@@ -54,9 +56,26 @@ pub(crate) async fn handle_response_stream_error(
     err: CodexErr,
     client_session: &mut ModelClientSession,
     sess: &Session,
-    turn_context: &TurnContext,
+    step_context: &StepContext,
     request: ResponsesStreamRequest,
 ) -> Result<(), CodexErr> {
+    let turn_context = &step_context.turn;
+    if matches!(request, ResponsesStreamRequest::Sampling)
+        && matches!(err.details(), CodexErrorDetails::ContentFilter)
+    {
+        let model_info = &step_context.settings.model_info;
+        let guidance = ContentFilterGuidance {
+            text: codex_prompts::ResolvedModelMessages::from_model(model_info)
+                .content_filter_guidance()
+                .to_string(),
+        };
+        sess.record_conversation_items(
+            turn_context,
+            model_info,
+            &[ContextualUserFragment::into(guidance)],
+        )
+        .await;
+    }
     let operation = match request {
         ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
         ResponsesStreamRequest::LocalCompaction => RetryOperation::LocalCompaction,
@@ -72,30 +91,8 @@ pub(crate) async fn handle_response_stream_error(
         return Err(err);
     }
 
-    // Transport recovery must not depend on an unbounded turn retry budget or
-    // the relay-only sticky routing policy. In particular, official ChatGPT
-    // connections must also escape a repeatedly broken WebSocket.
-    if matches!(
-        err.details(),
-        CodexErrorDetails::Stream(_)
-            | CodexErrorDetails::ConnectionFailed(_)
-            | CodexErrorDetails::ResponseStreamFailed(_)
-            | CodexErrorDetails::RequestTimeout
-            | CodexErrorDetails::RetryTimeBudgetInterrupted(_)
-    ) {
-        retry_state.websocket_failures = retry_state.websocket_failures.saturating_add(1);
-    } else {
-        retry_state.websocket_failures = 0;
-    }
-    let transport_fallback = max_retries > 0
-        && retry_state.websocket_failures == ROUTE_RECOVERY_RETRY_THRESHOLD
-        && client_session.try_switch_fallback_transport(
-            &turn_context.session_telemetry,
-            turn_context.model_info(),
-        );
-    if transport_fallback {
-        retry_state.retries = 0;
-    }
+    // Retire a failed socket without changing the provider's transport choice.
+    client_session.reset_retry_websocket_connection();
 
     if max_retries > 0
         && turn_context
@@ -120,7 +117,7 @@ pub(crate) async fn handle_response_stream_error(
         );
         sess.notify_stream_error(
             turn_context,
-            retry_status_message(&err, retry_state.display_retries, transport_fallback),
+            retry_status_message(&err, retry_state.display_retries),
             err,
         )
         .await;
@@ -129,17 +126,7 @@ pub(crate) async fn handle_response_stream_error(
         return Ok(());
     }
 
-    let budget_fallback = max_retries > 0
-        && retry_state.retries >= max_retries
-        && client_session.try_switch_fallback_transport(
-            &turn_context.session_telemetry,
-            turn_context.model_info(),
-        );
-    if budget_fallback {
-        retry_state.retries = 0;
-    }
-
-    if retry_state.retries < max_retries || budget_fallback {
+    if retry_state.retries < max_retries {
         retry_state.retries = retry_state.retries.saturating_add(1);
         let retry_count = retry_state.retries;
         retry_state.display_retries = retry_state.display_retries.saturating_add(1);
@@ -154,11 +141,7 @@ pub(crate) async fn handle_response_stream_error(
         );
         sess.notify_stream_error(
             turn_context,
-            retry_status_message(
-                &err,
-                retry_state.display_retries,
-                transport_fallback || budget_fallback,
-            ),
+            retry_status_message(&err, retry_state.display_retries),
             err,
         )
         .await;
@@ -182,10 +165,8 @@ fn maybe_activate_route_recovery(client_session: &mut ModelClientSession, retry_
     }
 }
 
-fn retry_status_message(err: &CodexErr, retry_count: u64, switched_to_http: bool) -> String {
-    if switched_to_http {
-        format!("Reconnecting... {retry_count} (auto retry) - switching to HTTP")
-    } else if err.is_retry_time_budget_interrupted() {
+fn retry_status_message(err: &CodexErr, retry_count: u64) -> String {
+    if err.is_retry_time_budget_interrupted() {
         err.to_string()
     } else {
         format!("Reconnecting... {retry_count} (auto retry)")

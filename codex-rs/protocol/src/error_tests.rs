@@ -40,6 +40,7 @@ async fn codex_err_debug_preserves_legacy_shape() {
 fn retryability_preserves_error_details_distinctions() {
     let errors = [
         (CodexErr::ServerOverloaded, true),
+        (CodexErr::new(CodexErrorDetails::ContentFilter), true),
         (
             CodexErr::new(CodexErrorDetails::RateLimitExceeded("retry later".into())),
             true,
@@ -92,7 +93,7 @@ fn retry_delay_is_fixed_independent_of_advice_and_attempt() {
         ] {
             let error = error.with_retry_after(advice);
             for attempt in [1, 3, 6] {
-                assert_eq!(error.retry_delay(attempt), Some(Duration::from_secs(5)));
+                assert_eq!(error.retry_delay(attempt), Some(Duration::from_secs(10)));
             }
             assert!(error.retry_after().is_some());
         }

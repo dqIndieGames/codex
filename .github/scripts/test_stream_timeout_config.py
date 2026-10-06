@@ -90,7 +90,7 @@ def verify(binary, scenario, output=None):
     server = Fixture(scenario)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
-    requested_ms = 600000 if scenario == "above_old_cap" else 300000
+    requested_ms = 600000 if scenario == "above_old_cap" else (2000 if scenario in ("first_idle", "post_idle") else 300000)
     config = {
         "model_provider": "fixture",
         "model_providers.fixture.name": "Stream configuration fixture",
@@ -145,7 +145,7 @@ def verify(binary, scenario, output=None):
                 "one timed-out stream must recover with one retry"
             )
             interval = server.requests[1] - server.requests[0]
-            expected = requested_ms / 1000 + 5
+            expected = requested_ms / 1000 + 10
             assert expected - 2 <= interval <= expected + 15, (
                 scenario,
                 interval,
@@ -197,7 +197,7 @@ if __name__ == "__main__":
         results = list(
             pool.map(
                 lambda scenario: verify(exe, scenario, output),
-                ("first_idle", "post_idle", "above_old_cap", "long_output"),
+                tuple(sys.argv[3:]) or ("first_idle", "post_idle", "above_old_cap", "long_output"),
             )
         )
     if output:

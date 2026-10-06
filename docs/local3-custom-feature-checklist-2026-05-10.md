@@ -1,174 +1,784 @@
-# local3 定制功能清单_2026-05-10
-本清单用于在 local3 合并官方上游版本后，按用户可感知的功能结果核对本地定制能力是否仍然保留。
+# local3 定制功能与回归验收清单
 
-> 2026-09-30 当前口径：Responses 流式超时恢复读取 provider 的 `stream_idle_timeout_ms`，默认及本次配置均为 `300000` 毫秒（300 秒）。首事件等待和后续流式空闲均使用该配置，不再设置 local3 的 60 秒或 390 秒硬上限。等待 HTTP 响应头不设置 local3 固定等待看门狗。流式计时不得按总生成时长中断持续输出。连接错误继续自动重试，每次固定等待 `5s`。compact / realtime / WebRTC 的独立 `390s` 规则保留。历史超时口径以本条为准。
+本清单用于合并官方上游版本后，核对 local3 定制功能是否保留，并指导后续实现和验收。
 
-1. local3 版本身份保留为 `<Codex 版本>-local3`，所有用户能看到版本的位置都要显示这个本地构建后缀；原来可能被上游版本覆盖成官方裸版本，修改后 CLI、TUI、状态卡片、标题区、历史单元和升级提示都继续显示 local3 身份，这样用户能确认自己正在使用本地定制版。屏幕、命令行、TUI、doctor、历史和升级提示继续显示 `<Codex 版本>-local3`。发给服务端的 HTTP `User-Agent` 不使用这套显示版本，按第 21 条。
+- **功能摘要**：说明用户能感知到的结果。
+- **详细规则**：明确实现边界和验收标准。
+- **历史经验**：保留故障原因、定位入口和回归陷阱。
+- **配置快照**：记录核对时的本机设置，不替代长期规则。
 
-2. 首次输入纯文本 `你好` 时显示 local3 功能清单，并且每个新线程只显示 1 次；原来清单可能被做成某个客户端专用提示或重复插入，修改后 brand-new thread 或 Clear 后的新线程中，首个普通用户输入恰好为 `你好` 才会在首个 assistant 主消息第一段显示全量 local3 清单，resume、continue、fork、历史线程重开、子会话和其他输入都不重复触发，这样用户首次检查定制功能时能稳定看到完整清单且不会被反复打扰。
+历史经验中的“当时已验证”只代表当时记录，不代表当前版本已经通过验收。
 
-3. 远端模型主链失败后的自动重试覆盖所有会直接终止一次 Codex 对话、compact 或 realtime 模型链路的远端/模型请求错误，不能有错误类型豁免，保持更耐用、更少打断的体验；原来只有部分远端错误会按白名单重试，修改后所有由模型服务主链、Responses HTTP、SSE、WebSocket、compact、realtime/WebSocket 或其他参与一次 assistant turn / compaction 的 Codex 请求链路返回的错误都进入普通自动重试，任何旧 `is_retryable=false`、状态码、错误码、协议层映射或错误分类都不能绕过 retry；`Selected model is at capacity. Please try a different model.`、context window、usage/quota、policy 等服务端返回错误也必须按同一 retry budget 处理；本项强制范围不包含模型目录刷新 `/models` 与 MCP OpenAI 文件上传/下载 URL 生成等旁路 HTTP 辅助请求，这些旁路可以保留自身产品口径，不作为本清单 retry / sticky-break 漏改判定，但如果它们发送 provider token 或展示用户可见错误，仍按对应的鉴权隔离和提示规则验收；所有自动 retry 的每次等待间隔都必须固定为 `5s`，不是“最高 5s”、不是指数退避、不是 jitter/base_delay 逐步增长，也不是 cap-only，包括 Responses HTTP request retry、stream/WebSocket retry、compact retry、realtime/WebSocket 连接 retry 和服务端 `Retry-After` 建议等待都统一等 `5s`；禁止留下 `8s`、`<=5s`、`最高 5s`、退避/抖动/cap-only 的实现、测试名、断言或文档口径；中间失败不写入历史，只保留可见重连提示和可诊断信息，这样用户在模型容量、临时鉴权、网络、服务抖动或其他远端异常时更少看到终态失败，也不会被越来越长的本地重试等待卡住。
+## 一、用户可见功能
 
-   - 单次请求流式空闲超时：每次 Responses HTTP 流式请求收到响应头后，按 `stream_idle_timeout_ms` 处理流式等待；首次请求与每次重试使用相同配置，前次耗时、固定 `5s` 等待、fallback transport、provider runtime refresh 和 sticky-break 不扣减下次额度。流式主链：1) 等待 HTTP 响应头，不设置 local3 固定等待看门狗；2) 收到响应头后的首事件等待，读取 `stream_idle_timeout_ms`；3) 后续流式空闲继续读取同一配置，有模型进展即重新计算本段，不按生成总时长计时；4) RST / 读失败进入自动重试。超时提示显示实际生效时长，不写死“一分钟”或“6.5 分钟”。compact / realtime / WebRTC 等完整响应或建连使用独立的 `390s` 上限，与流式配置分开；已有显式更短连接超时继续保留。当前尝试超时时只取消该次请求或连接，发出 transient 临时提示，固定等待 `5s` 后自动重试；下一次获得完整配置额度，不得终止 turn 或要求用户手动重试。自动 retry 次数可保持未设上限或非常大；用户可见状态显示累计序号和 `(auto retry)`，不得显示内部 `u64::MAX`、`(10 min limit)` 或 `(unbounded)`；超时、阶段切换与恢复不得把序号 N 归零。
+程序会提取本节的编号行，生成首次“你好”清单。保留连续的 1–21 项，每项正文保持一个物理行；其他章节不使用 `数字. ` 列表。
 
-4. 重试期间的可见提示、日志噪声和统计口径保持平衡；原来中间态可能刷屏或让诊断信息丢失，修改后用户仍能看到首次重连、重试次数、重试详情等提示，但所有 `willRetry=true`、`EventMsg::StreamError`、HTTP request retry、stream/WebSocket reconnect 和 compact retry 的中间失败默认不得以 `warn!` / `error!` 写入普通运行日志或 app-server stderr，也不应生成每次 retry 一条的高噪日志；只有最终失败、用户显式开启 debug/trace 诊断、或低频汇总型诊断才允许落日志，同时 retry metrics/counter 继续保留，这样用户界面和后台日志更安静，排查问题时仍有统计依据。
+1. **local3 版本身份。** CLI、TUI、doctor、历史记录和其他展示本地构建身份的位置显示 `<Codex 版本>-local3`；发往服务端的版本信息按第 21 项处理。
 
-   - retry 中间态目标清单：retry 中间态就应该只是“内部继续重试 + TUI 上同一个状态栏数字增加”。除了必要的网络重试、等待、一次轻量状态通知、TUI 覆盖刷新和 metrics 计数，不应该再写日志、写历史、进 fork、进 replay 或污染上下文。落地时必须同时去掉 retry 中间态 `warn!` / `error!` 噪声，并把 retry 中间态从普通持久事件链改成真正的 transient status update；不能把普通 `EventMsg::StreamError` / `EventMsg::Warning` 进入 rollout/history/fork/replay 的路径当作完成证据。
+2. **首次“你好”清单。** 全新线程或 Clear 后的新线程，首个普通用户输入恰好为纯文本 `你好` 时，在首个 assistant 主消息开头显示完整功能清单，每个新线程只显示一次。
 
-5. 历史会话默认跨 provider 可发现，并且继续旧线程时使用当前顶层 provider；原来历史入口可能按 provider 收窄，修改后历史列表、最近会话、resume picker 和 `codex://threads/{id}` deep link 默认都能看到旧会话，并且恢复旧线程时不能因历史 `session_meta.model_provider`、已加载线程快照或 `thread/read` 回退继续粘住旧 provider；若旧线程 provider 与当前顶层 provider 不一致，应重建/换绑到当前 provider，做不到时必须明确提示仍在使用旧 provider，这样用户切换 provider 后仍能找回并继续之前的工作，不会误以为已经走新 provider。
+3. **主链自动重试。** 会终止对话、上下文压缩或 realtime 模型链路的远端请求错误均进入自动重试，每次失败后固定等待 `10s`；单次超时只结束当前尝试，下一次重新获得完整时间额度。
 
-6. 全局优先服务层默认开启，并允许显式恢复官方映射；原来不同配置层级可能让请求服务层表现不一致，修改后顶层未配置或设为开启时统一使用 priority，顶层显式关闭时恢复 Fast -> priority、Flex -> flex、None -> unset 的官方映射，profile 内同名设置不生效，这样用户默认获得更稳定的优先体验，也能按需回到官方行为。
+4. **重试可见且不污染历史。** 用户能看到持续累计的重试次数和安全诊断信息；中间失败只作临时状态展示，不写入历史、fork、replay 或普通错误日志。
 
-7. Windows app、app server 和 TUI 默认日志降噪，运行时负担默认更轻；原来未显式设置日志时可能产生高噪声记录，修改后 Windows app/app server 和 TUI 默认只保留更安静的日志级别，显式设置后仍可打开详细日志，同时 analytics、feedback、log_db 默认关闭但可配置开启，这样用户日常使用更轻、更安静，需要排查或反馈时还能手动打开。
+5. **跨 provider 继续历史会话。** 历史入口默认可发现不同 provider 的旧会话；继续旧线程时使用当前顶层 provider，无法换绑时明确提示仍在使用旧 provider。
 
-8. 默认开启不影响使用的批量优化，并保留即时反馈和历史安全；原来 rollout 批量 flush 与 app-server 高频通知合并默认关闭，修改后这些优化可以默认开启，但前提是输出节奏、token usage、diff/plan 更新、命令完成状态和崩溃恢复与未开启优化时保持用户可感知等价，同时必须保留显式关闭开关；这样用户默认获得更低 I/O 和更少客户端负担，但仍能看到及时刷新和可靠历史。
+6. **全局优先服务层。** 默认使用 priority；顶层显式关闭后恢复官方 Fast / Flex / None 映射，profile 内同名设置不生效。
 
-9. Provider refresh 的刷新范围扩大到所有正在使用的 Codex 入口，并覆盖会影响路由和速度的关键 provider 字段；原来 provider runtime 刷新只要求覆盖 `base_url` 与 `experimental_bearer_token` 两个字段，刷新结果可能只影响部分 live instance，修改后 `base_url`、`experimental_bearer_token`、`force_service_tier_priority` 与 fast mode 相关有效配置都必须对所有 app server、已经打开的 Codex 窗口/会话、`codex exec`、已打开和后续新开的 subagent、以及 agent_jobs 批量子任务尽可能更快生效，Windows tray 从 source provider 复制字段到当前 target provider 后也要触发同一刷新口径；这样用户换 URL、token、优先服务层或 fast 开关后，不同入口不会继续拿旧地址、旧 token 或旧速度/服务层策略发请求。
+7. **默认日志降噪。** Windows App、app-server 和 TUI 默认减少日志；analytics、feedback、log_db 默认关闭，仍允许显式开启。
 
-10. Provider refresh 不是只在 retry 时才生效，而是配置变化后面向所有 live runtime 的通用刷新能力；原来 refresh 容易被理解成“请求失败后的补救动作”，修改后只要 provider 有效配置发生变化，就应尽快刷新已加载线程、app-server runtime、console/exec runtime 和正在等待下一次请求的会话，即使当前没有 retry、没有报错、没有正在流式输出，也应让下一次请求使用新 provider 状态；这样用户主动切换 provider 参数后，不必靠失败重试或新开对话才能看到新配置。
+8. **批量优化与历史安全。** 默认开启会话记录批量写盘和 app-server 高频通知合并，保持回答、用量、改动、计划及命令状态及时更新，崩溃恢复可靠，并保留关闭开关。
 
-11. 所有 Codex retry 入口都要接入 hard route recovery，且不能因为错误类型、compact 类型、retry budget 或续链场景豁免 retry；这里的 retry 入口优先指一次用户/agent turn 的模型请求链路，特别包括普通 sampling、Responses request retry、Responses stream/WebSocket reconnect、local compact、remote compaction v2 和 realtime/WebSocket 连接，compact 不是可忽略的后台清理，而是长线程继续可用的用户可见链路。retry 粘连故障的重置必须按“每连续 3 次 retry 失败就重置一次”执行，且执行粘连转换前必须先检查当前实际请求 URL/base_url：如果是 ChatGPT 官方 Codex 后端（例如 `https://chatgpt.com/backend-api/codex` 及其子路径），不执行中转粘连转换，不为了 sticky-break 去旋转 `prompt_cache_key`、清空 `x-codex-turn-state`、强制重置 WebSocket session 或主动丢 `previous_response_id`；如果不是 ChatGPT 官方 Codex 后端，而是外部中转或 relay provider，则第 1、2 次只做普通重试，第 3 次 retry 失败处理阶段执行 sticky-break，将可全量重放请求的 `prompt_cache_key` 从默认 thread id 派生为带 recovery generation 的新值，清空当前 Codex 侧缓存的 `x-codex-turn-state`，并重置 WebSocket session，使紧随其后的下一次普通全量重放已经使用新 recovery generation、不得继续带旧 turn-state 给中转当作粘连依据，且不携带旧 `previous_response_id`；如果后续继续连续失败，第 6、9、12 次等每个 3 次周期也必须按同一 URL 判定再次决定是否执行 sticky-break 转换。HTTP 503/502/504、SSE/WebSocket 未完成断流、WebSocket handshake 失败、local compact、remote compaction v2、`Selected model is at capacity. Please try a different model.` 以及其他会终止 assistant turn / compact 的远端/模型请求错误，在 TUI、`codex exec`、subagent、agent_jobs 等入口都应使用同一恢复口径；必要时继续走 fallback transport，但不修改真实 thread id、session id 或用户提示词；Codex 侧只能破坏自己可控的粘连信号，不能承诺中转一定换号；`function_call_output` 等必须续接旧响应链的请求也不能成为 retry 或 sticky-break 计数豁免，实现必须保留 `previous_response_id` 续链语义或采用不破坏续链的 recovery 方式，而不是跳过 retry，也不能为了强行 full replay 丢掉必要续链。compact 路径必须同时满足“会 retry”和“每 3 次 retry 按 URL 判定 sticky-break”两个条件：local compact 与 remote compaction v2 都不能只做一次失败返回，也不能因为 compact 专属有限 retry budget、fallback transport 或 `stream_max_retries` 默认值在第 3 次之前截断；若确需 bounded 模式或显式 `stream_max_retries = 0`，必须在测试和文档中明确这是主动禁用/限制 retry，而不是 local3 默认体验。这样用户走中转 provider 遇到“503 retry N (auto retry) / Reconnecting... N (auto retry) / stream closed before response.completed / Selected model is at capacity / compact retry N”时，每满 3 次 retry 都继续执行既有 sticky-break；某一次请求在当前阶段卡满时只中断该次尝试，固定等待 5 秒后自动重试，下一次请求重新按阶段获得完整额度，不得要求手动重试；用户走 ChatGPT 官方 Codex 后端时则不会被误套中转粘连转换。
+9. **Provider 刷新覆盖全部入口。** 地址、token、优先服务层和 fast mode 有效配置变化后，刷新 app-server、已打开会话、exec、subagent 和 agent_jobs 等运行入口。
 
-   - Responses WebSocket 传输恢复（2026-09-29）：普通 sampling、local compact、remote compaction v2 共用恢复逻辑。默认允许 retry 时，连续第 3 次 WS 建连/握手传输失败、未完成断流或请求超时后，下一次请求切换到 HTTP；阈值独立于无界任务 retry budget，官方 Codex 地址与中转都适用。显式有限预算仍可更早走既有降级，零预算保持现有禁用重试语义。切换后本会话继续使用 HTTP，不能在两种协议间反复跳转。官方地址只豁免中转粘连转换，不豁免断开连接释放、传输切换及正常全量请求恢复；不为此旋转官方 prompt_cache_key、清空官方 turn-state、改变真实 thread/session id 或丢弃必要工具续链信息。固定 5s 等待和累计可见序号跨降级保持不变；取消立即生效；中间态保持 transient。关闭诊断保留协议 close code，原始 reason 不直接显示或落盘，避免泄漏服务端回传内容。
+10. **Provider 刷新无需等待报错。** 配置变化后，下一次请求使用新配置；地址或凭据变化会中断旧连接及其等待、重试，并重新建立连接，同地址换 token 也生效。
 
-   - realtime/WebSocket 专项口径：realtime 没有 `prompt_cache_key` / `previous_response_id` 字段，不能把 Responses 的 cache-key 旋转要求照搬成改用户 session id。普通 realtime websocket connect 与 WebRTC sideband join 都必须使用 provider retry 配置、固定 `5s` retry 等待和 provider runtime refresh 中断能力；第 3、6、9 次连接/握手失败时递增内部 recovery generation，丢弃半开连接并重建握手 request/header/TLS connector，用户看到 `Reconnecting realtime... N` 与 route recovery 阶段提示，真实 thread id、用户输入和用户显式 realtime session id 不变。
-   - old remote compact `/responses/compact` 专项口径：它已有 request retry 与第 3 次 route recovery，仍需把 503/429/transport retry 的中间态发成 transient status，让用户看到 `503 retry N` 或 `Reconnecting... N`；这些中间态不得写入 rollout/history/fork/replay，也不得把 `/models` 或 files 旁路顺手纳入主链 retry。
+11. **连接恢复保持原协议。** 选用 WS 的模型请求失败后继续通过 WS 重试，不自动切 HTTP；连续重试每满 3 次，按实际地址执行适用的中转粘连恢复，保留累计序号、必要续链和已完成工具结果。
 
-12. 无 live instance 的 provider 字段复制仍视为成功，并给出明确反馈；原来没有可刷新实例时可能让用户误以为字段写入失败，修改后只要 provider 字段写入成功，即使没有任何正在运行的实例，也反馈“未刷新任何实例”，这样用户能区分“配置已保存”和“当前没有可通知的运行入口”。
+12. **保存与刷新结果分开反馈。** Provider 字段保存成功但没有运行实例可刷新时，仍视为保存成功，并明确提示“未刷新任何实例”。
 
-13. app-server stderr 默认保持安静，只有显式配置才打开后台诊断输出；原来 `warn` 日志或 WebSocket 启动 banner 可能默认写入 stderr，修改后默认不再显示 `codex app-server (WebSockets)`、`listening on`、`readyz`、`healthz` 等后台诊断文字，只有用户在 `config.toml` 配置 `[logging] app_server_stderr = true` 后才恢复这些诊断信息，这样日常使用更安静，排查问题时仍能手动打开。
+13. **app-server stderr 默认安静。** 后台日志和 WebSocket 启动诊断默认不输出；设置 `[logging] app_server_stderr = true` 后恢复诊断，真正启动失败和配置错误仍显示必要信息。
 
-14. `node_repl` MCP 自动继承当前 local3 CLI 路径；原来用户实际运行 local3 时，`node_repl` 子进程仍可能使用 AppData 自动安装目录里的旧版 `codex.exe`，修改后启动 `[mcp_servers.node_repl]` 时会把 `CODEX_CLI_PATH` 指向当前 `Config.codex_self_exe`，这样 refresh、诊断和 app-server 行为跟当前 local3 版本保持一致。
+14. **node_repl 使用当前 CLI。** 启动 `node_repl` MCP 时，将 `CODEX_CLI_PATH` 指向当前 `Config.codex_self_exe`，避免工具子进程误用旧版 Codex；其他 MCP 环境不被改写。
 
-15. app-server 退出时只补已有 runtime 引用清理，不做激进进程管理；原来 shutdown 路径可能漏释放外部 auth、apps runtime 和 skills watcher 引用，修改后主 app-server 退出时补调已有 `clear_runtime_references()`，但不新增 idle timeout，不全局扫描或 kill `node_repl.exe`，也不因为当前 UI 订阅断开就杀仍加载的线程，这样能减少残留引用，同时避免误伤正在使用的会话。
+15. **退出时安全释放引用。** app-server 退出时调用已有 runtime 引用清理，不新增空闲超时，不全局扫描或结束进程，不因 UI 断开而杀掉仍加载的线程。
 
-16. 配置了 `experimental_bearer_token` 的 provider 必须按 provider 自带 token 隔离发请求，不受全局 `AuthManager` 登录态影响；原来请求头虽然优先使用 `experimental_bearer_token`，但 `provider.auth()`、`api_provider()`、`/models` 拉取、auth mode、ChatGPT account header、FedRAMP header 或 attestation 仍可能间接受 `auth.json` / ChatGPT / API key 登录态污染，导致外部 provider 请求被错误路由或错误鉴权。修改后只要当前 provider 有非空 `experimental_bearer_token`，聊天请求、compact 请求、模型列表请求、WebSocket / HTTP 请求和 provider runtime refresh 后的下一次请求都必须使用 `Authorization: Bearer <experimental_bearer_token>`，并且不得从 `AuthManager` 读取或继承 auth mode、账号 ID、FedRAMP、ChatGPT backend routing 或 attestation；没有 `experimental_bearer_token` 的 provider 继续保持原有 AuthManager 行为。这样用户切到自带 bearer token 的外部 provider 时，请求只按该 provider 的 token 和 base_url 发送，不会被本机 Codex 登录态带偏。
+16. **Provider token 隔离。** 非空 `experimental_bearer_token` 优先用于该 provider 的请求，不继承全局登录态；没有该 token 时继续使用原 AuthManager 行为。
 
-17. Windows 交付必须分为 GitHub build 和 GitHub release promotion 两段：本地不编译；GitHub build 只构建 `x86_64-pc-windows-msvc` 的 `codex.exe` 并上传独立 artifact；下载该 artifact 后先用其中的 `codex.exe` 完成 smoke/行为验证，确认通过才触发 GitHub promotion workflow 创建或更新 Release。Release asset 必须由 GitHub workflow 从已验证 artifact 附加，禁止本地上传；build、下载验证或 promotion 任一环节失败时，修复后从 GitHub build 重新开始。这样用户不会拿到未验证的 Windows 二进制，也不会误把本机旧文件上传成 Release。
+17. **Windows 云端构建与发布。** 本地不编译；先下载 GitHub build artifact 验证真实 exe，再由 GitHub promotion workflow 发布 Release，禁止本地上传资产。
 
-18. context window 溢出后按图片梯子自愈，只改图、不改 `previous_response_id`；原来同一轮 sampling 连续溢出时会无限原样重发大图，修改后第 1、2 次原样重试，第 3、6、9、12 次才升档：第一档最后 5 张保持原图、其余 `original→high`；第二档最后 1 张保持原图、其余降档；第三档只留最后 5 张真图、更早换成 1×1；第四档只留最后 1 张。某档 0 变化则同一次触发连升。档位进度按回合记账：同一回合内多次 sampling 请求共享已升到的档位，新回合从第一档重新开始，不得每次请求都从头再升一遍。改动同时作用于内存历史和本地会话记录：追加 `RolloutItem::ImagesShrunk`，其中只记 tier 与本次改动张数，不含历史快照；resume / fork 重放时按同一档对当时已重建出的历史重新执行瘦身，因此 fork 后重建出的是瘦身后的图而不是原图。paginated 会话以 fork 派生新线程保持原历史不变；legacy rollout 的 rollback 仅保留兼容语义，不作为当前主路径验收。该记录不是 compact 基线：不推进 compact 窗口、不发 compact UI、不参与 fork 边界或回合计数、不截断重放范围，单条大小必须保持在 1 KB 量级。不改磁盘上的截图文件。sticky-break 与 `previous_response_id` 仍由既有每 3 次逻辑自行管理，图片梯子不得再 drop id 或重置 WebSocket。用户能看到 `Context overflow image ladder step N` 临时提示；四档用尽仍必须继续自动重试，不得把 context window 改成终态失败。这样用户在多图会话把窗口撑满时，重连有机会靠瘦身旧图继续，而不会卡死在同一批原图上。
+18. **Context window 图片梯子。** 普通模型请求连续溢出时，按四档逐步降低旧图成本；变化以轻量记录持久化，resume / fork 可重建，不修改磁盘原图，四档用尽后仍继续自动重试。
 
-19. 全局 `--account <账号名>` 只切换 Codex 登录凭据，其他数据继续共享；默认账号仍使用 `$CODEX_HOME/auth.json`，命名账号使用 `$CODEX_HOME/accounts/<账号名>/auth.json`，配置、会话、日志、skills 与 MCP 不复制也不分叉。`login`、`login status`、token 刷新、`logout`、TUI 和本地 embedded app-server 必须读写同一个所选账号；命名账号不得隐式复用只持有单一 AuthManager 的共享 daemon，不得覆盖默认 `auth.json`，多个命名账号可以同时运行。共享 provider 配置的 app-server proxy、daemon lifecycle 和 Amazon Bedrock 登录在命名账号模式下必须明确拒绝，不能静默落到默认账号或留下共享配置。账号名允许中文，但拒绝路径分隔符、路径穿越、Windows 非法字符、保留名、前后空格和超过 64 个字符的名称。
+19. **命名账号只隔离登录凭据。** `--account <账号名>` 为每个账号使用独立认证文件，配置、会话、日志、skills 和 MCP 继续共享；支持多个命名账号同时运行。
 
-20. 每次 HTTP `401 Unauthorized`（包括 WebSocket 握手）返回时，若实际凭据来自 `auth.json`，必须重新读取当前所选账号对应的文件，让下一次请求使用更新后的凭据；覆盖文件中的 API key、ChatGPT 等凭据及 Auto 存储实际回退到文件的情况，不受 managed 恢复状态机次数限制。默认账号读取 `$CODEX_HOME/auth.json`，命名账号读取 `$CODEX_HOME/accounts/<账号名>/auth.json`；认证类型或账号身份不匹配、文件缺失或损坏时保留原缓存，不串用其他账号。provider 自带 token、环境变量、外部认证、内存凭据和实际使用 keyring 的请求不得被文件覆盖。重读不改变既有固定 `5s` 等待、累计重试次数、预算和每 3 次 sticky-break 规则。
+20. **每次 401 重读所选认证文件。** 实际凭据来自文件时，每次 HTTP 401，包括 WebSocket 握手失败，都重新读取所选账号的 `auth.json`；无效文件不覆盖缓存，非文件凭据不受影响。
 
-21. 屏幕版本仍是 `<Codex 版本>-local3`。只有发给服务端的 HTTP `User-Agent` 特殊：版本段用当前 `codex-rs/Cargo.toml` 的裸包版本，也就是这次合入的官方版本，不追加 `-local3`，不写死某一个版本号。官方升到新版本时两处一起变，屏幕是 `<新版本>-local3`，发出去的只有裸版本。`originator`、操作系统、架构、终端标识，以及官方原本会加的后缀，保持原样。WebSocket 握手、登录、ChatGPT 辅助接口和云任务都按此发送。本机界面、`codex --version`、doctor，以及 app-server initialize 回给本机客户端的 `user_agent` 仍带 `-local3`。`/models` 的 `client_version` 继续发同一裸包版本。
+21. **服务端 User-Agent 使用裸版本。** 发往服务端的 HTTP `User-Agent` 使用当前 Cargo 包版本，不追加 `-local3`；本机展示版本和 app-server initialize 返回本机的 `user_agent` 仍带后缀。
 
-## local3 验收矩阵（合并上游后必查）
+## 二、版本身份与首次清单
 
-| 主题 | 必验场景 | 通过口径 |
+### 2.1 版本按用途区分
+
+| 用途 | 版本格式 |
+|---|---|
+| 本机或客户端展示 local3 构建身份 | `<当前包版本>-local3` |
+| 发往服务端的 HTTP `User-Agent` 版本段 | 当前 Cargo 裸包版本 |
+| `/models` 的 `client_version` | 同一裸包版本 |
+| 更新比较、Python wheel、配置锁、OpenTelemetry `service_version`、OAuth / device-code 协议参数 | 裸 semver |
+
+展示面必须覆盖：
+
+- CLI、TUI、状态卡、标题区、历史单元和升级提示。
+- `codex --version`、`codex doctor --json`、doctor runtime details、`codex-app-server --version`。
+- app-server initialize 返回本机的 `user_agent`。
+- daemon / remote-control JSON、device-code 登录欢迎文案。
+- 线程历史元数据和 rollout 会话记录元数据。
+
+`cli_version`、`client_version`、`app_server_version` 按实际用途选择版本，不能仅凭字段名统一替换。
+
+发往服务端的 HTTP `User-Agent`：
+
+- 从当前 Cargo 包版本生成，不写死历史版本号。
+- WebSocket 握手、登录、ChatGPT 辅助接口和云任务统一执行。
+- `originator`、操作系统、架构、终端标识和官方原有后缀保持原样。
+
+**历史经验｜2026-05-31**
+
+- daemon 会解析 initialize 的 `user_agent`，再用于 doctor 的 app-server 版本展示。这里使用裸 `CARGO_PKG_VERSION`，会造成前台显示 local3、后台却像官方版本。
+- Windows smoke 必须明确检查 `-local3`。只匹配裸版本号，无法发现后缀丢失。
+- Python wheel 版本不能取 `GITHUB_REF_NAME`。从 `main` 手动触发时会得到不符合 PEP 440 的版本，应读取 Cargo 裸版本。
+
+### 2.2 首次“你好”的触发范围
+
+只有同时满足以下条件才触发：
+
+- brand-new thread，或 Clear 后的新线程。
+- 首个普通用户输入。
+- 输入恰好是纯文本 `你好`。
+
+清单出现在首个 assistant 主消息开头，每个新线程一次。
+
+以下情况不触发：
+
+- 同线程再次输入 `你好`。
+- resume、continue、fork、历史线程重开或子会话。
+- 其他文本、多段输入、富文本或带附件输入。
+
+### 2.3 清单格式约束
+
+当前解析器逐行提取 `N. `，并要求编号连续、有序。
+
+- 第一节保留连续的 1–21 项。
+- 每项内容放在一个物理行。
+- 其他章节使用标题、无序列表或表格，避免被误提取。
+- 图片梯子必须保留为独立第 18 项，不能只藏在 retry 子条中。
+
+## 三、重试、超时与连接恢复
+
+### 3.1 重试范围和固定等待
+
+这里的 sampling 指普通模型请求；compact 指压缩长会话上下文；retry budget 指允许的重试次数。
+
+强制重试范围包括：
+
+- 普通 sampling。
+- Responses HTTP request retry。
+- SSE / WebSocket 流式重连。
+- local compact、旧 remote compact `/responses/compact`、remote compaction v2。
+- realtime WebSocket connect、WebRTC sideband join。
+- TUI、exec、subagent、agent_jobs 中对应的模型请求入口。
+
+远端主链错误不能因 `is_retryable=false`、状态码、错误码或协议映射被排除。范围包括：
+
+- HTTP 503 / 502 / 504 / 429 / 402。
+- 网络失败、临时鉴权错误、未完成断流、握手失败和请求超时。
+- `Selected model is at capacity. Please try a different model.`
+- context window、usage / quota、policy 等服务端错误。
+
+`/models` 刷新和 MCP OpenAI 文件上传 / 下载 URL 生成属于旁路请求，不纳入本清单强制 retry / sticky-break 范围；涉及鉴权和用户错误提示时，仍遵守对应规则。
+
+**所有主链自动重试在当前尝试失败后，固定等待 `10s`。**
+
+- 不使用指数退避、jitter、增长型 `base_delay` 或仅设上限的 cap-only。
+- 服务端 `Retry-After` 不改变这 `10s`。
+- 正常请求不额外等待。
+- 默认允许无界或非常大的重试次数。
+- 显式 bounded 或 `stream_max_retries = 0` 表示用户主动限制或禁用重试，不能替代默认体验验收。
+- 显式次数限制只控制重试预算，不触发 WS → HTTP。
+
+### 3.2 流式超时读取配置
+
+模型首事件等待和后续流式空闲，均使用 provider 的 `stream_idle_timeout_ms`。
+
+| 项目 | 规则 |
+|---|---|
+| 显式配置 | 按配置值执行 |
+| 未配置 | 默认 `300000` 毫秒，即 300 秒 |
+| 首事件等待 | 使用该配置 |
+| 后续流式空闲 | 使用同一配置；有模型进展后重新计时 |
+| 持续输出 | 不按生成总时长中断 |
+| Responses HTTP 等待响应头 | 不设置 local3 固定等待看门狗 |
+
+300 秒是默认值，不是强制上限。不能再叠加 60 秒或 390 秒硬上限截短流式配置。
+
+首次请求和每次重试均获得完整额度：
+
+- 前次耗时、重试等待、provider refresh 和粘连恢复不扣减下一次额度。
+- 超时只取消当前尝试，显示临时状态，等待 `10s` 后重试。
+- RST / 读失败进入自动重试。
+- 用户取消和 provider refresh 仍能中断等待。
+- 提示显示实际生效时长，不写死“一分钟”或“6.5 分钟”。
+- 超时和恢复不清零用户可见序号。
+
+### 3.3 建连超时单独处理
+
+建连与流式等待是不同阶段，不能混成一个固定超时。
+
+| 路径 | 超时规则 |
+|---|---|
+| Responses WebSocket 建连 | 读取 `websocket_connect_timeout_ms`；默认 `15000` 毫秒，上限 `390000` 毫秒 |
+| realtime WebSocket 建连 | 保留现有 `390s` 规则 |
+| WebRTC HTTP 请求 | 使用 provider 的 `first_model_event_timeout`；当前其来源是 `stream_idle_timeout_ms` |
+| WebRTC sideband WebSocket | 按 realtime 连接规则处理 |
+
+compact 按实际使用的请求方式和阶段验收。使用 Responses 流式请求时，按流式配置执行，不能把所有 compact 一概写成固定 390 秒。
+
+### 3.4 WS 失败后仍使用 WS
+
+适用于选用 Responses WebSocket 的 sampling、local compact 和 remote compaction v2。
+
+- 握手失败、断流、超时或连续失败后，继续通过 WS 重试。
+- 允许关闭失效连接并重新建立 WS。
+- 连续失败次数、有限预算耗尽或服务端拒绝 WS，都不能触发自动切 HTTP。
+- 本会话后续请求继续使用 WS。
+- 已完成工具结果必须保留，不能因连接恢复而重复执行。
+- 必要的 `previous_response_id` 续链语义保持完整。
+- 用户取消立即生效。
+- 重连过程只展示临时状态，累计序号不归零。
+
+官方和中转均执行“WS 保持 WS”。原本使用 HTTP 的独立请求继续按其 HTTP 规则执行。
+
+关闭连接的诊断可保留协议 close code；原始 reason 不直接显示或落盘，避免泄漏服务端回传内容。
+
+**历史说明｜2026-09-29**
+
+旧策略曾规定“连续 3 次 WS 失败后切 HTTP”。本稿取消该策略，保留失效连接释放、状态恢复、工具续链、计数和历史隔离要求。
+
+### 3.5 中转粘连恢复：每连续 3 次检查一次
+
+sticky-break 指清除 Codex 可控的中转粘连信号；recovery generation 是内部恢复轮次标记。
+
+在第 3、6、9、12 次等连续失败处理阶段，先检查**完成认证和路由解析后的实际请求 URL / base_url**。
+
+| 实际目的地 | 处理 |
+|---|---|
+| ChatGPT 官方 Codex 后端，例如 `https://chatgpt.com/backend-api/codex` 及其子路径 | 跳过中转粘连转换 |
+| 外部中转或 relay provider | 执行适用的 sticky-break |
+
+未显式填写 `base_url` 的官方 provider，也必须按解析后的实际地址判断。
+
+中转 Responses 的可全量重放请求，在第 3 次失败处理阶段：
+
+- 从默认 thread id 派生带 recovery generation 的新 `prompt_cache_key`。
+- 清空 Codex 缓存的 `x-codex-turn-state`。
+- 重置 WebSocket session，并仍通过 WS 建立新连接。
+- 让紧随其后的请求使用新 generation，不携带旧 turn-state 和旧 `previous_response_id`。
+
+边界：
+
+- 不改变真实 thread id、session id 或用户提示词。
+- Codex 只能清除自己控制的信号，不能保证中转一定换号。
+- `function_call_output` 等必要续链请求仍须重试并参与计数，但必须保留必要续链 ID，或采用不破坏续链的恢复方式。
+- 官方地址不为 sticky-break 旋转 cache key、清空 turn-state、强制重置 session 或丢弃续链 ID。
+- 官方连接失效时仍可正常重建 WS，这与中转粘连转换分开处理。
+
+### 3.6 compact 和 realtime 的独立入口
+
+**compact：长会话的上下文压缩**
+
+local compact、旧 `/responses/compact`、remote compaction v2 分别验收：
+
+- 默认模式必须重试。
+- 每连续 3 次失败按实际 URL 判断是否执行中转粘连恢复。
+- 不能因 compact 专属预算或默认配置，在第 3 次之前提前终态。
+- 显式 bounded / zero 仍按用户设置处理。
+- 使用 WS 的压缩请求保持 WS。
+- 旧 `/responses/compact` 的 request retry 必须展示临时 `503 retry N` 或 `Reconnecting... N`。
+- 只证明第四次请求 cache key 变化，不足以证明前三次提示和历史隔离正确。
+
+文中的 **remote compaction v2 是压缩实现版本，不是 WS 协议版本**。
+
+**realtime：实时语音等交互连接**
+
+它与普通文字对话的 Responses WS 是不同入口。
+
+分别检查：
+
+- ordinary WebSocket connect：直接建立 realtime WS。
+- WebRTC sideband join：为 WebRTC 实时连接建立配套控制通道。
+
+要求：
+
+- 使用 provider retry 配置和固定 `10s` 等待。
+- 支持 provider refresh 中断旧连接。
+- 第 3、6、9 次连接 / 握手失败时，递增内部恢复轮次，丢弃半开连接，重建握手 request、header 和 TLS connector。
+- 用户看到 `Reconnecting realtime... N` 和恢复阶段提示。
+- 临时提示不写历史。
+- 真实 thread id、用户输入和用户显式 realtime session id 不变。
+
+realtime 没有 Responses 的 `prompt_cache_key` / `previous_response_id` 字段，不能照搬这些字段的恢复方式去修改用户 session id。
+
+### 3.7 提示、日志和历史隔离
+
+重试中间态只承担：
+
+- 必要的请求与等待。
+- 一次轻量临时状态通知。
+- TUI 同一状态栏覆盖刷新。
+- metrics / counter 计数。
+
+不得进入 rollout、history、fork、replay 或模型上下文。
+
+不能继续通过普通持久化 `EventMsg::StreamError` / `EventMsg::Warning` 链路保存中间失败，再把“界面能看到提示”当作验收通过。
+
+默认不逐次写普通 `warn!` / `error!` 或 app-server stderr。底层不能在上层决定继续重试前抢先记录错误。
+
+允许最终失败、显式 debug / trace 和低频汇总诊断，内容必须脱敏。
+
+用户提示：
+
+- 默认无界或非常大次数模式显示 `503 retry N (auto retry)`、`Reconnecting... N (auto retry)`。
+- 显式有限预算可显示当前次数 / 上限。
+- 不显示 `18446744073709551615`、`(unbounded)` 或 `(10 min limit)`。
+- 标题说明状态和次数。
+- 详情说明状态含义、正在重试及安全诊断信息。
+- `http 429`、`http 503` 等 telemetry 短串不能代替用户详情；可使用 `HTTP 503 Service Unavailable, retrying`。
+
+安全诊断字段限于：
+
+- HTTP 状态码和标准 reason。
+- 去除 query / userinfo 的 endpoint。
+- request id、cf-ray。
+- 经脱敏的 auth error / auth error code。
+
+不原样展示 HTTP response body。
+
+**显示经验｜2026-05-30、2026-05-31**
+
+HTTP request retry 和 stream / WS reconnect 是不同链路。调整其中一种提示，不能顺手隐藏另一种；app-server、TUI、Windows App 都须继续展示必要重试状态。
+
+### 3.8 计数和回归经验
+
+**计数分离｜2026-06-28**
+
+- 用户可见累计序号与内部 recovery 计数分离。
+- sticky-break、超时、重建 HTTP client、重置 WS session 和 provider refresh，均不得让可见序号回到 0 或 1。
+- HTTP telemetry 需要累计已被 route recovery 消费的 retry offset。
+- 只减少下一轮 `max_attempts` 不够；新 client 的 `on_request_retry(1, ...)` 仍会造成显示回绕。
+- stream / WS 的内部 `retries` 用于恢复周期；独立 display retry 用于展示。
+- 计数变化不能改变固定 `10s` 等待，也不能触发切换 HTTP。
+
+**旧等待口径残留｜2026-07-03**
+
+当时曾因旧实现、测试名、断言和文档互相强化，留下 `8s` 或 cap-only 规则。该经验继续保留，但本稿目标已改为固定 `10s`。
+
+调整等待规则时检查：
+
+- `E:\vscodeProject\codex_github\codex\codex-rs\core\src\util.rs`
+- `E:\vscodeProject\codex_github\codex\codex-rs\core\src\util_tests.rs`
+- `E:\vscodeProject\codex_github\codex\codex-rs\codex-client\src\retry.rs`，包括测试区。
+
+排查仍被当作现行 retry 规则的：
+
+- `5s`、`8s/eight seconds`。
+- `<=5s`、`最高 5s`，以及仅设最大值的等价表达。
+- 退避、jitter、增长型 `base_delay`。
+- “连续失败后切 HTTP”的实现、测试和文档。
+
+历史数字可保留，但必须标明已废止，不能继续作为通过标准。
+
+**主链遗漏｜2026-06-14、2026-07-03**
+
+- capacity 错误须以 typed `ServerOverloaded` 进入 retry / recovery；只改 UI 或 `is_retryable()` 不够。
+- sampling、local compact、remote compaction v2 都可能把错误转为终态 `ErrorEvent`，须逐条覆盖。
+- compact 必须同时证明“会重试”和“每 3 次按实际 URL 判断恢复”。
+- Responses 通过不能代替 realtime、WebRTC sideband 和旧 remote compact 验收。
+
+## 四、Provider 刷新、鉴权与服务层
+
+### 4.1 刷新字段和入口
+
+刷新字段：
+
+- `base_url`
+- `experimental_bearer_token`
+- `force_service_tier_priority`
+- fast mode 相关有效配置
+
+刷新入口：
+
+- 所有 app-server 和已加载线程。
+- 已打开的 Codex 窗口、TUI / console 会话。
+- `codex exec`。
+- 已打开及后续新开的 subagent。
+- agent_jobs 批量子任务。
+- Windows tray 从 source provider 向 target provider 应用配置。
+
+刷新不依赖报错或 retry。配置变化后应尽快更新运行时，下一次请求必须使用新配置。
+
+地址或凭据变化时：
+
+- 使缓存和活动 WS 失效。
+- 中断旧连接的等待和重试。
+- 使用新配置重新握手。
+- 同地址只换 token 也执行上述流程。
+- 保留已完成工具结果，不重复执行。
+- 新配置仍选用 WS 时，重建后继续使用 WS。
+
+只保存配置、清 plugin / skill cache 或清共享缓存，不代表 loaded thread 已刷新。
+
+### 4.2 控制面、范围和反馈
+
+Windows tray 优先调用 `apply_provider_runtime_from_effective_provider`，由实际运行的 app-server 完成：
+
+- 读取 effective config。
+- 写入配置。
+- reload user config。
+- 刷新 loaded threads。
+
+只有**所有 live instance 都明确不支持**该控制操作时，才回退到 Python 修改 `config.toml`，再调用 `refresh_all_loaded_threads`。
+
+保留全量刷新，同时支持 `console` 和 `appServer` scope：
+
+- `appServer` 能刷新 Windows App 的 app-server thread。
+- `console` 不误刷 app-server thread。
+
+结果分别报告：
+
+- 配置是否保存成功。
+- 是否刷新到运行实例。
+
+没有 live instance 时，反馈“配置已保存，但未刷新任何实例”。
+
+**历史经验｜2026-05-30、2026-06-03**
+
+IFEO、wrapper、runtime selector 或 Windows App 可能重定向实际 exe。绕过运行中的 app-server 直接改配置，容易出现“文件已改，当前会话仍使用旧 URL / token”。
+
+动态验证须覆盖 HTTP 503 / 429 / 402、无界 503、网络失败、SSE 断流 / 空闲、WS 503 / 426 / 401。刷新后旧 endpoint / token 的请求不能继续增长。
+
+### 4.3 Provider token 隔离
+
+非空 `experimental_bearer_token` 是 provider 自带的静态 bearer token，优先于 `env_key` 和 AuthManager。
+
+覆盖聊天、compact、HTTP / WS、realtime、`/models` 及 refresh 后下一次请求：
+
+- 使用 `Authorization: Bearer <experimental_bearer_token>`。
+- 不继承 AuthManager 的 auth mode、账号 ID、ChatGPT routing、FedRAMP 或 attestation。
+- 空字符串不生成 `Bearer `。
+- 无 token provider 保留原 AuthManager 行为。
+
+必须支持“有 provider token”与“无 provider token”双向刷新：
+
+- 无 → 有：进入 provider token 隔离模式。
+- 有 → 无：清除旧 provider token 状态，恢复 AuthManager / `auth.json`。
+- `openai_http ↔ yunyi` 只是代表样例，不能写死为特例。
+
+**实现经验｜2026-07-01**
+
+- 只改 `resolve_provider_auth()` 的 Authorization 不够。
+- 还须处理 `ConfiguredModelProvider::auth()`、`OpenAiModelsEndpoint::auth()`、`supports_attestation()` 等全局认证读取点，防止 `api_provider()`、默认地址和 `/models` 间接受污染。
+- 推荐有非空 provider token 时，在读取点将当前 provider auth 视为 `None`，再由 provider 配置生成 `BearerAuthProvider`。
+- 不要全局丢弃 AuthManager 引用，否则移除 token 后无法恢复原认证。
+- 即使全局保存了 ChatGPT token、API key、account id 或 FedRAMP 状态，隔离请求也不能夹带其派生 header。
+
+### 4.4 全局优先服务层
+
+| 顶层设置 | 行为 |
+|---|---|
+| 未配置或开启 | 统一使用 priority |
+| 显式关闭 | Fast → priority；Flex → flex；None → unset |
+
+profile 内同名设置不生效。Provider refresh 必须同步相关有效配置。
+
+## 五、历史会话与账号认证
+
+### 5.1 换 provider 后继续旧会话
+
+例如：昨天使用中转 A，今天切换到官方 provider，再打开昨天的会话。用户应能找到旧会话，并通过当前 provider 继续工作。
+
+历史列表、recent sessions、resume picker、resume last 和 `codex://threads/{id}` 默认不按 provider 过滤。
+
+继续旧线程时，不能被以下旧状态锁住：
+
+- `session_meta.model_provider`。
+- loaded `config_snapshot.model_provider_id`。
+- `SessionThreadConfig.model_provider`。
+- `thread/read` 回退或已加载线程快照。
+
+无法换绑时，明确提示仍使用旧 provider。
+
+### 5.2 resume 与 fork 分开验收
+
+- **resume**：继续原会话，使用当前顶层 provider。
+- **fork**：从旧会话派生新会话；本地 fork picker / fork last 仍按当前 provider 过滤。
+
+跨 provider 继续旧线程，不扩大为跨 provider 派生新线程。
+
+**恢复经验｜2026-06-14**
+
+- app-server resume 的显式 request provider 必须覆盖历史 provider。
+- TUI 同一线程的 active provider 不同时，先 shutdown，再 cold resume / rebind。
+- 不能只验证列表能选中，必须验证下一次请求实际使用的 provider。
+
+### 5.3 命名账号
+
+| 账号 | 认证文件 |
+|---|---|
+| 默认账号 | `$CODEX_HOME/auth.json` |
+| `--account <账号名>` | `$CODEX_HOME/accounts/<账号名>/auth.json` |
+
+只有认证文件隔离。配置、会话、日志、skills 和 MCP 继续共享，不复制、不分叉。
+
+`login`、`login status`、token 刷新、`logout`、TUI 和本地 embedded app-server 必须使用同一所选账号。
+
+命名账号要求：
+
+- 不覆盖默认账号或其他账号的认证文件。
+- 可并发运行多个命名账号。
+- 不隐式复用仅持有单一 AuthManager 的共享 daemon。
+- 明确拒绝共享 provider 配置的 app-server proxy、daemon lifecycle 和 Amazon Bedrock 登录，不能静默回落默认账号或留下共享配置。
+
+账号名允许中文；拒绝路径分隔符、路径穿越、Windows 非法字符、保留名、前后空格及超过 64 个字符的名称。
+
+### 5.4 每次 401 重读认证文件
+
+实际凭据来自所选账号认证文件时，每次 HTTP 401，包括 WS 握手失败，都重新读取该文件，不受 managed 恢复状态机次数限制。
+
+覆盖：
+
+- 文件中的 API key、ChatGPT 等凭据。
+- File 存储。
+- Auto 存储实际回退到文件的情况。
+- 默认和命名账号。
+- HTTP 流式 / 普通响应、Responses / realtime WS 握手。
+
+以下情况保留原缓存：
+
+- 文件缺失或损坏。
+- 认证类型或账号身份不匹配。
+
+以下凭据不能被文件覆盖：
+
+- provider token。
+- 环境变量。
+- 外部认证。
+- 内存凭据。
+- 实际来自 keyring 的凭据。
+
+重读不改变 `10s` 等待、累计次数、retry budget 和每 3 次恢复规则，也不能串用其他账号。
+
+## 六、Context window 图片梯子
+
+### 6.1 触发与档位
+
+仅作用于普通 sampling 的连续 context window 溢出。
+
+第 1、2 次原样重试；通常在第 3、6、9、12 次分别升档：
+
+| 档位 | 保留范围 | 更早图片的处理 |
 |---|---|---|
-| 版本身份 | `codex --version`、`codex doctor --json`、TUI 状态卡、app-server initialize `user_agent`、daemon/remote-control 输出、线程历史元数据、升级提示、GitHub Release 下载后的 Windows smoke | 用户能看到的 local3 构建身份均显示 `<Codex 版本>-local3`；用于包版本、协议版本、配置锁或更新比较的裸 semver 不误加后缀。发给服务端的 HTTP `User-Agent` 不得带 `-local3`。app-server initialize 回给本机的 `user_agent` 仍带 `-local3` |
-| 发出去的 User-Agent | WebSocket 握手、登录、ChatGPT 辅助接口、云任务 | HTTP `User-Agent` 的版本段等于当前 `codex-rs/Cargo.toml` 包版本，无 `-local3`；其余与官方原版一致。屏幕和回给本机的 `user_agent` 仍是该版本加 `-local3` |
-| 首轮 `你好` 清单 | brand-new thread、Clear 后新线程、同线程第二次 `你好`、resume/continue、fork、历史线程重开、subagent、多段输入、带富文本/附件输入 | 只有 brand-new 或 Clear 后首个普通纯文本恰好为 `你好` 时，在首个 assistant 主消息第一段插入清单，且含第 18 条图片梯子；其他入口和重复输入不触发 |
-| retry 固定 5 秒 | Responses HTTP request retry、stream/WebSocket reconnect、local compact、remote compaction v2、realtime/WebSocket 连接、服务端 `Retry-After` | 每一次自动 retry 前的等待都必须固定为 `5s`；不得是 `<=5s` 上限、指数退避、jitter、base_delay 或 cap-only；服务端 `Retry-After` 不得拉长或缩短固定 `5s`；旧 `8s/eight seconds` 实现、测试名、断言和文档口径不得残留在 retry 语义里 |
-| retry 配置超时与恢复 | ordinary sampling、首次 Responses HTTP、Responses HTTP request retry、SSE/WebSocket reconnect、local compact、old remote compact、remote compaction v2、realtime/WebSocket、WebRTC sideband、fallback transport、provider runtime refresh、sticky-break | 首次请求与重试均读取 provider 的 `stream_idle_timeout_ms`。配置 `300000` 时，首事件等待和后续流式空闲均为 300 秒；配置其他值时按实际配置生效，不被 60/390 秒硬上限截短。响应头延迟超过 60 秒不得因此取消或重复发送。持续输出不得因总时长超过 300 秒被中断；用户取消和 provider refresh 仍能中断等待。RST / 读失败进入自动重试，固定等 `5s`；下一次获得完整额度，不得终态或要求手动重试，累计序号不归零。compact / realtime / WebRTC 独立 `390s` 上限保留。 |
-| sticky-break 第 3 次 | HTTP 503/502/504、SSE/WebSocket 断流、WebSocket handshake 失败、realtime ordinary websocket connect、WebRTC sideband join、`Selected model is at capacity. Please try a different model.`、ordinary sampling、local compact、remote compaction v2、subagent、agent_jobs、`codex exec`，以及目标 URL/base_url 不是 ChatGPT 官方 Codex 后端的中转 provider | 第 3、6、9、12 次等连续 retry 失败处理阶段必须先判定实际请求 URL/base_url；如果是 ChatGPT 官方 Codex 后端，不执行中转粘连转换；如果是外部中转或 relay provider，则 Responses 可全量重放请求旋转 `prompt_cache_key` recovery generation、清空中转场景的 `x-codex-turn-state` 并重置 WebSocket session，可全量重放的下一次请求不携带旧 `previous_response_id`；`function_call_output` 这类续链请求保留必要 `previous_response_id`，但仍 retry 且仍计入 sticky-break；realtime 路径递增 recovery generation、重建握手/连接状态且不改用户 session id |
-| compact 专项 | local compact、old remote compact `/responses/compact`、remote compaction v2 分别构造 retryable 远端错误、capacity 错误、断流错误、默认无界 retry、显式 bounded / `stream_max_retries = 0` | 默认 local3 体验下 compact 必须 retry，并且第 3 次 retry 必须 sticky-break；old remote compact request retry 要有 transient `503 retry N` / `Reconnecting... N` 状态；bounded 或 `stream_max_retries = 0` 只能作为显式限制/禁用 retry 的配置口径，不能替代默认验收 |
-| Responses WS 传输恢复 | sampling、local compact、remote compaction v2；官方及中转；握手断开、响应提前关闭、无界预算、有限/零预算、取消、后续 turn | 连续 3 次传输失败切 HTTP，与无界任务预算分离；正常 WS 不降级；官方缓存键/turn-state 不被中转转换修改；工具结果与必要续链完整且已完成工具不重做；5s 等待、可见 1..6 序号不回绕；下载 GitHub artifact 的真实 exe 验证，TUI 截图读图确认重连及降级提示 |
-| retry 范围排除 | `/models` 模型目录刷新、MCP OpenAI 文件上传/下载 URL 生成 | 这两类旁路 HTTP 辅助请求不作为本清单 retry / sticky-break 漏改 finding；但若涉及 provider token、ChatGPT account header、FedRAMP header、attestation 或用户可见错误，仍按鉴权隔离和提示规则验收 |
-| retry 中间态 | HTTP request retry、stream/WebSocket reconnect、compact retry、realtime/WebSocket start retry、WebRTC sideband retry、fallback transport、provider runtime refresh 期间 retry | 用户看到连续 retry 数字和必要诊断；中间失败不进 rollout/history/fork/replay，不刷普通 `warn!` / `error!` 或 app-server stderr；最终失败和显式 debug/trace 诊断仍保留 |
-| context window 图片梯子 | ordinary sampling 连续 `context_length_exceeded`、第 1/2 次原样重试、第 3/6/9/12 次升档、同一回合多次 sampling、新回合复位、无 original 时连升、resume/fork 重建、fork 后新线程重建、磁盘截图文件 | 仅 sampling；用户看到 `Reconnecting...` 与 `Context overflow image ladder step N`；下一包更早的图已降档或占位；会话记录追加 `RolloutItem::ImagesShrunk`（只含 tier 与张数，单条 1 KB 量级），不推进 compact 窗口、不发 compact UI；fork 后原线程历史保持不变，新线程按存活历史重新评估瘦身；paginated 主路径不依赖回合 rollback，legacy rollback 只作兼容验证；不改 `previous_response_id` / sticky-break；磁盘原图文件不变；四档用尽仍 `(auto retry)`，不得终态失败 |
-| 多账号认证 | 默认账号、两个命名账号、中文账号名、并发运行、API key/ChatGPT 登录、`login status`、token 刷新、`logout`、TUI、embedded app-server、共享 daemon 存在时启动 | 仅认证文件按 `$CODEX_HOME/accounts/<账号名>/auth.json` 隔离；默认 `auth.json`、配置、会话、日志、skills 与 MCP 保持共享且不被复制；所选账号的登录、状态、刷新和登出闭环一致；命名账号不隐式复用共享 daemon；账号 A 的操作不改变账号 B 或默认账号 |
-| 401 auth.json 重读 | 连续至少 4 次 401、HTTP 流式与普通响应、Responses/realtime WebSocket 握手、File/Auto 文件认证、文件 API key/ChatGPT、命名账号、账号不匹配、文件缺失/损坏、非文件凭据 | 每次 401 重读所选 auth.json，下一请求头采用更新凭据，跨过第 3 次 sticky-break 后仍有效；类型/账号不匹配及坏文件不覆盖缓存；非文件认证不受影响；原 5s 等待、计数及 retry budget 保持不变 |
-| Provider refresh | app-server 已打开线程、TUI/console、`codex exec`、当前 subagent、后续新开 subagent、agent_jobs、无 live instance、Windows tray provider apply | `base_url`、`experimental_bearer_token`、`force_service_tier_priority`、fast mode 有效配置不靠失败 retry 也能刷新；无 live instance 时反馈“配置已保存但未刷新任何实例” |
-| Provider token 隔离 | 带非空 `experimental_bearer_token` 的聊天、compact、realtime/WebSocket、`/models`、provider refresh 后下一次请求；移除 token 后回退 | 有 provider token 时只用 `Authorization: Bearer <experimental_bearer_token>`，不继承 AuthManager 的 auth mode、账号 ID、ChatGPT routing、FedRAMP 或 attestation；无 token provider 保持原 AuthManager 行为 |
-| 历史跨 provider | history list、recent sessions、resume picker、resume last、`codex://threads/{id}` deep link、旧 provider 线程继续、fork picker / fork last | 继续旧线程默认使用当前顶层 provider；历史发现不被旧 provider 过滤；fork 边界按当前 provider 保持，不把“继续旧线程”误扩成“跨 provider 派生” |
-| app-server stderr | 默认启动、`[logging] app_server_stderr = true`、WebSocket banner、`listening on`、`readyz`、`healthz`、配置错误 | 默认不输出后台诊断噪声；显式开启后恢复诊断；真正启动失败或配置错误仍能给用户看到必要错误 |
-| `node_repl` CLI 继承 | `[mcp_servers.node_repl]`、本地 stdio MCP、其他 MCP server、当前 `Config.codex_self_exe` | 仅 `node_repl` 被注入 `CODEX_CLI_PATH=<当前 local3 codex.exe>`；其他 MCP server 不被全局改写 |
-| 批量优化与历史安全 | rollout batch flush、app-server 高频通知合并、token usage、diff/plan 更新、命令完成状态、崩溃恢复、显式关闭开关 | 默认优化不改变用户可见输出节奏和历史可靠性；显式关闭后能回到未优化行为 |
-| app-server 退出清理 | 主 app-server shutdown、外部 auth、apps runtime、skills watcher、仍加载线程、`node_repl.exe` | 只释放已有 runtime 引用；不新增 idle timeout，不全局扫描或 kill 进程，不因 UI 订阅断开误伤仍在使用的会话 |
-| Windows GitHub 交付 | GitHub build `x86_64-pc-windows-msvc` 的 `codex.exe`、artifact 下载、下载产物的 `--version` / `--help` / retry 行为验证、GitHub promotion Release | 本地不执行编译；build 不直接发 Release；通过下载产物验证后，GitHub workflow 仅从该成功 build artifact 创建/更新 Release，资产不是从本地上传；任何失败从远程 build 重新闭环 |
+| 第一档 | 最后 5 张保持当前状态 | `original → high` |
+| 第二档 | 最后 1 张保持当前状态 | `original → high` |
+| 第三档 | 最后 5 张保留真图 | 替换为 1×1 占位图 |
+| 第四档 | 最后 1 张保留真图 | 替换为 1×1 占位图 |
 
-## 2026-07-03 retry 固定 5 秒与 sticky-break 漏改反思
+保留范围不会把此前已降档或占位的图片恢复为原图。
 
-- 这次漏点不是 retry 主链完全没做，而是旧文档和旧测试仍把等待口径冻结在 `8s` 或 cap-only 上限，导致实现、测试名、断言和 checklist 互相强化旧口径。后续凡调整 retry 等待口径，必须同时扫 `core/src/util.rs`、`codex-client/src/retry.rs`、`core/src/util_tests.rs`、`codex-client/src/retry.rs` 测试区、文档里的 `8s/eight seconds`、`<=5s`、`最高 5s`、`backoff/base_delay/jitter` 残留，确保每次自动 retry 等待都是固定 `5s`。
-- sticky-break 不能只看 sampling 主链或 request retry；compact 是用户在长线程最容易触发的恢复路径，local compact 和 remote compaction v2 必须同时证明“会 retry”和“第 3 次会先做 URL 判定”。如果 compact 的 retry budget、fallback threshold 或配置口径在第 3 次前截断，用户仍会卡在旧粘连路由上，表面看有 hard route recovery，实际没有换掉粘连路由。针对目标 URL/base_url 不是 ChatGPT 官方 Codex 后端的中转 provider，第 3 次 sticky-break 必须把 `x-codex-turn-state` 与 `prompt_cache_key`、WebSocket session 一起作为 Codex 侧粘连信号清掉；针对 ChatGPT 官方 Codex 后端，必须跳过这套中转粘连转换；`function_call_output` 仍按续链请求处理，不能丢必要 `previous_response_id`，但也不能因此跳过 retry 或 sticky-break 计数。
-- 验收时必须区分两类结果：默认无界 retry 模式下，第 3、6、9 次等必须能触发 sticky-break；显式 bounded 或 `stream_max_retries = 0` 是主动限制/禁用 retry，不能拿 bounded 口径替代 local3 默认体验。
-- realtime/WebSocket 是独立入口，不能只因为 Responses request/stream 已经有 route recovery 就判定闭合；普通 websocket connect 和 WebRTC sideband join 都要单独证明临时失败后会 retry、第三次失败会进入 recovery generation、retry 状态只 transient 展示。
-- old remote compact `/responses/compact` 不能只证明 prompt_cache_key 第四次变了；还要证明前三次 request retry 的用户可见中间态存在，并且这些中间态不写历史、不污染 replay。
+某档没有变化时，在同一次触发中继续升档，不再额外等待 3 次失败。
 
-## 2026-07-01 experimental_bearer_token provider 隔离思路
+- 档位按回合记账，同回合多次 sampling 共享进度。
+- 新回合从第一档重新开始。
+- 四档用尽后仍自动重试，不把 context window 改成终态失败。
+- 显示临时 `Context overflow image ladder step N`。
+- 不修改磁盘截图文件。
 
-- 目标口径：`experimental_bearer_token` 是 provider-scoped 静态 bearer token；用户能感知到的是“这个 provider 自己的 token 管自己”，不因为本机登录了 ChatGPT 或保存了 `auth.json` 就改用 ChatGPT 路由、账号 header 或其他全局登录上下文。
-- 最小 hook 边界：不要只在 `resolve_provider_auth()` 修 `Authorization` header；还要阻断 `ConfiguredModelProvider::auth()`、`OpenAiModelsEndpoint::auth()` 和 `supports_attestation()` 从全局 `AuthManager` 取值。否则 header 可能是 provider token，但 `auth_mode`、默认 base_url、`/models`、ChatGPT account header 或 attestation 仍会被 AuthManager 间接污染。
-- 推荐实现打法：当 `experimental_bearer_token` 非空时，provider 请求路径直接把当前 provider auth 视为 `None`，再由 provider 配置生成 `BearerAuthProvider`；保留没有 token 的 provider 继续走原 AuthManager。若要支持运行时移除 token 后回退 AuthManager，优先在 `auth()` 等读取点早返回，不要过早丢弃保存的 AuthManager 引用。
-- Provider runtime refresh 必须支持“带非空 `experimental_bearer_token` 的 provider”与“无 `experimental_bearer_token`、继续使用 AuthManager 的 provider”这两类代表 provider 之间双向互刷；`openai_http ↔ yunyi` 只是当前配置里的代表样例，不应写死为特例。无 token provider 刷新到有 token provider 时，下一次请求必须进入 provider-scoped bearer token 隔离模式；有 token provider 刷新回无 token provider 时，必须清掉旧 provider token 状态并恢复原有 AuthManager / `auth.json` 行为。实现上不能把 AuthManager 全局丢弃，只能在当前 provider 有非空 token 时让请求读取点临时忽略 AuthManager；这样任意两个同类 provider 互相 refresh 都不会串旧 token、旧 auth mode、ChatGPT account header、FedRAMP header 或 attestation。
-- 优先级与空值：`experimental_bearer_token` 必须按非空字符串判断；空字符串不能生成 `Bearer ` 坏请求。若同一 provider 同时配置 `env_key` 与 `experimental_bearer_token`，必须明确最终优先级；local3 目标是“有非空 `experimental_bearer_token` 就优先用它”，避免环境变量或 AuthManager 抢占。
-- 验收清单：即使 AuthManager 内存在 ChatGPT token、API key、account id 或 FedRAMP 状态，聊天请求、`/models` 请求和 refresh 后请求都必须只带 `Authorization: Bearer <experimental_bearer_token>`；不得带 AuthManager 派生的 `ChatGPT-Account-ID`、FedRAMP header 或 ChatGPT auth mode；移除 `experimental_bearer_token` 后，未配置 token 的 provider 旧行为不回归破坏。
+图片梯子只改图，不丢弃 `previous_response_id`，不重置 WS；连接和粘连恢复仍由第三节管理。
 
-## 2026-05-30 回归经验
+### 6.2 持久化与重放
 
-- 503、429、402、网络断开等请求级 retry 不能只留在 telemetry/log；用户必须看到 `willRetry=true` 的中间态提示，提示里至少包含 HTTP 状态码、当前 retry 次数、最大 retry 次数和可诊断 details。否则用户只会感觉“卡住了/后台在重试但没告诉我”。
-- HTTP request retry 和 stream/WebSocket retry 是两条不同链路；隐藏 WebSocket 首次重连提示时，不能顺手把 HTTP 503 这类请求级 retry 也隐藏掉。
-- Provider 的 `base_url` 与 `experimental_bearer_token` 写入后，不能只清 plugin/skill cache；必须刷新 loaded threads 的 provider runtime。否则已经打开的窗口或会话会继续拿旧 URL/token 发请求。
-- Provider refresh 的结果要区分两件事：配置字段是否已经保存、当前是否真的刷新到了 live instance。没有 live instance 时仍然是保存成功，但必须明确提示“未刷新任何实例”。
-- Windows tray 的 provider apply 必须优先调用 app-server 控制面的 `apply_provider_runtime_from_effective_provider`，让实际运行中的 app-server 自己完成 effective config 读取、写入、reload user config 和 loaded thread refresh；只有所有 live instance 都明确不支持该控制操作时，才回退到 Python 直接改 `config.toml` 再发 `refresh_all_loaded_threads`。否则真实 `codex.exe` 被 IFEO、wrapper、runtime selector 或 Windows App 重定向后，用户会看到“配置像是改了，但当前会话仍拿旧 URL/token”。
+同时修改内存历史，并追加 `RolloutItem::ImagesShrunk`，只记录 `tier` 和 `changed`，不写全量历史快照。
 
-## 2026-05-31 retry 错误显示经验
+resume / fork 重放时：
 
-- 无界次数配置不能把内部哨兵值显示给用户；`u64::MAX` 只代表“不设次数上限”，用户界面禁止出现 `18446744073709551615`，应显示持续累计序号与 `(auto retry)`，不能显示 `(unbounded)` 或已失效的 `(10 min limit)`。分阶段 watchdog 只打断当前阶段卡住的那一次尝试后继续自动 retry，不是次数上限。
-- retry 标题和详情要分工清楚；标题说明“HTTP 状态 + 当前第几次 retry + 是否无界”，详情说明“状态含义 + 正在自动重试 + 安全诊断字段”。不能出现标题是 `429 retry 4/18446744073709551615`、详情只有 `http 429` 这种难以排查的组合。
-- telemetry/log 的短字符串不能直接当用户详情；`http 429`、`http 503` 适合内部统计，不足以给用户解释发生了什么。用户可见详情至少应包含 `HTTP 429 Too Many Requests, retrying` 或 `HTTP 503 Service Unavailable, retrying` 这类人话状态。
-- HTTP response body 不能原样放进用户详情；body 可能包含 token、API key、auth error 或 provider 返回的敏感内容。允许展示的诊断信息应限制在状态码、标准 reason、去 query/userinfo 的 endpoint、request id、cf-ray、auth error 和 auth error code 等安全字段。
-- app-server/TUI/Windows App 的 `willRetry=true` 中间态必须继续可见；修复文案时不能回退成只写 telemetry/log，也不能把请求级 HTTP retry 和 stream/WebSocket reconnect 混在一起隐藏。
+- 对当时已重建出的历史重新执行同一档。
+- “保留最后 N 张”按存活历史重新计算，不按过期位置回放。
+- 每档幂等，跳过已经降档或占位的图片。
+- 不调用 `image_preparation::prepare_response_items`。
+- 只调整 `detail` 或替换为已知占位 URL，不重新编码。
 
-## 2026-05-31 local3 版本身份与 GitHub 打包经验
+`prepare_response_items` 是发送前步骤，可能把无法处理的图片改成文字，在重建阶段调用会污染历史。
 
-- local3 版本身份不能只查 `codex.exe --version`；`codex doctor --json`、doctor runtime details、`codex-app-server --version`、app-server initialize 返回的 `user_agent`、daemon/remote-control JSON、device-code 登录欢迎文案、线程历史元数据和 rollout 元数据都是用户或客户端能看到的版本面，也必须显示 `<版本>-local3`。
-- app-server 的 `user_agent` 不是普通 telemetry 字符串；daemon 会从 initialize 响应里解析它，再显示到 doctor 的 `app-server version` 详情里。这里如果继续使用裸 `CARGO_PKG_VERSION`，用户会看到 CLI 是 local3、后台 app-server 却像官方裸版本。app-server initialize 回给本机的 `user_agent` 仍用显示版本。把它放进发给服务端的 HTTP `User-Agent` 不算通过。
-- `cli_version`、`client_version`、`app_server_version` 字段要按用途区分：进入历史列表、远端诊断、daemon JSON 或用户界面的用 display version；用于更新比较、Python wheel 版本、配置锁、OpenTelemetry service_version、OAuth/device-code 协议参数的仍用裸 semver，避免破坏包版本和协议兼容。
-- GitHub workflow 不能把 `GITHUB_REF_NAME` 当 Python wheel 的 Codex 版本；手动从 `main` 分支触发时它是 `main`，不符合 PEP 440，会导致 wheel 打包失败。云端打包应从 `codex-rs/Cargo.toml` 读取裸 semver，再把 local3 只用于用户可见版本输出。
-- Windows release smoke test 必须明确断言 `-local3`，不能只检查输出里包含裸 `0.135.0`；否则 `0.135.0` 和 `0.135.0-local3` 都会通过，无法阻止本地身份后缀回退。
-- GitHub Actions artifact 只是单次 workflow 的临时产物，不会自动显示在 Releases 页面；如果用户要从 Releases 页面下载，云端编译成功后必须单独创建 GitHub Release，并把已验证的 artifact 上传为 release assets。
+ImagesShrunk 不是 compact 基线：
 
-## 2026-06-02 app-server stderr 与 node_repl 回归经验
+- 不推进 compact 窗口。
+- 不显示 compact UI。
+- 不参与 fork 边界或回合计数。
+- 不截断重放范围。
+- 单条记录保持 1 KB 量级。
 
-- 检查 app-server stderr 降噪时不能只看 tracing layer；WebSocket 启动 banner 里的 `listening on`、`readyz`、`healthz` 也是 stderr 输出，必须一起验证默认静音和显式开启两种状态。
-- `node_repl` 的 CLI 路径覆盖必须按 server 名精准限制在 `node_repl`，不能全局改写其他 MCP server 的 env；否则可能破坏用户自己配置的 MCP 环境变量。
-- 云端构建验证必须下载 GitHub Actions 产物后测实际 `codex.exe`；不能用源码静态检查、本地路径旧 exe，或本地编译产物替代 release smoke test。
+paginated 会话通过 fork 派生新线程，原线程历史保持不变；legacy rollout rollback 只保留兼容验证，不作为当前主路径验收。
 
-## 2026-06-03 136 更新与 refresh/retry 回归经验
+### 6.3 必须保留的历史经验
 
-- 更新到官方 `rust-v0.136.0` 时不能只合版本号；local3 清单、显示版本、历史跨 provider、日志降噪、node_repl 继承和 runtime 清理都要按用户可见结果逐项复核。
-- Provider refresh 必须能打断所有正在进行的 retry：HTTP 503/429/402、无界 503、网络失败、SSE 断流/空闲、WebSocket 503/426/401 都要验证旧 endpoint/token 不再继续增长，并切到新 endpoint/token。
-- Provider refresh 的覆盖字段必须包含 `base_url`、`experimental_bearer_token`、`force_service_tier_priority` 和 fast mode 有效配置；refresh 触发也不能依赖 retry，用户主动改配置后所有 live runtime 都应尽快刷新。
-- retry 粘连故障的补救核心是 sticky-break：所有 Codex retry 入口都要覆盖，所有远端/模型请求错误都要 retry，不能按错误类型、状态码、协议映射或续链场景保留豁免；连续 retry 计数每满 3 次都必须先判定实际请求 URL/base_url，再决定是否执行 sticky-break 转换；如果目标 URL/base_url 是 ChatGPT 官方 Codex 后端，跳过中转粘连转换；如果目标 URL/base_url 不是 ChatGPT 官方 Codex 后端，而是外部中转或 relay provider，第 3、6、9、12 次等每个 3 次周期都要旋转 `prompt_cache_key`、清空 `x-codex-turn-state`、重置 WebSocket session，并让紧随其后的可全量重放 recovery 请求清掉旧 `previous_response_id`；禁止把真实 thread id/session id 改掉，也不要通过改用户 prompt 来“换内容”；`function_call_output` 等必须续链场景不得强行丢续接 ID，但也不能因此跳过 retry 或 sticky-break 计数，必须用不破坏续链语义的方式继续重试。
-- 用户报告的 `503 retry N (unbounded)` 必须迁移为“未设次数上限或非常大次数、每一次请求各自按阶段拥有完整卡顿 watchdog”的场景覆盖；不写 `request_max_retries` 仍代表次数不封顶，release exe 必须在某一次请求卡满当前阶段时只中断该次尝试并继续 retry，下一次不得继承或扣减前一次已经消耗的时间，不能终止 turn 或要求用户手动重试。
-- 分开刷新要保留旧的全刷，同时新增 `console` 与 `appServer` scope；动态验收至少要证明 `appServer` 能刷新 Windows App app-server thread，`console` 不误刷 app-server thread。
-- GitHub CLI 查询和触发必须显式带 `--repo dqIndieGames/codex`；否则可能落到 `openai/codex`，导致 run/release 证据查错仓库。
-- 禁止本地编译时，编译证据只能来自 GitHub Actions；本地只下载 release zip，比对 GitHub asset digest，再用下载的 `codex.exe` 做真实 smoke 与 refresh 矩阵。
+**清单与验收｜2026-08-15**
 
-## 2026-06-14 历史线程 provider 重绑经验
+- 图片梯子必须是独立编号功能。
+- 第 3 项负责“溢出仍可重试”，第 18 项负责“如何瘦身旧图”，不各自维护重复规则。
+- 验收看下一包是否变瘦，以及是否出现升档提示，不能只匹配 1×1 常量。
+- 发送前 prepare 可能把 1×1 转为 omit 文案，这仍可说明请求变瘦，但不能把 omit 写成目标规格。
 
-- `codex://threads/{id}` 不能只当作“接回旧 loaded thread”；当用户已切换当前顶层 provider 时，恢复旧线程也要验证实际请求 provider 是否同步切换，否则旧线程会因历史 `session_meta.model_provider` 或 loaded `config_snapshot.model_provider_id` 继续走旧 provider。
-- 历史会话“跨 provider 可发现”和 fork 边界要分开验收：resume picker、resume last、deep link 默认应不带 provider filter；本地 fork picker / fork last 仍要按当前 provider 过滤，避免把“继续旧线程”需求误扩成“从旧 provider 派生新线程”。
-- 恢复旧线程不能只看列表能不能选中；app-server resume 端必须确认显式 request provider 覆盖历史 `SessionThreadConfig.model_provider`，TUI 同一 thread resume 遇到 active provider 不同要先 shutdown 再 cold resume/rebind，否则用户以为切到新 provider，实际下一轮仍走旧 provider。
-- `Selected model is at capacity. Please try a different model.` 必须作为 typed `ServerOverloaded` 进入 retry / hard route recovery；只改 UI 文案或只让 `is_retryable()` 返回 true 不够，必须覆盖普通 sampling、local compact、remote compact v2 三条会把错误变成终态 `ErrorEvent` 的链路。
-- 现行 compact retry 以第 3、11 条为准：默认无界任务重试与 WS 传输恢复阈值分离；普通断流/请求超时连续 3 次即切 HTTP，不能靠无界 WS 原样重发恢复。显式 bounded/zero 仍是用户主动限制，不额外穿透；不得用历史 compact 专属有限 terminal budget 替代现行默认体验。
-- 禁止本地编译时按第 17 条执行：静态复核 → GitHub build/test → 下载该 run artifact 验证真实 exe → GitHub promotion 发布正式 Release → 重新下载 Release 资产核验；构建本身不发布 prerelease，不使用旧 run 或本地旧 exe 代替本轮验收。
+**错误落盘方式｜2026-08-16**
 
-## 2026-06-28 retry 计数器回绕修复经验
+旧版曾把瘦身历史写为：
 
-- 用户可见 retry 序号必须和内部 route recovery 局部计数分离；第 3、6、9 次 sticky-break、分阶段 watchdog 中断当前尝试、重启 HTTP 请求、重置 WebSocket session 或刷新局部 fallback 计数，都不得把 `503 retry N (auto retry)` / `Reconnecting... N (auto retry)` 的 N 重置；N 必须继续累计为 4、5、6，不能回到 0 或 1。
-- HTTP request retry 的显示计数要在 telemetry 层加上已被 route recovery 消费的 retry offset；只减少下一轮 `max_attempts` 不够，否则新建 API client 后 `on_request_retry(1, ...)` 会让 UI 重新显示第 1 次 retry。
-- stream/WebSocket retry 要保留两个计数器：内部 `retries` 继续用于 fallback threshold 和 sticky-break 周期，但不得用于改变 retry 等待间隔；每次自动 retry 等待始终固定 `5s`。独立的 display retry 只用于用户提示和日志显示，provider runtime refresh、fallback transport 或 session reset 不得清零 display retry。
-- 验证必须同时覆盖 request-layer 与 stream/WebSocket，至少断言连续 1..6 可见序号、不出现 `18446744073709551615`，并在最终 release smoke 中从 GitHub Release asset 重新下载 exe 后复核，不能用 Actions artifact 或本地旧 exe 代替。
+`CompactedItem { message: "", replacement_history: Some(全量历史) }`
 
-## 2026-08-15 context window 图片梯子
+不能恢复这种做法：
 
-- 图片梯子是独立用户可感知能力，必须作为编号清单项进入「你好」首轮清单；不能只写在第 3 条子条里，因为首轮解析只抽取 `N. ` 编号行。
-- 第 3 条仍管「context window 必须可 retry」；第 18 条只管「连续溢出时如何瘦身旧图」。两套口径不要再各写一份互相漂移。
-- sticky-break / `previous_response_id` 仍归第 11 条每 3 次逻辑；第 18 条禁止再 drop id 或重置 WebSocket。
-- 验收看下一包是否变瘦和是否出现 `Context overflow image ladder step N`，不要只匹配 1×1 常量。当前 prepare 可能把 1×1 变成 omit 文案，这仍算瘦身，但不能把 omit 写成目标规格。
+- `Compacted` 同时承担历史基线、compact 窗口节点和回合边界。
+- 重建时遇到带 `replacement_history` 的记录，会将 `rollout_suffix` 截到该记录之后，即 `rollout_suffix = &rollout_items[index + 1..]`，导致后续 resume / fork 历史残缺。
+- 实际变化只有几百字节，却每档写出含原图 base64 的几十 MB 全量快照；`load_history` 又会全量读入内存。
 
-## 2026-08-16 图片梯子落盘改用 ImagesShrunk（修正 2026-08-15 的落盘方式）
+真正的 remote compact 也可能是“空 message + 非空 `replacement_history` + 有 `window_number` / `window_id`”，与旧图片梯子记录同构。不能通过“忽略空 message 的 Compacted”清理旧数据，否则会误伤真 compact。
 
-- 2026-08-15 首版把瘦身后的历史当作 `CompactedItem { message: "", replacement_history: Some(全量历史) }` 追加到 rollout。这是错的，必须避免重犯：
-  - `Compacted` 在 codex 里同时承担三重语义——重放的历史基线、compact 窗口链节点、回合边界。`rollout_reconstruction` 反向扫描一旦遇到带 `replacement_history` 的 `Compacted`，就会把 `rollout_suffix` 永久截断到它之后（`rollout_suffix = &rollout_items[index + 1..]`）；旧图片梯子把瘦身历史写成这种 `Compacted` 记录，会让后续 resume/fork 重建得到残缺历史。
-  - 每触发一档就写一份含全部原图 base64 的完整历史快照。真实变化量只有几百字节（第 1/2 档只改 `detail`，第 3/4 档换成约 100 字节的 1×1 占位），却写出几十 MB，直接撑大 rollout 文件；而 resume/fork 的第一步 `load_history` 是把整个 rollout 全量读进内存。
-- 现行做法：新增 `RolloutItem::ImagesShrunk { tier, changed }`，只记档位，重放时对「当时已重建出的历史」重新执行同一档。这样 fork/resume 重建历史时，「保留最后 N 张」是按存活历史重新评估的，而不是按过期位置回放；单条记录 1 KB 量级；每一档都幂等（已降档、已占位的图会跳过）。
-- 重放路径**不得**调用 `image_preparation::prepare_response_items`。那是发送前步骤，会把无法处理的图片改写成文字占位；在重建历史时执行会污染存量历史。梯子只改 `detail` 或换成已知的占位 URL，不需要重新编码。
-- **旧脏数据无法安全清理**：`compact_remote.rs` / `compact_remote_v2.rs` 写的真 compact 同样是「空 message + 非空 `replacement_history` + `window_number`/`window_id` 均有值」，与旧梯子记录字段完全同构，无法按字段区分。因此不做「忽略空 message 的 Compacted」这类兼容读法——那会误伤真正的 remote compact。发布 0.144.3-local3-image-ladder 后已核对 `~/.codex/sessions` 该版本期间的全部会话，未产生此类记录，故无需迁移。
-- 新增 rollout item 变体要改约 15 处穷尽 `match`（`rollout` 的 policy / metadata / list / search / recorder / persistence_metrics，`state` 的 extract / runtime::threads，`thread-store`、`app-server-protocol`、`memories`、`core` 的 spawn 与重放）。其中 `rollout/src/policy.rs` 必须放行持久化，否则记录会被静默丢弃。
-- CI 侧：2026-08-07 那次「compile-only」把回归测试与 smoke test 从 `local2-minimal-windows-release.yml` 删掉，直接导致本次改动只要能编译就发版、rollout/resume 路径完全没被验证。已恢复测试与 smoke，并追加图片梯子与 rollout 重放的回归测试；本地禁止编译时，CI 是唯一验证口，不能再裁掉。
+原记录说明：发布 `0.144.3-local3-image-ladder` 后，已检查该版本期间的会话，未发现此类记录，因此当时无需迁移。该结论不代替其他版本的数据核查。
+
+**新增 rollout 变体的检查点**
+
+原修复涉及约 15 处穷尽 `match`，包括：
+
+- rollout 的 policy、metadata、list、search、recorder、persistence_metrics。
+- state 的 extract、runtime::threads。
+- thread-store、app-server-protocol、memories。
+- core 的 spawn 和重放。
+
+rollout policy 必须允许持久化，否则新记录会被静默丢弃。
+
+## 七、日志、批量优化与运行时清理
+
+### 7.1 默认日志降噪
+
+Windows App、app-server、TUI 默认使用较安静的日志设置；显式配置仍可开启详细诊断。
+
+analytics、feedback、log_db 默认关闭，可配置开启。
+
+app-server stderr 默认不输出：
+
+- 普通后台诊断日志。
+- `codex app-server (WebSockets)`。
+- `listening on`、`readyz`、`healthz`。
+
+设置 `[logging] app_server_stderr = true` 后恢复诊断。真正启动失败或配置错误仍须向用户显示必要错误。
+
+**经验｜2026-06-02：** 不能只检查 tracing layer，启动 banner 也是 stderr 来源。
+
+### 7.2 批量优化
+
+包含两种优化：
+
+- **会话记录批量写盘**：合并多次小写入，减少磁盘操作。
+- **app-server 高频通知合并**：减少连续小更新，降低客户端负担。
+
+默认可以开启，但以下结果须与关闭优化时保持用户可感知等价：
+
+| 检查项 | 要求 |
+|---|---|
+| 回答输出 | 及时显示，不能长时间积压 |
+| token usage | 用量及时、准确更新 |
+| diff / plan | 文件改动和任务计划及时更新 |
+| 命令完成 | 命令完成状态及时回传 |
+| 崩溃恢复 | 会话恢复可靠性不因批量保存而退化 |
+
+必须保留显式关闭开关。
+
+### 7.3 node_repl 继承当前 CLI
+
+`node_repl` 是指定的 MCP 工具服务。它需要调用 Codex 时，应使用主程序当前运行的 local3 exe。
+
+仅对 server 名为 `node_repl` 的 MCP 注入：
+
+`CODEX_CLI_PATH = Config.codex_self_exe`
+
+目的：避免主程序已经更新，工具却调用自动安装目录里的旧 exe，导致刷新、诊断和 app-server 行为不一致。
+
+不能全局改写其他 MCP server 的环境变量，包括其他本地 stdio MCP。
+
+### 7.4 app-server 退出清理
+
+主 app-server shutdown 调用已有 `clear_runtime_references()`，释放外部 auth、apps runtime、skills watcher 等引用。
+
+禁止：
+
+- 新增 idle timeout。
+- 全局扫描或 kill `node_repl.exe`。
+- 因 UI 订阅断开而结束仍加载的线程。
+
+## 八、Windows 构建与交付
+
+### 8.1 固定流程
+
+- **静态复核：** 核对本次修改和相关验收范围。
+- **GitHub build / test：** 本地不编译；只构建 `x86_64-pc-windows-msvc` 的 `codex.exe`，上传独立 artifact，不直接发布 Release 或 prerelease。
+- **下载 artifact 验证：** 使用该 run 下载的真实 exe，执行 `--version`、`--help` 和相关行为验证。
+- **GitHub promotion：** 验证通过后，由 workflow 从已验证 artifact 创建或更新正式 Release 并附加资产，禁止本地上传。
+- **重新下载 Release 核验：** 比对 GitHub asset digest，再用 Release 下载的 exe 完成最终 smoke 和相关回归。
+
+build、下载验证或 promotion 任一环节失败，修复后从 GitHub build 重新开始。
+
+所有 GitHub CLI 查询与触发显式指定：
+
+`--repo dqIndieGames/codex`
+
+### 8.2 验证来源
+
+- 本地旧 exe、其他 run 的 artifact、源码静态检查和本地编译产物，不能代替本轮 artifact 验证。
+- 发布后的最终检查必须使用重新下载的 Release asset，不能继续拿 Actions artifact 代替。
+- Actions artifact 不会自动出现在 Releases 页面，必须经过独立 promotion。
+- 禁止本地编译时，编译及相关测试证据来自 GitHub Actions。
+
+### 8.3 历史经验
+
+- **2026-06-02：** 必须下载云端产物验证真实 exe，不能拿源码或本地旧文件代替。
+- **2026-06-03，合入 `rust-v0.136.0`：** 只更新版本号不够，须逐项核对清单、版本身份、历史发现、日志、node_repl 和 runtime 清理。
+- **2026-06-14：** 明确 build 与 promotion 分离；构建成功不等于可以发布。
+- **2026-08-16：** 原记录指出，2026-08-07 的 compile-only 调整曾从 `local2-minimal-windows-release.yml` 删除回归和 smoke，导致 rollout / resume 未经验证即可发版。后来恢复测试并补充图片梯子、重放回归；不能再次用“能编译”代替这些检查。
+
+## 九、合并上游后的验收矩阵
+
+本表列出检查入口和用户结果；具体规则见对应正文。
+
+| 主题 | 必验场景与关键证据 |
+|---|---|
+| 版本身份 | CLI、doctor 及 runtime details、TUI、app-server initialize、daemon / remote-control、登录欢迎文案、历史、rollout 和升级提示；展示版本与协议裸版本分别验证 |
+| 服务端 User-Agent | WS 握手、登录、ChatGPT 辅助接口和云任务；版本来自当前包版本，无 `-local3`，其余字段保持官方行为 |
+| 首次清单 | 新线程、Clear、重复输入、恢复旧线程、fork、子会话、多段 / 富文本 / 附件；只在规定入口触发，包含第 18 项 |
+| 固定 10 秒 | HTTP request、stream / WS、各 compact、realtime、WebRTC、`Retry-After`；验证每次失败后的等待，不只检查最大值 |
+| 流式配置超时 | 首次与重试；默认值和自定义值；首事件及后续空闲均按配置；无额外固定上限，持续输出不按总时长中断 |
+| 响应头与建连 | HTTP 响应头等待无 local3 固定看门狗；WS 建连与流式等待分开；检查取消、refresh、断流和各自连接超时 |
+| WS 保持协议 | 普通回答、local compact、remote compaction v2；官方 / 中转；握手失败、断流、超时、连续失败及预算耗尽后不自动切 HTTP |
+| WS 恢复结果 | 新连接仍为 WS；后续轮次保持协议；工具结果和续链完整，已完成工具不重做；取消有效，计数不归零 |
+| WS 真实界面 | 使用下载的 GitHub artifact exe；截图并读图确认重连提示，结合请求证据确认仍使用 WS |
+| 中转粘连恢复 | 503 / 502 / 504、断流、握手、capacity；第 3 / 6 / 9 / 12 次；默认官方地址、中转、全量重放与工具续链 |
+| 上下文压缩 | local、旧 `/responses/compact`、remote compaction v2 分别验证；默认重试、按 URL 恢复、bounded / zero；旧入口前三次提示及历史隔离 |
+| 实时语音连接 | realtime 直连 WS 与 WebRTC sideband 分别检查；重试、每 3 次内部恢复轮次、临时提示、配置刷新中断及 session id 不变 |
+| 重试显示与历史隔离 | HTTP 和 stream / WS 均显示连续 1..6；不暴露哨兵值；重连和 refresh 不回绕；无逐次普通错误日志，不进历史 / fork / replay |
+| 旁路边界 | `/models`、文件 URL 生成不强制套主链 retry；鉴权隔离和安全错误提示仍检查 |
+| Provider 刷新 | app-server、TUI / console、exec、当前及新 subagent、agent_jobs、tray、无实例；无报错刷新、同地址换 token、换地址、重试中刷新及各 scope |
+| Provider token | 有 / 无 token 双向切换、空值、与 `env_key` 同时配置、全局登录态存在；覆盖聊天、压缩、realtime、HTTP / WS、`/models` 和刷新后请求 |
+| 服务层 | 顶层未配、开启、关闭；Fast / Flex / None；profile 不覆盖，刷新后生效 |
+| 历史会话恢复 | 历史列表、最近会话、resume 选择器 / 最近会话、deep link、已加载线程；下一请求使用当前 provider；fork 选择范围仍按当前 provider 过滤 |
+| 多账号 | 默认及两个命名账号、中文名、非法名、并发、API key / ChatGPT、登录 / 状态 / 刷新 / 登出、TUI / embedded app-server、共享 daemon 和拒绝入口 |
+| 401 文件重读 | 连续至少 4 次 401；跨第 3 次恢复仍有效；HTTP、Responses / realtime 握手；File / Auto、命名账号、坏文件、身份不匹配及非文件凭据 |
+| 图片梯子 | 第 1 / 2 次原样、第 3 / 6 / 9 / 12 次升档、无变化连升、同回合共享及新回合复位；四档用尽仍重试，下一包确实变瘦 |
+| 图片历史 | ImagesShrunk 大小、resume / fork 重建、原线程不变、paginated 主路径、legacy 兼容、无 compact 副作用、磁盘原图不变 |
+| 默认日志 | Windows App、app-server、TUI；analytics / feedback / log_db 默认关闭及显式开启 |
+| stderr | 默认静音与显式开启；tracing、WS banner、启动失败及配置错误 |
+| node_repl | 调用当前 local3 exe；其他 MCP 环境不被改写 |
+| 批量优化 | 开启 / 关闭时，回答、用量、文件改动、计划和命令完成状态及时一致，崩溃恢复可靠 |
+| 退出清理 | 已有引用释放；无新增空闲超时、全局 kill 或误伤仍加载线程 |
+| Windows 交付 | 本轮 build → artifact 真 exe 验证 → GitHub promotion → Release 重新下载核验；版本、重试序号及相关行为通过 |
+
+## 十、配置与 WS 版本核对快照
+
+**核对日期：2026-10-06。**本节记录当时配置，不作为所有安装环境的固定要求。
+
+配置文件：
+
+`C:\Users\Administrator\.codex\config.toml`
+
+相关配置节选：
+
+```toml
+model = "gpt-6-astra"
+model_provider = "openai_http"
+model_reasoning_effort = "xhigh"
+service_tier = "default"
+force_service_tier_priority = false
+
+[features]
+fast_mode = false
+
+[model_providers.openai_http]
+name = "OpenAI WebSocket"
+base_url = "https://chatgpt.com/backend-api/codex"
+wire_api = "responses"
+supports_websockets = true
+request_max_retries = 100000
+stream_max_retries = 100000
+requires_openai_auth = true
+```
+
+解读：
+
+- `openai_http` 是 provider 标识名，不能根据名字判断传输方式。
+- `wire_api = "responses"` 指 Responses API。
+- `supports_websockets = true` 表示启用 WS。
+- 当前 provider 未显式配置 `stream_idle_timeout_ms`，按当前实现使用默认 300 秒。
+- 当前 provider 未显式配置 `websocket_connect_timeout_ms`，按当前实现使用默认 15 秒。
+- 顶层显式关闭 priority 强制映射及 fast mode，与第四节允许显式关闭的规则一致。
+
+当前代码的 WS 握手使用：
+
+```http
+OpenAI-Beta: responses_websockets=2026-02-06
+```
+
+代码将其标为 Responses WebSockets V2。
+
+- v1 是早期实验版本；旧 `responses_websockets` 和 `responses_websockets_v2` 开关均已标为移除。
+- 当前通过 provider 能力选择 WS，不通过旧开关二选一。
+- v2 使用 `response.create`；满足续接条件时，通过 `previous_response_id` 和新增输入继续请求。
+- WS v1/v2 是应用层协议版本，与模型版本、HTTP/1 / HTTP/2、remote compaction v2 分开理解。
+- 当前官方 [WebSocket 模式说明](https://developers.openai.com/api/docs/guides/websocket-mode)描述了复用连接及增量续接方式；它不构成旧 v1 全部字段差异的说明。
+
+**配置启用 WS，不等于能证明某条既有连接此刻仍在 WS。**核对时现行代码仍有自动切 HTTP 的路径；本稿要求后续取消该行为。固定 10 秒和禁止自动降级均须通过实际实现与验收后，才能标记完成。

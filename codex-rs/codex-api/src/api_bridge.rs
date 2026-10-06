@@ -52,6 +52,7 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
         ApiError::Transport(_)
         | ApiError::Api { .. }
         | ApiError::Stream(_)
+        | ApiError::ContentFilter
         | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
@@ -86,6 +87,7 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                 CodexErr::Stream(msg)
             }
         }
+        ApiError::ContentFilter => CodexErr::new(CodexErrorDetails::ContentFilter),
         ApiError::ServerOverloaded { .. } => CodexErr::ServerOverloaded,
         ApiError::FlexUnavailable => CodexErr::new(CodexErrorDetails::FlexUnavailable),
         ApiError::Api { status, message } => {

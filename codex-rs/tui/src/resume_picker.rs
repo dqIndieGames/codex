@@ -3888,7 +3888,7 @@ mod tests {
         ));
         let mut local = crate::latest_session_lookup_params(
             /*uses_remote_filesystem*/ false,
-            /*uses_remote_workspace*/ false,
+            /*model_provider*/ None,
             &config,
             Some(&primary),
             /*include_non_interactive*/ false,
@@ -3899,7 +3899,7 @@ mod tests {
         assert_eq!(
             crate::latest_session_lookup_params(
                 /*uses_remote_filesystem*/ true,
-                /*uses_remote_workspace*/ false,
+                /*model_provider*/ None,
                 &config,
                 Some(&primary),
                 /*include_non_interactive*/ false,
@@ -4383,6 +4383,37 @@ mod tests {
         let first_index = rendered.find(first).expect("first metadata item");
         let second_index = rendered.find(second).expect("second metadata item");
         assert!(first_index < second_index);
+    }
+
+    #[test]
+    fn picker_renders_server_provider_history() {
+        let cwd = PathBuf::from("/project");
+        let mut row = make_row(
+            "/session.jsonl",
+            "2025-01-02T11:00:00Z",
+            "Other provider session",
+        );
+        row.cwd = Some(cwd.clone());
+        let mut state = PickerState::new(
+            FrameRequester::test_dummy(),
+            page_only_loader(|_| {}),
+            ProviderFilter::MatchDefault("server-provider".to_string()),
+            /*show_all*/ false,
+            Some(cwd),
+            SessionPickerAction::Resume,
+        );
+        state.ingest_page(page(
+            vec![row],
+            /*next_cursor*/ None,
+            /*num_scanned_files*/ 1,
+            /*reached_scan_cap*/ false,
+        ));
+        state.relative_time_reference = Some(parse_timestamp_str("2025-01-02T12:00:00Z").unwrap());
+        state.update_viewport(/*rows*/ 12, /*width*/ 80);
+        assert_snapshot!(
+            "resume_picker_shared_provider_history",
+            render_picker_list(&state, /*width*/ 80, /*height*/ 12)
+        );
     }
 
     #[test]

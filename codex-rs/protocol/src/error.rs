@@ -108,6 +108,11 @@ pub enum CodexErrorDetails {
     /// The Session loop treats this as a transient error and will automatically retry the turn.
     #[error("stream disconnected before completion: {0}")]
     Stream(String),
+    /// A response stopped by the content filter. Sampling retries need developer guidance.
+    #[error(
+        "stream disconnected before completion: Incomplete response returned, reason: content_filter"
+    )]
+    ContentFilter,
     /// A retryable upstream rate limit received inside the response stream.
     #[error("rate limit exceeded: {0}")]
     RateLimitExceeded(String),
@@ -421,6 +426,7 @@ impl CodexErr {
             | CodexErrorDetails::Spawn
             | CodexErrorDetails::SessionConfiguredNotFirstEvent => false,
             CodexErrorDetails::Stream(..)
+            | CodexErrorDetails::ContentFilter
             | CodexErrorDetails::RateLimitExceeded(_)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout
@@ -450,7 +456,7 @@ impl CodexErr {
 
     /// Local3 retries use a fixed five-second delay regardless of server advice.
     pub fn retry_delay(&self, _retry_count: u64) -> Option<Duration> {
-        self.is_retryable().then_some(Duration::from_secs(5))
+        self.is_retryable().then_some(Duration::from_secs(10))
     }
 
     /// Returns the original server-advised instant for callers that pass the error on.

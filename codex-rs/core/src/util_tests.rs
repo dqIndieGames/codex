@@ -24,8 +24,8 @@ fn feedback_tags_macro_compiles() {
 }
 
 #[test]
-fn core_retry_delay_is_fixed_to_five_seconds() {
-    assert_eq!(fixed_retry_delay(), std::time::Duration::from_secs(5));
+fn core_retry_delay_is_fixed_to_ten_seconds() {
+    assert_eq!(fixed_retry_delay(), std::time::Duration::from_secs(10));
 }
 
 #[derive(Default)]

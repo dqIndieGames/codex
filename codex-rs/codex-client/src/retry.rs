@@ -4,7 +4,7 @@ use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
 
-pub const FIXED_RETRY_DELAY: Duration = Duration::from_secs(5);
+pub const FIXED_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -43,7 +43,7 @@ pub fn fixed_retry_delay() -> Duration {
     FIXED_RETRY_DELAY
 }
 
-/// local3: every automatic retry waits a fixed 5s. Callers may still pass a
+/// local3: every automatic retry waits a fixed 10s. Callers may still pass a
 /// base/attempt, but those values must not change the wait.
 pub fn backoff(_base: Duration, _attempt: u64) -> Duration {
     FIXED_RETRY_DELAY
@@ -144,8 +144,8 @@ mod tests {
     }
 
     #[test]
-    fn request_retry_delay_is_fixed_to_five_seconds() {
-        assert_eq!(fixed_retry_delay(), Duration::from_secs(5));
-        assert_eq!(backoff(Duration::from_millis(1), 8), Duration::from_secs(5));
+    fn request_retry_delay_is_fixed_to_ten_seconds() {
+        assert_eq!(fixed_retry_delay(), Duration::from_secs(10));
+        assert_eq!(backoff(Duration::from_millis(1), 8), Duration::from_secs(10));
     }
 }

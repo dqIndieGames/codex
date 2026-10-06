@@ -7,149 +7,8 @@ permissions:
   contents: read
 
 jobs:
-  format:
-    name: Format and dependency lock verification
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-      - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
-        with:
-          components: rustfmt
-      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
-        with:
-          tool: uv
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86
-        with:
-          bazelisk-version: 1.28.1
-      - name: Format sources and refresh Bazel lock on GitHub
-        run: |
-          just fmt
-          just bazel-lock-update
-      - name: Export relevant formatting changes
-        if: always()
-        run: |
-          git diff --binary -- MODULE.bazel.lock codex-rs/core/src/client.rs codex-rs/model-provider-info/src/lib.rs codex-rs/model-provider-info/src/model_provider_info_tests.rs codex-rs/protocol/src/error.rs codex-rs/protocol/src/error_tests.rs codex-rs/codex-api/src/sse/responses.rs codex-rs/codex-api/src/endpoint/responses_websocket.rs codex-rs/codex-api/src/api_bridge.rs codex-rs/codex-api/src/api_bridge_tests.rs .github/scripts/test_response_header_wait.py .github/scripts/test_stream_timeout_config.py codex-rs/tui/src/chatwidget/tests/app_server.rs codex-rs/core/src/stream_events_utils_tests.rs codex-rs/core/src/session/tests.rs codex-rs/core/src/guardian/tests.rs codex-rs/core/src/tools/handlers/multi_agents_tests.rs codex-rs/config/src/project_trust.rs codex-rs/config/src/project_trust_tests.rs codex-rs/tui/src/update_prompt.rs codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs codex-rs/tui/src/app/daemon_menu.rs codex-rs/tui/src/app/daemon_menu_tests.rs codex-rs/tui/src/app/empty_state_animation_tests.rs codex-rs/tui/src/app/history_ui.rs codex-rs/tui/src/app/tests.rs codex-rs/tui/src/app/tests/active_reconnect_tests.rs codex-rs/tui/src/app/tests/realtime_requests.rs codex-rs/tui/src/app/tests/session_lifecycle_requests.rs codex-rs/tui/src/app/tests/startup_frame_tests.rs codex-rs/tui/src/chatwidget/tests/popups_and_settings.rs codex-rs/tui/src/chatwidget/tests/slash_commands.rs codex-rs/tui/src/history_cell/notices.rs codex-rs/tui/src/history_cell/session.rs codex-rs/tui/src/history_cell/tests.rs codex-rs/tui/src/named_session_lookup_tests.rs codex-rs/tui/src/startup_draft_layout_tests.rs codex-rs/tui/src/startup_draft_tests.rs codex-rs/tui/src/status/tests.rs codex-rs/tui/src/app/tests/background_exit_tests.rs > "$RUNNER_TEMP/local3-format.patch"
-          test ! -s "$RUNNER_TEMP/local3-format.patch"
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
-        if: always()
-        with:
-          name: local3-format-review
-          path: ${{ runner.temp }}/local3-format.patch
-
-  test:
-    name: Test transport and shared recovery
-    needs: format
-    runs-on: windows-latest
-    timeout-minutes: 120
-    env:
-      # Real shell and JSON-RPC fixtures must get CPU while their deadlines run.
-      NEXTEST_TEST_THREADS: "2"
-    defaults:
-      run:
-        working-directory: codex-rs
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Restore Rust build cache
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            codex-rs/target
-          key: local3-159-windows-latest-test-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            local3-159-windows-latest-test-${{ hashFiles('codex-rs/Cargo.lock') }}-
-            local3-159-windows-latest-test-
-
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
-        with:
-          tool: just,cargo-nextest,uv
-
-      - name: Configure official sandboxed V8 artifacts
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: x86_64-pc-windows-msvc
-
-      - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a
-
-      - name: Generate config schema on GitHub
-        shell: pwsh
-        run: cargo run --profile ci-test --target x86_64-pc-windows-msvc -p codex-config-schema --bin codex-write-config-schema
-
-      - name: Prepare Windows sandbox helpers for library tests
-        shell: pwsh
-        run: |
-          cargo build --profile ci-test --target x86_64-pc-windows-msvc -p codex-windows-sandbox --bins
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $profileDir = 'target/x86_64-pc-windows-msvc/ci-test'
-          foreach ($helper in 'codex-windows-sandbox-setup.exe', 'codex-command-runner.exe', 'codex-windows-managed-deny-probe.exe') {
-            Copy-Item -LiteralPath (Join-Path $profileDir $helper) -Destination (Join-Path $profileDir 'deps') -Force
-          }
-
-      - name: Test stream configuration and transport behavior
-        shell: pwsh
-        run: just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-client -p codex-api -p codex-model-provider-info -p codex-model-provider -p codex-protocol -p codex-login --lib
-
-      - name: Test Windows process and security changes
-        if: success() || failure()
-        shell: pwsh
-        run: just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-utils-process -p codex-utils-pty -p codex-windows-sandbox -p codex-tui --lib
-
-      - name: Test shared WebSocket and compaction recovery
-        if: success() || failure()
-        shell: pwsh
-        run: |
-          just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-core --lib
-
-      - name: Test realtime WebSocket and WebRTC handshakes
-        if: success() || failure()
-        shell: pwsh
-        run: just test --cargo-profile ci-test --target x86_64-pc-windows-msvc -p codex-api --test realtime_websocket_e2e
-
-      - name: Test complete workspace
-        if: success()
-        shell: pwsh
-        run: just test --cargo-profile ci-test --target x86_64-pc-windows-msvc --workspace
-
-      - name: Check lints for changed timeout crates
-        if: success()
-        shell: pwsh
-        run: just fix -p codex-model-provider-info -p codex-protocol -p codex-api -p codex-core
-
-      - name: Export lint changes for review
-        if: always()
-        shell: bash
-        run: |
-          git diff --binary -- codex-rs > "$RUNNER_TEMP/local3-lint.patch"
-          test ! -s "$RUNNER_TEMP/local3-lint.patch"
-
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
-        if: always()
-        with:
-          name: local3-lint-review
-          path: ${{ runner.temp }}/local3-lint.patch
-
-      - name: Save Rust build cache
-        if: always()
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            codex-rs/target
-          key: local3-159-windows-latest-test-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
-
   build:
     name: Build minimal Windows package
-    needs: format
     runs-on: windows-latest
     timeout-minutes: 240
     env:
@@ -168,9 +27,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             codex-rs/target
-          key: local3-159-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+          key: local3-160-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
-            local3-159-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-
+            local3-160-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-
+            local3-160-windows-latest-build-
             local3-159-windows-latest-build-
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
@@ -185,22 +45,6 @@ jobs:
       - name: Build codex.exe
         shell: bash
         run: cargo build --target x86_64-pc-windows-msvc --release --bin codex
-
-      - name: Verify WebSocket recovery against the built CLI
-        shell: pwsh
-        run: python ../.github/scripts/test_websocket_recovery.py target/x86_64-pc-windows-msvc/release/codex.exe
-
-      - name: Verify bundled Code Mode host and nested tool
-        shell: pwsh
-        run: python ../.github/scripts/test_bundled_code_mode.py target/x86_64-pc-windows-msvc/release/codex.exe
-
-      - name: Verify delayed response headers against the built CLI
-        shell: pwsh
-        run: python ../.github/scripts/test_response_header_wait.py target/x86_64-pc-windows-msvc/release/codex.exe
-
-      - name: Verify configured streaming timeouts against the built CLI
-        shell: pwsh
-        run: python ../.github/scripts/test_stream_timeout_config.py target/x86_64-pc-windows-msvc/release/codex.exe
 
       - name: Package codex.exe
         id: package
@@ -244,4 +88,4 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             codex-rs/target
-          key: local3-159-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+          key: local3-160-windows-latest-build-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}

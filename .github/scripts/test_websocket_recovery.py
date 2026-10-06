@@ -1,7 +1,7 @@
 """Black-box local3 transport contract tests; never builds the supplied CLI.
 
-Truth source: local3 checklist, Responses transport recovery: three failed WS
-attempts, then HTTP; completed tools and compacted context must survive.
+Truth source: local3 checklist sections 3.1 and 3.4: three failed WS
+attempts, fixed ten-second waits, then a successful WS retry; tools survive.
 The server implements RFC 6455 framing and the Responses streaming lifecycle.
 """
 
@@ -29,6 +29,7 @@ class Fixture(ThreadingHTTPServer):
         self.requests = []
         self.failures = []
         self.tool_sent = False
+        self.handshake_ready = False
         self.lock = threading.Lock()
 
     def record(self, transport, payload):
@@ -123,8 +124,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Upgrade", "").lower() != "websocket":
             self.send_error(404)
             return
-        if self.server.scenario == "handshake":
+        if (self.server.scenario == "handshake" and self.server.handshake_ready
+                and len(self.server.failures) < 3):
             self.server.record("handshake_eof", {})
+            self.server.failures.append(time.monotonic())
             self.connection.shutdown(socket.SHUT_RDWR)
             self.close_connection = True
             return
@@ -145,10 +148,14 @@ class Handler(BaseHTTPRequestHandler):
                 if payload.get("generate") is False:
                     self.frame(1, json.dumps({"type": "response.completed",
                                              "response": {"id": "warmup", "output": []}}).encode())
+                    if self.server.scenario == "handshake":
+                        self.server.handshake_ready = True
+                        self.frame(8, struct.pack("!H", 1000))
+                        return
                     continue
                 compact = self.server.record("ws", payload)
                 fail = self.server.scenario == "close" or (self.server.scenario == "compact" and compact)
-                if fail:
+                if fail and len(self.server.failures) < 3:
                     self.server.failures.append(time.monotonic())
                     self.frame(8, struct.pack("!H", 1011) + b"fixture-private-reason")
                     return
@@ -208,7 +215,8 @@ def verify(binary, scenario, output_dir=None):
             try:
                 result = subprocess.run(command(binary, server), cwd=temp, env=env,
                                         capture_output=True, text=True, encoding="utf-8",
-                                        errors="replace", timeout=120)
+                                        errors="replace", timeout=120,
+                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             except subprocess.TimeoutExpired as exc:
                 print(json.dumps({"scenario": scenario, "requests": [
                     {k: v for k, v in item.items() if k != "payload"} for item in server.requests]}))
@@ -221,22 +229,22 @@ def verify(binary, scenario, output_dir=None):
             print(result.stdout[-5000:]); print(result.stderr[-3000:])
             raise AssertionError(f"{scenario}: expected completed CLI response")
         http = [r for r in server.requests if r["transport"] == "http"]
-        if scenario == "healthy":
-            assert not http, "healthy WS must remain on WS"
-        else:
-            assert http, "broken WS must automatically switch to HTTP"
-        if scenario in ("close", "compact"):
-            assert len(server.failures) == 3, "third failed WS request must trigger fallback"
-            assert all(b - a >= 4.5 for a, b in zip(server.failures, server.failures[1:])), (
-                "reconnect must retain the fixed five-second wait"
-            )
+        assert not http, "WS recovery must never switch to HTTP"
+        waits = []
+        if scenario != "healthy":
+            assert len(server.failures) == 3, "three failed attempts must recover through WS"
+            for failed_at in server.failures:
+                resumed_at = min(r["at"] for r in server.requests if r["at"] > failed_at)
+                wait = resumed_at - failed_at
+                waits.append(round(wait, 3))
+                assert 9.5 <= wait <= 20, ("expected ten-second failure-to-retry wait", wait)
             assert "fixture-private-reason" not in result.stdout + result.stderr
         if scenario == "handshake":
             attempts = [r for r in server.requests if r["transport"] == "handshake_eof"]
-            assert 3 <= len(attempts) <= 4, "only inference failures plus optional prewarm are allowed"
+            assert len(attempts) == 3, "exactly three inference handshakes must fail"
         if scenario == "compact":
-            assert any(r["compact"] for r in http), "auto compact must complete over HTTP"
-            assert any(not r["compact"] for r in http), "sampling must resume after compaction"
+            assert any(r["compact"] for r in server.requests), "auto compact must complete over WS"
+            assert any(not r["compact"] for r in server.requests), "sampling must resume after compaction"
             outputs = [item for r in server.requests if r["compact"]
                        for item in r["payload"].get("input", [])
                        if item.get("type") == "function_call_output"]
@@ -249,7 +257,8 @@ def verify(binary, scenario, output_dir=None):
             assert commands[0]["item"]["exit_code"] == 0, "marker command must actually succeed"
             assert "WS_TOOL_ONCE" in commands[0]["item"]["aggregated_output"]
         report = {"scenario": scenario, "passed": True,
-                  "ws_failures": len(server.failures), "http_requests": len(http)}
+                  "ws_failures": len(server.failures), "http_requests": len(http),
+                  "failure_to_retry_seconds": waits}
         print(json.dumps(report), flush=True)
         return report
     finally:

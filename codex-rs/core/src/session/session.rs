@@ -22,6 +22,7 @@ use crate::shell_snapshot::ShellSnapshot;
 use crate::shell_snapshot::SnapshotCredentialBrokerState;
 use crate::state::ActiveTurn;
 use crate::turn_metadata::ExecutionMetadata;
+use codex_analytics::ThreadProductUpdate;
 use codex_attachment_store::AttachmentStore;
 use codex_extension_api::ExtensionDataInit;
 use codex_http_client::ClientRouteClass;
@@ -1428,6 +1429,7 @@ impl Session {
             } else {
                 ShellSnapshot::disabled()
             };
+            let inherited_environments = inherited_environments.unwrap_or_default();
             let turn_environments = Arc::new(ThreadEnvironments::new(
                 environment_manager,
                 default_shell.clone(),
@@ -1436,7 +1438,7 @@ impl Session {
                     session_configuration.windows_sandbox_type,
                 ),
                 shell_snapshot,
-                inherited_environments.unwrap_or_default(),
+                inherited_environments.clone(),
                 config.features.enabled(Feature::DeferredExecutor),
             ));
             turn_environments.update_selections(environment_selections);
@@ -1599,6 +1601,9 @@ impl Session {
             }
 
             let analytics_events_client = if config.analytics_enabled == Some(false) {
+                if let Some(client) = &analytics_events_client {
+                    client.update_thread_product_sku(thread_id, ThreadProductUpdate::Clear);
+                }
                 AnalyticsEventsClient::disabled()
             } else {
                 analytics_events_client.unwrap_or_else(|| {
@@ -1609,6 +1614,13 @@ impl Session {
                     )
                 })
             };
+            analytics_events_client.update_thread_product_sku(
+                thread_id,
+                match &config.apps_mcp_product_sku {
+                    Some(product) => ThreadProductUpdate::Set(product.clone()),
+                    None => ThreadProductUpdate::Clear,
+                },
+            );
             for item in initial_history.get_rollout_items() {
                 match item {
                     RolloutItem::Compacted(compacted) => {
@@ -1888,6 +1900,10 @@ impl Session {
             )
             .await?;
             sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
+            sess.follow_inherited_environment_configurations(
+                &inherited_environments,
+                &session_configuration.environments,
+            );
             sess.schedule_startup_prewarm(super::startup_prewarm::PrewarmInput::Base)
                 .await;
             let session_start_source = match &initial_history {

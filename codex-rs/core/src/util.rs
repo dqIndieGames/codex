@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tracing::error;
 
-pub const FIXED_RETRY_DELAY: Duration = Duration::from_secs(5);
+pub const FIXED_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 /// Emit structured feedback metadata as key/value pairs.
 ///
