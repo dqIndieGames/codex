@@ -54,7 +54,7 @@ async fn websocket_recovery_preserves_protocol_for_sampling_and_both_compaction_
                     CodexErr::Stream("websocket closed before completion".to_string()),
                     &mut client,
                     &session,
-                    &context,
+                    &context.turn,
                     request,
                 )
                 .await
@@ -99,7 +99,7 @@ async fn websocket_recovery_keeps_cancellation_terminal() {
             error,
             &mut client,
             &session,
-            &context,
+            &context.turn,
             ResponsesStreamRequest::RemoteCompactionV2,
         )
         .await;
@@ -157,7 +157,7 @@ async fn stream_retry_ignores_short_and_long_server_advice() {
         let start = tokio::time::Instant::now();
         handle_response_stream_error(
             &mut state, 4, CodexErr::InternalServerError.with_retry_after(advice),
-            &mut client, &session, &context, ResponsesStreamRequest::Sampling,
+            &mut client, &session, &context.turn, ResponsesStreamRequest::Sampling,
         ).await.expect("retry allowed");
         assert!((Duration::from_secs(10)..=Duration::from_millis(10001)).contains(&start.elapsed()));
     }

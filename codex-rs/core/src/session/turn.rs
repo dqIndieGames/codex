@@ -15,6 +15,7 @@ use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
+use crate::context::ContentFilterGuidance;
 use crate::context::ContextualUserFragment;
 use crate::context::UserVerificationNotice;
 use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -1767,13 +1768,29 @@ async fn run_sampling_request(
 
         let is_context_window_exceeded =
             matches!(err.details(), CodexErrorDetails::ContextWindowExceeded);
+        // Sampling guidance needs the captured step model; compaction retries
+        // only have turn context and share the protocol-preserving retry path.
+        if matches!(err.details(), CodexErrorDetails::ContentFilter) {
+            let model_info = &step_context.settings.model_info;
+            let guidance = ContentFilterGuidance {
+                text: codex_prompts::ResolvedModelMessages::from_model(model_info)
+                    .content_filter_guidance()
+                    .to_string(),
+            };
+            sess.record_conversation_items(
+                &step_context.turn,
+                model_info,
+                &[ContextualUserFragment::into(guidance)],
+            )
+            .await;
+        }
         let retry = handle_response_stream_error(
             &mut retry_state,
             max_retries,
             err,
             client_session,
             &sess,
-            &step_context,
+            &step_context.turn,
             ResponsesStreamRequest::Sampling,
         )
         .or_cancel(&preempt)

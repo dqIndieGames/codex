@@ -437,7 +437,7 @@ async fn run_remote_compaction_request_v2(
                     err,
                     client_session,
                     sess,
-                    step_context,
+                    &step_context.turn,
                     ResponsesStreamRequest::RemoteCompactionV2,
                 )
                 .await?;

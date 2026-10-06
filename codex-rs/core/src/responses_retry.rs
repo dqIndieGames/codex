@@ -1,13 +1,9 @@
 //! Shared retry and protocol-preserving recovery for Responses requests.
-//! Content-filter guidance is recorded for sampling requests before retry decisions.
 
 use std::time::Duration;
 
 use crate::client::ModelClientSession;
-use crate::context::ContentFilterGuidance;
-use crate::context::ContextualUserFragment;
 use crate::session::session::Session;
-use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::util::fixed_retry_delay;
 use codex_client::RetryOperation;
@@ -56,26 +52,9 @@ pub(crate) async fn handle_response_stream_error(
     err: CodexErr,
     client_session: &mut ModelClientSession,
     sess: &Session,
-    step_context: &StepContext,
+    turn_context: &TurnContext,
     request: ResponsesStreamRequest,
 ) -> Result<(), CodexErr> {
-    let turn_context = &step_context.turn;
-    if matches!(request, ResponsesStreamRequest::Sampling)
-        && matches!(err.details(), CodexErrorDetails::ContentFilter)
-    {
-        let model_info = &step_context.settings.model_info;
-        let guidance = ContentFilterGuidance {
-            text: codex_prompts::ResolvedModelMessages::from_model(model_info)
-                .content_filter_guidance()
-                .to_string(),
-        };
-        sess.record_conversation_items(
-            turn_context,
-            model_info,
-            &[ContextualUserFragment::into(guidance)],
-        )
-        .await;
-    }
     let operation = match request {
         ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
         ResponsesStreamRequest::LocalCompaction => RetryOperation::LocalCompaction,
