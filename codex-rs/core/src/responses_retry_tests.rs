@@ -37,6 +37,10 @@ async fn websocket_recovery_preserves_protocol_for_sampling_and_both_compaction_
             .await;
             let context = StepContext::for_test(Arc::new(context));
             let mut client = session.services.model_client.new_session();
+            // This fixture models an already resolved, failed Responses request.
+            client.set_resolved_responses_route(
+                context.turn.provider.info().base_url.as_deref().unwrap(),
+            );
             client
                 .turn_state()
                 .set("sticky-fixture".to_string())

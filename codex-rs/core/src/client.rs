@@ -1440,6 +1440,10 @@ impl ModelClientSession {
         Arc::clone(&self.turn_state)
     }
 
+    pub(crate) fn set_resolved_responses_route(&mut self, base_url: &str) {
+        self.route_recovery_allowed = !is_chatgpt_codex_base_url(base_url);
+    }
+
     pub(crate) fn activate_retry_route_recovery(&mut self) {
         if !self.route_recovery_allowed {
             return;
@@ -1606,8 +1610,7 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::Workspace)
                 .await?;
-            self.route_recovery_allowed =
-                !is_chatgpt_codex_base_url(&client_setup.api_provider.base_url);
+            self.set_resolved_responses_route(&client_setup.api_provider.base_url);
             let auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -1796,8 +1799,7 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::Workspace)
                 .await?;
-            self.route_recovery_allowed =
-                !is_chatgpt_codex_base_url(&client_setup.api_provider.base_url);
+            self.set_resolved_responses_route(&client_setup.api_provider.base_url);
             let include_internal = self
                 .client
                 .current_provider()
@@ -2011,8 +2013,7 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::Workspace)
                 .await?;
-            self.route_recovery_allowed =
-                !is_chatgpt_codex_base_url(&client_setup.api_provider.base_url);
+            self.set_resolved_responses_route(&client_setup.api_provider.base_url);
             let include_internal = self
                 .client
                 .current_provider()

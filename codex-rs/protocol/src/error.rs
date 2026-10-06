@@ -454,7 +454,7 @@ impl CodexErr {
         }
     }
 
-    /// Local3 retries use a fixed five-second delay regardless of server advice.
+    /// Local3 retries use a fixed ten-second delay regardless of server advice.
     pub fn retry_delay(&self, _retry_count: u64) -> Option<Duration> {
         self.is_retryable().then_some(Duration::from_secs(10))
     }
