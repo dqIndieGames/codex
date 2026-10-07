@@ -2387,10 +2387,38 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        self.stream_with_transport(
+            prompt, model_info, session_telemetry, effort, summary, service_tier,
+            responses_metadata, inference_trace, false,
+        ).await
+    }
+
+    pub(crate) fn responses_websocket_enabled(&self) -> bool {
+        self.client.responses_websocket_enabled()
+    }
+
+    /// The HTTP override belongs to one compaction attempt, never to the provider/session.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn stream_with_transport(
+        &mut self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+        force_http: bool,
+    ) -> Result<ResponseStream> {
+        if force_http {
+            // A later ordinary request must not resume the pre-compaction socket history.
+            self.reset_websocket_session();
+        }
         let wire_api = self.client.current_provider().info().wire_api;
         match wire_api {
             WireApi::Responses => {
-                if self.client.responses_websocket_enabled() {
+                if !force_http && self.client.responses_websocket_enabled() {
                     let request_trace = current_span_w3c_trace_context();
                     match self
                         .stream_responses_websocket(

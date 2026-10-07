@@ -461,6 +461,7 @@ pub(super) async fn run_main_inner(
         ))
         .await?;
     crate::account_title::initialize(&config.codex_home, config.auth_account.as_deref())?;
+    crate::terminal_title::set_terminal_title("Codex")?;
     if app_server_target.uses_embedded_network_policy() {
         embedded_network_policy.activate(&mut config);
     }

@@ -25,6 +25,10 @@ pub(crate) struct ResponsesStreamRetryState {
     pub(crate) retries: u64,
     connection_retries: u64,
     display_retries: u64,
+    compaction_ws_failures: u64,
+    compaction_size_failures: u64,
+    compaction_1009_retried: bool,
+    pub(crate) compaction_http: bool,
 }
 
 impl Default for ResponsesStreamRetryState {
@@ -33,7 +37,55 @@ impl Default for ResponsesStreamRetryState {
             retries: 0,
             connection_retries: 0,
             display_retries: 0,
+            compaction_ws_failures: 0,
+            compaction_size_failures: 0,
+            compaction_1009_retried: false,
+            compaction_http: false,
         }
+    }
+}
+
+impl ResponsesStreamRetryState {
+    /// Decide recovery before the shared single ten-second wait. The returned tier must also
+    /// be applied to the compaction caller's snapshot so stale images are never resent.
+    pub(crate) async fn prepare_compaction_retry(
+        &mut self,
+        max_retries: u64,
+        err: &CodexErr,
+        client_session: &ModelClientSession,
+        sess: &Session,
+        turn_context: &TurnContext,
+    ) -> Option<u8> {
+        if self.retries >= max_retries || matches!(err.details(),
+            CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
+                | CodexErrorDetails::SessionBudgetExceeded) {
+            return None;
+        }
+        let ws = !self.compaction_http && client_session.responses_websocket_enabled();
+        let first_1009 = ws && !self.compaction_1009_retried
+            && matches!(err.details(), CodexErrorDetails::Stream(message)
+                if message.contains("(close code: 1009)"));
+        if ws {
+            self.compaction_ws_failures = self.compaction_ws_failures.saturating_add(1);
+            if first_1009 {
+                self.compaction_1009_retried = true;
+            } else if self.compaction_1009_retried || self.compaction_ws_failures >= 3 {
+                self.compaction_http = true;
+            }
+        }
+        let size_error = matches!(err.details(), CodexErrorDetails::ContextWindowExceeded)
+            || err.http_status_code_value() == Some(413);
+        if size_error {
+            self.compaction_size_failures = self.compaction_size_failures.saturating_add(1);
+        }
+        if first_1009 || (size_error && self.compaction_size_failures % 3 == 0) {
+            if let Some(report) = sess.apply_context_overflow_image_ladder(&turn_context.sub_id).await {
+                let tier = report.tier;
+                sess.notify_stream_error(turn_context, report.message, CodexErr::ContextWindowExceeded).await;
+                return Some(tier);
+            }
+        }
+        None
     }
 }
 

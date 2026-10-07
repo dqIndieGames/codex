@@ -45,7 +45,16 @@ pub fn should_retry_request_error(
 
     match err {
         TransportError::Http { status, body, .. } => {
-            let _ = (route, body);
+            // Let the model retry loop rebuild an oversized Responses request with its
+            // image ladder; retrying this immutable HTTP body cannot shrink it.
+            if route.is_responses()
+                && (*status == StatusCode::PAYLOAD_TOO_LARGE
+                    || (*status == StatusCode::BAD_REQUEST && body.as_deref().is_some_and(|body| {
+                        serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|value|
+                            value["error"]["code"] == "context_length_exceeded")
+                    }))) {
+                return false;
+            }
             responses_http_status_is_retryable(*status)
         }
         TransportError::Timeout | TransportError::Network(_) | TransportError::Connection(_) => true,

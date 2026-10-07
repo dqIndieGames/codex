@@ -290,7 +290,6 @@ async fn run_compact_task_inner_impl(
         sess.services
             .executed_tool_calls
             .attach_to_compaction_prompt(&mut turn_input);
-        let turn_input_len = turn_input.len();
         let prompt = Prompt {
             input: turn_input,
             base_instructions: sess.get_prompt_base_instructions().await,
@@ -307,6 +306,7 @@ async fn run_compact_task_inner_impl(
             &responses_metadata,
             &prompt,
             compaction_metadata.phase(),
+            retry_state.compaction_http,
         )
         .await;
 
@@ -325,20 +325,14 @@ async fn run_compact_task_inner_impl(
             Err(e) if matches!(e.details(), CodexErrorDetails::SessionBudgetExceeded) => {
                 return Err(e);
             }
-            Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
-                if turn_input_len > 1 {
-                    // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
-                    debug!(
-                        "Context window exceeded while compacting; removing oldest history item. Error: {e}"
-                    );
-                    history.remove_first_item();
-                    retry_state.retries = 0;
-                    continue;
-                }
-                sess.set_total_tokens_full(turn_context.as_ref()).await;
-                return Err(e);
-            }
             Err(e) => {
+                if let Some(tier) = retry_state.prepare_compaction_retry(
+                    max_retries, &e, &client_session, &sess, &turn_context,
+                ).await {
+                    history.with_raw_items_mut(|items| {
+                        crate::context_overflow_image_ladder::apply_image_ladder_tier(items, tier);
+                    });
+                }
                 if let Err(e) = handle_response_stream_error(
                     &mut retry_state,
                     max_retries,
@@ -773,9 +767,10 @@ async fn drain_to_completed(
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
     phase: CompactionPhase,
+    force_http: bool,
 ) -> CodexResult<CompactionResponse> {
     let mut stream = client_session
-        .stream(
+        .stream_with_transport(
             prompt,
             turn_context.model_info(),
             &turn_context.session_telemetry,
@@ -790,6 +785,7 @@ async fn drain_to_completed(
             // Rollout tracing currently models remote compaction only; local compaction streams
             // are left untraced until the reducer has a first-class local compaction lifecycle.
             &InferenceTraceContext::disabled(),
+            force_http,
         )
         .await?;
     let mut output = Vec::new();

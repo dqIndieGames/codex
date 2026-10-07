@@ -38,7 +38,7 @@ fn sink() -> Option<&'static mpsc::SyncSender<Value>> {
             let previous = directory.join("completion.previous.jsonl");
             let mut recent: VecDeque<(String, Instant, u64)> = VecDeque::new();
             for mut record in receiver {
-                let key = format!("{}:{}:{}", record["thread_id"], record["turn_id"], record["phase"]);
+                let key = format!("{}:{}:{}:{}", record["thread_id"], record["turn_id"], record["phase"], record["state"]);
                 let now = Instant::now();
                 if let Some(entry) = recent.iter_mut().find(|entry| entry.0 == key) {
                     if now.duration_since(entry.1) < Duration::from_secs(10) {

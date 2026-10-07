@@ -131,6 +131,12 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
             } => {
                 let body_text = body.unwrap_or_default();
 
+                if status == http::StatusCode::BAD_REQUEST
+                    && serde_json::from_str::<Value>(&body_text).ok().is_some_and(|value|
+                        value["error"]["code"] == "context_length_exceeded") {
+                    return CodexErr::ContextWindowExceeded;
+                }
+
                 if status == http::StatusCode::SERVICE_UNAVAILABLE
                     && let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text)
                     && let Some(error) = value.get("error")

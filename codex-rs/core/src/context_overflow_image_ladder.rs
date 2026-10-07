@@ -1,6 +1,6 @@
 //! Context-window overflow image ladder for local3.
 //!
-//! Triggered only from sampling retries. Does not touch `previous_response_id`
+//! Triggered from sampling and compaction retries. Does not touch `previous_response_id`
 //! or sticky-break; those stay on their existing every-3-retries path.
 //!
 //! Tiers, applied on overflow retry 3 / 6 / 9 / 12:

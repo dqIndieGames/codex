@@ -1676,6 +1676,7 @@ async fn run_sampling_request(
         .unwrap_or(u64::MAX);
     let mut retry_state = ResponsesStreamRetryState::default();
     let mut empty_complete_retries = 0u32;
+    let mut image_size_failures = 0u64;
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1778,7 +1779,11 @@ async fn run_sampling_request(
         }
 
         let is_context_window_exceeded =
-            matches!(err.details(), CodexErrorDetails::ContextWindowExceeded);
+            matches!(err.details(), CodexErrorDetails::ContextWindowExceeded)
+                || err.http_status_code_value() == Some(413);
+        if is_context_window_exceeded {
+            image_size_failures = image_size_failures.saturating_add(1);
+        }
         // Sampling guidance needs the captured step model; compaction retries
         // only have turn context and share the protocol-preserving retry path.
         if matches!(err.details(), CodexErrorDetails::ContentFilter) {
@@ -1821,7 +1826,7 @@ async fn run_sampling_request(
             ));
         }
         retry??;
-        if is_context_window_exceeded && retry_state.retries > 0 && retry_state.retries % 3 == 0 {
+        if is_context_window_exceeded && image_size_failures % 3 == 0 {
             if let Some(report) = sess
                 .apply_context_overflow_image_ladder(&turn_context.sub_id)
                 .await

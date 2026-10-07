@@ -398,7 +398,7 @@ async fn run_remote_compaction_request_v2(
     sess: &Session,
     step_context: &StepContext,
     client_session: &mut ModelClientSession,
-    prompt: &Prompt,
+    prompt: &mut Prompt,
     responses_metadata: &CodexResponsesMetadata,
 ) -> CodexResult<RemoteCompactionV2Output> {
     let turn_context = &step_context.turn;
@@ -410,7 +410,7 @@ async fn run_remote_compaction_request_v2(
     let mut retry_state = ResponsesStreamRetryState::default();
     loop {
         let result = match client_session
-            .stream(
+            .stream_with_transport(
                 prompt,
                 turn_context.model_info(),
                 &turn_context.session_telemetry,
@@ -423,6 +423,7 @@ async fn run_remote_compaction_request_v2(
                 step_context.settings.service_tier.clone(),
                 responses_metadata,
                 &InferenceTraceContext::disabled(),
+                retry_state.compaction_http,
             )
             .await
         {
@@ -433,6 +434,11 @@ async fn run_remote_compaction_request_v2(
         match result {
             Ok(compaction_output) => return Ok(compaction_output),
             Err(err) => {
+                if let Some(tier) = retry_state.prepare_compaction_retry(
+                    max_retries, &err, client_session, sess, turn_context,
+                ).await {
+                    crate::context_overflow_image_ladder::apply_image_ladder_tier(&mut prompt.input, tier);
+                }
                 handle_response_stream_error(
                     &mut retry_state,
                     max_retries,

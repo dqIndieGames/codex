@@ -79,7 +79,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         .attach_to_compaction_prompt(&mut input);
     let tool_router = &step_context.tool_router;
     input.push(ResponseItem::CompactionTrigger {});
-    let prompt = Prompt {
+    let mut prompt = Prompt {
         input,
         tools: tool_router.model_visible_specs(),
         parallel_tool_calls: true,
@@ -103,7 +103,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         sess,
         step_context,
         client_session,
-        &prompt,
+        &mut prompt,
         &responses_metadata,
     )
     .await;
