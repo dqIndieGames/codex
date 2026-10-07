@@ -464,9 +464,9 @@ dependencies = [
 
 [[package]]
 name = "assert_cmd"
-version = "2.1.2"
+version = "2.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c5bcfa8749ac45dd12cb11055aeeb6b27a3895560d60d71e3c23bf979e60514"
+checksum = "2aa3a22042e45de04255c7bf3626e239f450200fd0493c1e382263544b20aea6"
 dependencies = [
  "anstyle",
  "bstr",
@@ -2519,9 +2519,9 @@ dependencies = [
  "codex-build-info",
  "codex-chatgpt",
  "codex-cloud-config",
+ "codex-cloud-tasks",
  "codex-code-mode",
  "codex-code-mode-host",
- "codex-cloud-tasks",
  "codex-config",
  "codex-core",
  "codex-core-plugins",
@@ -2609,7 +2609,15 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "http 1.4.0",
+ "opentelemetry",
  "rand 0.9.3",
+ "reqwest 0.12.28",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",
@@ -5331,7 +5339,7 @@ dependencies = [
 
 [[package]]
 name = "codex-windows-sandbox-test-support"
-version = "0.0.0"
+version = "0.161.0"
 dependencies = [
  "dirs",
 ]
