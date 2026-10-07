@@ -211,6 +211,7 @@ def command(binary, fixture):
         "model_providers.fixture.stream_max_retries": 100000,
         "features.enable_request_compression": False,
         "features.remote_models": False,
+        "features.code_mode": fixture.scenario == "bundled-code-mode",
         "compact_prompt": "COMPACT_FIXTURE",
         "model_auto_compact_token_limit": 20000 if fixture.scenario.startswith("compact") else 200000,
     }
@@ -218,7 +219,7 @@ def command(binary, fixture):
     # call prints a literal marker. Do not depend on machine sandbox setup or
     # permit product-policy rejection to masquerade as a completed tool.
     args = [binary, "exec", "--ignore-user-config", "--ephemeral",
-            "--skip-git-repo-check", "--sandbox", "danger-full-access", "--json", "-m", "gpt-5.4"]
+            "--skip-git-repo-check", "--sandbox", "danger-full-access", "--json", "-m", "gpt-5.5"]
     for key, value in config.items():
         args.extend(["-c", f"{key}={json.dumps(value)}"])
     args.append("Run the read-only marker command once if requested, then reply with WS_RECOVERY_OK.")

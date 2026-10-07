@@ -10,9 +10,23 @@ import zlib
 from pathlib import Path
 import sys
 import threading
+import time
 
 from test_local3_lifecycle import Rpc
 from test_websocket_recovery import Fixture
+
+
+class SamplingSizeFixture(Fixture):
+    def events(self, payload, compact=False):
+        # Checklist §6.1: unrelated failures break a run of consecutive sampling overflows.
+        sequence = ('context_length_exceeded', 'server_error', 'context_length_exceeded',
+                    'context_length_exceeded', 'context_length_exceeded')
+        if len(self.failures) < len(sequence):
+            code = sequence[len(self.failures)]
+            self.failures.append(time.monotonic())
+            return [{'type': 'response.failed', 'response': {'id': 'failed-fixture',
+                     'status': 'failed', 'error': {'code': code, 'message': 'fixture failure'}}}]
+        return super().events(payload, compact)
 
 
 def images(payload):
@@ -32,7 +46,7 @@ def images(payload):
 
 def verify(binary, root, scenario):
     root.mkdir(parents=True, exist_ok=True)
-    fixture = Fixture(scenario)
+    fixture = SamplingSizeFixture(scenario) if scenario == 'sampling-context' else Fixture(scenario)
     # Manual compaction: keep the setup turn small and avoid an unrelated tool.
     fixture.tool_sent = True
     worker = threading.Thread(target=fixture.serve_forever, daemon=True)
@@ -54,13 +68,29 @@ def verify(binary, root, scenario):
         original_hash = hashlib.sha256(png).hexdigest()
         inputs = [{'type': 'localImage', 'path': str(image_file), 'detail': 'original'} for _ in range(7)]
         rpc.turn(tid, 'Remember these images.', inputs)
+        if scenario == 'sampling-context':
+            attempts = fixture.requests
+            (root / 'requests.json').write_text(json.dumps(attempts, indent=2), encoding='utf-8')
+            original = images(attempts[0]['payload'])
+            assert len(attempts) == 6 and all(r['transport'] == 'ws' for r in attempts)
+            assert all(images(r['payload']) == original for r in attempts[:-1]), 'do not shrink before three consecutive overflows'
+            assert images(attempts[-1]['payload']) != original, 'shrink after three consecutive overflows'
+            report = {'passed': True, 'scenario': scenario, 'consecutive_overflow_counter': True}
+            (root / 'result.json').write_text(json.dumps(report), encoding='utf-8')
+            print(json.dumps(report), flush=True)
+            return
+        initial_images = images(fixture.requests[-1]['payload'])
         start = len(fixture.requests)
         rpc.call('thread/compact/start', {'threadId': tid})
         completed = rpc.wait(lambda v: v.get('method') == 'turn/completed', timeout=180)
         assert completed['params']['turn']['status'] == 'completed', completed
         attempts = [r for r in fixture.requests[start:] if r['compact']]
+        (root / 'requests.json').write_text(json.dumps(fixture.requests, indent=2), encoding='utf-8')
         assert len(attempts) >= 2, 'must exercise retry'
         original, shrunk = images(attempts[0]['payload']), images(attempts[3 if http else 1]['payload'])
+        if not original and attempts[0]['payload'].get('previous_response_id'):
+            # An incremental request refers to the images already sent in the setup turn.
+            original = initial_images
         assert len(original) == len(shrunk) == len(inputs), 'retain ordered image slots'
         assert original != shrunk, 'next attempt after threshold must use changed images'
         if http:

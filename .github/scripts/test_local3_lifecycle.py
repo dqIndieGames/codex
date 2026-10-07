@@ -77,7 +77,7 @@ class Rpc:
         return response['result']
 
     def start(self, cwd):
-        return self.call('thread/start', {'model': 'gpt-5.4', 'cwd': str(cwd),
+        return self.call('thread/start', {'model': 'gpt-5.5', 'cwd': str(cwd),
             'approvalPolicy': 'never', 'sandbox': 'danger-full-access'})['thread']['id']
 
     def turn(self, thread_id, text, images=()):
