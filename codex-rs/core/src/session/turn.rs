@@ -1779,10 +1779,12 @@ async fn run_sampling_request(
         }
 
         let is_context_window_exceeded =
-            matches!(err.details(), CodexErrorDetails::ContextWindowExceeded)
-                || err.http_status_code_value() == Some(413);
+            matches!(err.details(), CodexErrorDetails::ContextWindowExceeded);
         if is_context_window_exceeded {
             image_size_failures = image_size_failures.saturating_add(1);
+        } else {
+            // Sampling counts consecutive overflows; compaction has its own cumulative count.
+            image_size_failures = 0;
         }
         // Sampling guidance needs the captured step model; compaction retries
         // only have turn context and share the protocol-preserving retry path.
