@@ -1796,6 +1796,10 @@ fn format_remote_control_websocket_connect_error(
 }
 
 #[cfg(test)]
+#[path = "websocket_retry_tests.rs"]
+mod retry_tests;
+
+#[cfg(test)]
 #[path = "websocket_refresh_tests.rs"]
 mod refresh_tests;
 
@@ -1889,17 +1893,17 @@ mod tests {
     }
 
     #[test]
-    fn next_reconnect_delay_is_fixed_to_five_seconds() {
+    fn next_reconnect_delay_is_fixed_to_ten_seconds() {
         let mut reconnect_attempt = 9;
 
         let reconnect_delay = next_reconnect_delay(&mut reconnect_attempt);
 
-        assert_eq!(reconnect_delay, Duration::from_secs(5));
+        assert_eq!(reconnect_delay, Duration::from_secs(10));
         assert_eq!(reconnect_attempt, 10);
 
         let reconnect_delay = next_reconnect_delay(&mut reconnect_attempt);
 
-        assert_eq!(reconnect_delay, Duration::from_secs(5));
+        assert_eq!(reconnect_delay, Duration::from_secs(10));
         assert_eq!(reconnect_attempt, 11);
     }
 

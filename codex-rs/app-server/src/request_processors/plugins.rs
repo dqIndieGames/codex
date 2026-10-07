@@ -1955,6 +1955,7 @@ impl PluginRequestProcessor {
                     McpServerOauthLoginCompletedNotification {
                         name: notification_name,
                         thread_id: None,
+                        login_id: None,
                         success,
                         error,
                     },

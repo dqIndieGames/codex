@@ -6,6 +6,16 @@ impl ChatWidget {
         notification: ServerNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        let diagnostic_before = codex_feedback::completion_diagnostics::enabled()
+            .then(|| self.completion_diagnostic_state());
+        let diagnostic_event = diagnostic_before.as_ref().map(|_| notification.to_string());
+        let diagnostic_turn = diagnostic_before.as_ref().and_then(|_| match &notification {
+            ServerNotification::TurnStarted(n) => Some(n.turn.id.clone()),
+            ServerNotification::TurnCompleted(n) => Some(n.turn.id.clone()),
+            ServerNotification::ItemStarted(n) => Some(n.turn_id.clone()),
+            ServerNotification::ItemCompleted(n) => Some(n.turn_id.clone()),
+            _ => None,
+        });
         // Reject misrouted child updates before shared notification handling mutates parent state.
         if let ServerNotification::McpServerStatusUpdated(notification) = &notification
             && let (Some(notification_thread_id), Some(thread_id)) =
@@ -44,6 +54,20 @@ impl ChatWidget {
             self.restore_retry_status_header_if_present();
         }
         match notification {
+            ServerNotification::McpServerOauthLoginCompleted(notification) => {
+                if notification.success {
+                    self.add_info_message(
+                        format!("Signed in to {}.", notification.name),
+                        /*hint*/ None,
+                    );
+                } else {
+                    self.add_error_message(
+                        notification
+                            .error
+                            .unwrap_or_else(|| "MCP sign-in failed.".to_string()),
+                    );
+                }
+            }
             ServerNotification::ThreadTokenUsageUpdated(notification) => {
                 self.set_token_info(Some(token_usage_info_from_app_server(
                     notification.token_usage,
@@ -92,6 +116,9 @@ impl ChatWidget {
                 }
             }
             ServerNotification::TurnCompleted(notification) => {
+                self.record_completion_diagnostic("tui_completion_received", serde_json::json!({
+                    "event_turn_id": notification.turn.id, "replay": from_replay,
+                }));
                 self.restore_realtime_transcripts_before_turn(&notification.turn.id);
                 self.handle_turn_completed_notification(notification, replay_kind);
             }
@@ -347,6 +374,7 @@ impl ChatWidget {
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadReverted(_)
             | ServerNotification::ThreadQueueChanged(_)
+            | ServerNotification::ThreadPredictionUpdated(_)
             | ServerNotification::ThreadArchived(_)
             | ServerNotification::ThreadDeleted(_)
             | ServerNotification::ThreadUnarchived(_)
@@ -359,7 +387,6 @@ impl ChatWidget {
             | ServerNotification::McpServerEventStream(_)
             | ServerNotification::FileChangePatchUpdated(_)
             | ServerNotification::McpToolCallProgress(_)
-            | ServerNotification::McpServerOauthLoginCompleted(_)
             | ServerNotification::AppListUpdated(_)
             | ServerNotification::EnvironmentConnected(_)
             | ServerNotification::EnvironmentDisconnected(_)
@@ -397,6 +424,15 @@ impl ChatWidget {
             );
         }
         self.thread_usage.replaying_turn_completion = was_replaying_turn_completion;
+        if let Some(before) = diagnostic_before {
+            let after = self.completion_diagnostic_state();
+            if before != after {
+                self.record_completion_diagnostic("notification_state_changed", serde_json::json!({
+                    "event": diagnostic_event, "event_turn_id": diagnostic_turn,
+                    "replay": from_replay, "before": before, "after": after,
+                }));
+            }
+        }
     }
 
     pub(super) fn handle_turn_completed_notification(

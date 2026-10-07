@@ -220,6 +220,7 @@ mod temporary_structured_request;
 mod terminal_hyperlinks;
 mod terminal_palette;
 mod terminal_probe;
+mod account_title;
 mod terminal_title;
 mod terminal_visualization_instructions;
 mod text_formatting;
@@ -296,7 +297,8 @@ async fn start_embedded_app_server(
     environment_manager: Arc<EnvironmentManager>,
     embedded_network_policy: codex_app_server_client::EmbeddedNetworkPolicy,
 ) -> color_eyre::Result<InProcessAppServerClient> {
-    start_embedded_app_server_with(
+    // Keep embedded startup state off the caller's stack during session transitions.
+    Box::pin(start_embedded_app_server_with(
         arg0_paths,
         config,
         cli_kv_overrides,
@@ -309,7 +311,7 @@ async fn start_embedded_app_server(
         environment_manager,
         embedded_network_policy,
         InProcessAppServerClient::start,
-    )
+    ))
     .await
 }
 
@@ -389,10 +391,7 @@ async fn init_state_db_for_app_server_target(
         AppServerTarget::Embedded => state_db::try_init(config).await.map(Some).map_err(|err| {
             let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
                 .unwrap_or_else(|| config.sqlite_config().state_db_path());
-            std::io::Error::other(LocalStateDbStartupError::new(
-                database_path,
-                format!("{err:#}"),
-            ))
+            std::io::Error::other(LocalStateDbStartupError::new(database_path, err))
         }),
         AppServerTarget::LocalDaemon { .. } | AppServerTarget::Remote { .. } => {
             Ok(state_db::get_state_db(config).await)
@@ -1439,7 +1438,10 @@ async fn run_ratatui_app(
     if app_server_target.uses_embedded_network_policy() {
         embedded_network_policy.bind_config(&mut config);
     }
-    startup_draft.apply_config(&config);
+    startup_draft.apply_settings(
+        &crate::local_settings::LocalSettings::from(&config),
+        config.cwd.as_path(),
+    );
     if !(cli.resume_picker || cli.fork_picker || cli.agents_overview)
         && let Err(err) = startup_draft.show(&mut tui)
     {
@@ -1791,7 +1793,10 @@ async fn run_ratatui_app(
     if app_server_target.uses_embedded_network_policy() {
         embedded_network_policy.bind_config(&mut config);
     }
-    startup_draft.apply_config(&config);
+    startup_draft.apply_settings(
+        &crate::local_settings::LocalSettings::from(&config),
+        config.cwd.as_path(),
+    );
 
     if config.model_provider_id != startup_model_provider {
         startup_account = None;
@@ -1951,7 +1956,10 @@ async fn run_ratatui_app(
     if app_server_target.uses_embedded_network_policy() {
         embedded_network_policy.bind_config(&mut config);
     }
-    startup_draft.apply_config(&config);
+    startup_draft.apply_settings(
+        &crate::local_settings::LocalSettings::from(&config),
+        config.cwd.as_path(),
+    );
 
     // Count launches that reach final config resolution, regardless of screen policy.
     if config.analytics_enabled != Some(false)
@@ -3996,7 +4004,7 @@ requires_openai_auth = {requires_openai_auth}
 
         assert_eq!(startup_error.database_path(), logs_db_path.as_path());
         assert!(
-            codex_state::sqlite_error_detail_is_corruption(startup_error.detail()),
+            startup_error.is_corruption(),
             "startup error should preserve the SQLite corruption cause, got: {}",
             startup_error.detail()
         );

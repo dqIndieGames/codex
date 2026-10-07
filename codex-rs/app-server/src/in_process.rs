@@ -740,6 +740,14 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
                         }
                         OutgoingMessage::AppServerNotification(envelope) => {
                             let notification = envelope.notification;
+                            if codex_feedback::completion_diagnostics::enabled()
+                                && let ServerNotification::TurnCompleted(n) = &notification
+                            {
+                                codex_feedback::completion_diagnostics::record(
+                                    "server_completion_send", &n.thread_id, Some(&n.turn.id),
+                                    serde_json::json!({}),
+                                );
+                            }
                             if server_notification_requires_delivery(&notification) {
                                 if event_tx
                                     .send(InProcessServerEvent::ServerNotification(Box::new(

@@ -17,6 +17,31 @@ fn is_safety_access_block_message(message: &str) -> bool {
 }
 
 impl ChatWidget {
+    // Temporary diagnostics: remove together with completion_diagnostics after the verified fix.
+    pub(super) fn completion_diagnostic_state(&self) -> serde_json::Value {
+        if !codex_feedback::completion_diagnostics::enabled() {
+            return serde_json::Value::Null;
+        }
+        serde_json::json!({
+            "agent_running": self.turn_lifecycle.agent_turn_running,
+            "review": self.review.is_review_mode,
+            "mcp_startup": self.mcp_startup_status.is_some(),
+            "hook": self.active_hook_cell.is_some(),
+            "pending_restore": self.status_state.pending_status_indicator_restore,
+            "busy": self.bottom_pane.is_task_running(),
+            "spinner": self.bottom_pane.status_indicator_visible(),
+        })
+    }
+
+    pub(super) fn record_completion_diagnostic(&self, phase: &'static str, state: serde_json::Value) {
+        if codex_feedback::completion_diagnostics::enabled() {
+            codex_feedback::completion_diagnostics::record(
+                phase, &self.thread_id().map(|id| id.to_string()).unwrap_or_default(),
+                self.turn_lifecycle.last_turn_id.as_deref(), state,
+            );
+        }
+    }
+
     fn clear_guardian_review_status(&mut self) {
         self.status_state.pending_guardian_review_status.clear();
         if self.status_state.current_status.is_guardian_review() {
@@ -120,6 +145,7 @@ impl ChatWidget {
         completion: Option<history_cell::FinalMessageSeparator>,
         from_replay: bool,
     ) {
+        self.record_completion_diagnostic("cleanup_before", self.completion_diagnostic_state());
         if self.status_state.reasoning_resume_turn_id.is_some() {
             self.on_agent_reasoning_final();
         }
@@ -179,6 +205,7 @@ impl ChatWidget {
         self.turn_lifecycle.finish();
         self.clear_safety_buffering();
         self.update_task_running_state();
+        self.record_completion_diagnostic("cleanup_after", self.completion_diagnostic_state());
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
         self.last_unified_wait = None;
@@ -392,18 +419,48 @@ impl ChatWidget {
     }
 
     pub(super) fn on_cyber_policy_error(&mut self) {
+        let can_enable_daybreak = self.config.features.enabled(Feature::CliDaybreak)
+            && self.has_chatgpt_account
+            && self.config.model_provider_id == "openai"
+            && !self.side_conversation_active();
+        let notice = crate::daybreak::notice_for_setting(
+            &self.model_catalog.models,
+            self.current_model(),
+            self.daybreak_enabled && can_enable_daybreak,
+            can_enable_daybreak,
+        );
         self.input_queue.submit_pending_steers_after_interrupt = false;
         self.finalize_turn();
-        let notice = if self.config.model_provider_id == "openai" {
-            self.cyber_policy_notice
-                .get()
-                .copied()
-                .unwrap_or_default()
-                .for_model(self.current_model())
-        } else {
-            crate::daybreak::Notice::Limited
-        };
         self.add_to_history(history_cell::new_cyber_policy_error_event(notice));
+        if notice == crate::daybreak::Notice::Disabled
+            && !self.thread_usage.replaying_turn_completion
+            && !self.blocks_direct_input
+            && let Some(thread_id) = self.thread_id
+        {
+            self.bottom_pane.show_selection_view(SelectionViewParams {
+                title: Some("Turn on Daybreak for your next request?".into()),
+                items: vec![
+                    SelectionItem {
+                        name: "Enable Daybreak".into(),
+                        actions: vec![Box::new(move |tx| {
+                            tx.send(AppEvent::PersistDaybreakSelection {
+                                thread_id,
+                                enabled: true,
+                            })
+                        })],
+                        dismiss_on_select: true,
+                        ..Default::default()
+                    },
+                    SelectionItem {
+                        name: "Not now".into(),
+                        dismiss_on_select: true,
+                        ..Default::default()
+                    },
+                ],
+                ..SelectionViewParams::picker()
+            });
+            self.defer_input_until_settings_applied();
+        }
         self.request_redraw();
 
         // After an error ends the turn, try sending the next queued input.

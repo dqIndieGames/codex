@@ -63,6 +63,10 @@ pub(crate) fn set_terminal_title(title: &str) -> io::Result<SetTerminalTitleResu
         return Ok(SetTerminalTitleResult::NoVisibleContent);
     }
 
+    let prefix = crate::account_title::prefix();
+    let title = if prefix.is_empty() { title } else {
+        format!("{prefix}{}", title.trim_start_matches(prefix))
+    };
     execute!(stdout(), SetWindowTitle(title))?;
     Ok(SetTerminalTitleResult::Applied)
 }
@@ -76,7 +80,9 @@ pub(crate) fn clear_terminal_title() -> io::Result<()> {
         return Ok(());
     }
 
-    execute!(stdout(), SetWindowTitle(String::new()))
+    let prefix = crate::account_title::prefix();
+    let title = if prefix.is_empty() { String::new() } else { format!("{prefix}Codex") };
+    execute!(stdout(), SetWindowTitle(title))
 }
 
 #[derive(Debug, Clone)]
