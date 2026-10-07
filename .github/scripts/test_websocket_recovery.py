@@ -18,6 +18,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from _groundtruth.local3_retry_contract import RETRY_SECONDS, WS_FAILURES_BEFORE_HTTP, WS_RETRY_AFTER_1009
 
 
 class Fixture(ThreadingHTTPServer):
@@ -33,7 +34,8 @@ class Fixture(ThreadingHTTPServer):
         self.lock = threading.Lock()
 
     def record(self, transport, payload):
-        compact = "COMPACT_FIXTURE" in json.dumps(payload)
+        compact = "COMPACT_FIXTURE" in json.dumps(payload) or any(
+            item.get("type") == "compaction_trigger" for item in payload.get("input", []))
         with self.lock:
             entry = {"transport": transport, "compact": compact,
                      "payload": payload, "at": time.monotonic()}
@@ -45,13 +47,13 @@ class Fixture(ThreadingHTTPServer):
         tokens = 10
         if compact:
             text = "The marker command already ran once. Finish without calling tools."
-        elif self.scenario == "compact" and not self.tool_sent:
+        elif (self.scenario.startswith("compact") or self.scenario == "tool") and not self.tool_sent:
             self.tool_sent = True
             output = [{"type": "function_call", "name": "exec_command",
                        "call_id": "call_marker_once",
                        "arguments": json.dumps({"cmd": "echo WS_TOOL_ONCE",
                                                 "max_output_tokens": 30})}]
-            tokens = 21000
+            tokens = 21000 if self.scenario.startswith("compact") else 10
             text = None
         else:
             text = "WS_RECOVERY_OK"
@@ -59,6 +61,8 @@ class Fixture(ThreadingHTTPServer):
             output = [{"id": "msg_fixture", "type": "message",
                        "role": "assistant",
                        "content": [{"type": "output_text", "text": text}]}]
+        if any(item.get("type") == "compaction_trigger" for item in payload.get("input", [])):
+            output = [{"type": "compaction", "encrypted_content": "fixture-compacted-state"}]
         rid = f"resp_fixture_{len(self.requests)}"
         events = [{"type": "response.created", "response": {"id": rid}}]
         events.extend({"type": "response.output_item.done", "output_index": i, "item": item}
@@ -154,10 +158,18 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     continue
                 compact = self.server.record("ws", payload)
-                fail = self.server.scenario == "close" or (self.server.scenario == "compact" and compact)
-                if fail and len(self.server.failures) < 3:
+                scenario = self.server.scenario
+                fail = (scenario == "close" or (scenario == "tool" and self.server.tool_sent)
+                        or (scenario.startswith("compact") and compact))
+                limit = WS_FAILURES_BEFORE_HTTP
+                if "1009-success" in scenario:
+                    limit = 1
+                elif "1009-fallback" in scenario:
+                    limit = 1 + WS_RETRY_AFTER_1009
+                if fail and len(self.server.failures) < limit:
                     self.server.failures.append(time.monotonic())
-                    self.frame(8, struct.pack("!H", 1011) + b"fixture-private-reason")
+                    code = 1009 if "1009" in scenario and len(self.server.failures) == 1 else 1011
+                    self.frame(8, struct.pack("!H", code) + b"fixture-private-reason")
                     return
                 for event in self.server.events(payload, compact):
                     self.frame(1, json.dumps(event).encode())
@@ -167,6 +179,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         payload = json.loads(self.read_exact(int(self.headers["Content-Length"])))
         compact = self.server.record("http", payload)
+        if compact and "http413" in self.server.scenario and len(self.server.failures) < 12:
+            self.server.failures.append(time.monotonic())
+            body = b'{"error":{"message":"fixture request too large"}}'
+            self.send_response(413)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            return
         events = self.server.events(payload, compact)
         body = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
         self.send_response(200)
@@ -180,7 +202,7 @@ class Handler(BaseHTTPRequestHandler):
 def command(binary, fixture):
     config = {
         "model_provider": "fixture",
-        "model_providers.fixture.name": "WebSocket recovery fixture",
+        "model_providers.fixture.name": "OpenAI" if fixture.scenario.endswith("-v2") else "WebSocket recovery fixture",
         "model_providers.fixture.base_url": f"http://127.0.0.1:{fixture.server_port}/v1",
         "model_providers.fixture.wire_api": "responses",
         "model_providers.fixture.supports_websockets": True,
@@ -190,7 +212,7 @@ def command(binary, fixture):
         "features.enable_request_compression": False,
         "features.remote_models": False,
         "compact_prompt": "COMPACT_FIXTURE",
-        "model_auto_compact_token_limit": 20000 if fixture.scenario == "compact" else 200000,
+        "model_auto_compact_token_limit": 20000 if fixture.scenario.startswith("compact") else 200000,
     }
     # This isolated process talks only to our loopback fixture, whose sole tool
     # call prints a literal marker. Do not depend on machine sandbox setup or
@@ -212,6 +234,8 @@ def verify(binary, scenario, output_dir=None):
             env = os.environ.copy()
             env["CODEX_HOME"] = temp
             env["CODEX_INTERNAL_RETRY_MODE"] = "unbounded"
+            for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "CODEX_TUI_COMPLETION_DIAGNOSTICS_DIR"):
+                env.pop(key, None)
             try:
                 result = subprocess.run(command(binary, server), cwd=temp, env=env,
                                         capture_output=True, text=True, encoding="utf-8",
@@ -229,15 +253,23 @@ def verify(binary, scenario, output_dir=None):
             print(result.stdout[-5000:]); print(result.stderr[-3000:])
             raise AssertionError(f"{scenario}: expected completed CLI response")
         http = [r for r in server.requests if r["transport"] == "http"]
-        assert not http, "WS recovery must never switch to HTTP"
+        compaction_fallback = scenario.startswith("compact") and "1009-success" not in scenario
+        if compaction_fallback:
+            assert http and all(r["compact"] for r in http), "only this compaction may use HTTP"
+            assert server.requests[-1]["transport"] == "ws", "sampling must return to configured WS"
+        else:
+            assert not http, "ordinary sampling and recovered 1009 must remain WS"
         waits = []
         if scenario != "healthy":
-            assert len(server.failures) == 3, "three failed attempts must recover through WS"
+            expected_failures = (1 if "1009-success" in scenario else
+                                 1 + WS_RETRY_AFTER_1009 if "1009-fallback" in scenario else
+                                 WS_FAILURES_BEFORE_HTTP)
+            assert len(server.failures) == expected_failures, "failure sequence must match the product contract"
             for failed_at in server.failures:
                 resumed_at = min(r["at"] for r in server.requests if r["at"] > failed_at)
                 wait = resumed_at - failed_at
                 waits.append(round(wait, 3))
-                assert 9.5 <= wait <= 20, ("expected ten-second failure-to-retry wait", wait)
+                assert RETRY_SECONDS - 0.5 <= wait <= RETRY_SECONDS + 10, ("expected ten-second failure-to-retry wait", wait)
             assert "fixture-private-reason" not in result.stdout + result.stderr
         if scenario == "handshake":
             attempts = [r for r in server.requests if r["transport"] == "handshake_eof"]
@@ -253,10 +285,11 @@ def verify(binary, scenario, output_dir=None):
             assert all(r["prompt_cache_key"] == original_key for r in failed)
             assert recovered["prompt_cache_key"] != original_key
             assert not recovered.get("previous_response_id")
-        if scenario == "compact":
-            assert any(r["compact"] for r in server.requests), "auto compact must complete over WS"
+        if scenario.startswith("compact") or scenario == "tool":
+            if scenario.startswith("compact"):
+                assert any(r["compact"] for r in server.requests), "auto compact must run"
             assert any(not r["compact"] for r in server.requests), "sampling must resume after compaction"
-            outputs = [item for r in server.requests if r["compact"]
+            outputs = [item for r in server.requests if r["compact"] or scenario == "tool"
                        for item in r["payload"].get("input", [])
                        if item.get("type") == "function_call_output"]
             assert outputs, "completed tool result must reach compaction"
@@ -284,6 +317,7 @@ def verify(binary, scenario, output_dir=None):
 if __name__ == "__main__":
     exe = str(Path(sys.argv[1]).resolve(strict=True))
     output = Path(sys.argv[2]) if len(sys.argv) > 2 else None
-    results = [verify(exe, scenario, output) for scenario in ("healthy", "close", "handshake", "compact")]
+    scenarios = sys.argv[3:] or ("healthy", "close", "handshake", "tool")
+    results = [verify(exe, scenario, output) for scenario in scenarios]
     if output:
         (output / "protocol-results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
