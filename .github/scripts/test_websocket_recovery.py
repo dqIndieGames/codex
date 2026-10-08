@@ -33,12 +33,12 @@ class Fixture(ThreadingHTTPServer):
         self.handshake_ready = False
         self.lock = threading.Lock()
 
-    def record(self, transport, payload):
+    def record(self, transport, payload, user_agent=None):
         compact = "COMPACT_FIXTURE" in json.dumps(payload) or any(
             item.get("type") == "compaction_trigger" for item in payload.get("input", []))
         with self.lock:
             entry = {"transport": transport, "compact": compact,
-                     "payload": payload, "at": time.monotonic()}
+                     "payload": payload, "at": time.monotonic(), "user_agent": user_agent}
             self.requests.append(entry)
         return compact
 
@@ -157,7 +157,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.frame(8, struct.pack("!H", 1000))
                         return
                     continue
-                compact = self.server.record("ws", payload)
+                compact = self.server.record("ws", payload, self.headers.get("User-Agent"))
                 scenario = self.server.scenario
                 fail = (scenario == "close" or (scenario == "tool" and self.server.tool_sent)
                         or (scenario.startswith("compact") and compact))
@@ -178,7 +178,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         payload = json.loads(self.read_exact(int(self.headers["Content-Length"])))
-        compact = self.server.record("http", payload)
+        compact = self.server.record("http", payload, self.headers.get("User-Agent"))
         if compact and "http413" in self.server.scenario and len(self.server.failures) < 12:
             self.server.failures.append(time.monotonic())
             body = b'{"error":{"message":"fixture request too large"}}'
@@ -254,6 +254,9 @@ def verify(binary, scenario, output_dir=None):
             print(result.stdout[-5000:]); print(result.stderr[-3000:])
             raise AssertionError(f"{scenario}: expected completed CLI response")
         http = [r for r in server.requests if r["transport"] == "http"]
+        # Checklist 2.1 preserves upstream suffixes; only the product version is bare.
+        assert all(r['user_agent'] and '-local3' not in r['user_agent'].split()[0] for r in server.requests
+                   if r['transport'] in ('ws', 'http')), 'checklist 2.1/21: server User-Agent uses the bare version'
         compaction_fallback = scenario.startswith("compact") and "1009-success" not in scenario
         if compaction_fallback:
             assert http and all(r["compact"] for r in http), "only this compaction may use HTTP"

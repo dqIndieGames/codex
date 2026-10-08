@@ -37,8 +37,9 @@ class Rpc:
         self.sequence = 0
         self.reader = threading.Thread(target=self.read, daemon=True)
         self.reader.start()
-        self.call('initialize', {'clientInfo': {'name': 'local3_verify', 'version': '1.0'},
+        initialized = self.call('initialize', {'clientInfo': {'name': 'local3_verify', 'version': '1.0'},
                                'capabilities': {'experimentalApi': True}})
+        assert '-local3' in initialized['userAgent'], 'local app-server identity keeps the local3 suffix'
         self.send({'method': 'initialized'})
 
     def read(self):
