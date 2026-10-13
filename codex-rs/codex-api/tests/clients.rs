@@ -340,7 +340,6 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
     let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth));
     let request = ResponsesApiRequest {
         model: "gpt-test".into(),
-        instructions: "Say hi".into(),
         input: vec![ResponseItem::Message {
             id: Some(ResponseItemId::with_suffix("msg", "1")),
             role: "user".into(),
@@ -395,7 +394,6 @@ async fn responses_client_stream_request_sends_routing_fields_ahead_of_large_inp
     let large_input = "x".repeat(2 * 1024 * 1024);
     let request = ResponsesApiRequest {
         model: "gpt-test".into(),
-        instructions: "Say hi".into(),
         input: vec![ResponseItem::Message {
             id: None,
             role: "user".into(),
@@ -435,7 +433,7 @@ async fn responses_client_stream_request_sends_routing_fields_ahead_of_large_inp
         );
     }
     assert!(body.starts_with(
-        r#"{"model":"gpt-test","stream":true,"service_tier":"priority","instructions":"Say hi","input":[{"type":"message""#
+        r#"{"model":"gpt-test","stream":true,"service_tier":"priority","input":[{"type":"message""#
     ));
     assert!(body.len() > 2 * 1024 * 1024);
     assert_eq!(serde_json::from_str::<serde_json::Value>(body)?, expected);
@@ -492,7 +490,6 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
 
     let request = ResponsesApiRequest {
         model: "gpt-test".into(),
-        instructions: "Say hi".into(),
         input: Vec::new(),
         tools: Some(empty_tools().into()),
         tool_choice: "auto".into(),
@@ -607,7 +604,6 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
 
     let request = ResponsesApiRequest {
         model: "gpt-test".into(),
-        instructions: "Say hi".into(),
         input: vec![ResponseItem::Message {
             id: Some(ResponseItemId::with_suffix("msg", "1")),
             role: "user".into(),

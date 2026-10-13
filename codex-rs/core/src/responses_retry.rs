@@ -7,7 +7,6 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::util::fixed_retry_delay;
 use codex_client::RetryOperation;
-use codex_features::Feature;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use tracing::debug;
@@ -23,7 +22,6 @@ pub(crate) enum ResponsesStreamRequest {
 
 pub(crate) struct ResponsesStreamRetryState {
     pub(crate) retries: u64,
-    connection_retries: u64,
     display_retries: u64,
     compaction_ws_failures: u64,
     compaction_size_failures: u64,
@@ -35,7 +33,6 @@ impl Default for ResponsesStreamRetryState {
     fn default() -> Self {
         Self {
             retries: 0,
-            connection_retries: 0,
             display_retries: 0,
             compaction_ws_failures: 0,
             compaction_size_failures: 0,
@@ -59,6 +56,10 @@ impl ResponsesStreamRetryState {
         if self.retries >= max_retries || matches!(err.details(),
             CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
                 | CodexErrorDetails::SessionBudgetExceeded) {
+            return None;
+        }
+        if matches!(err.details(), CodexErrorDetails::Stream(message)
+            if message == crate::client::PROVIDER_RUNTIME_REFRESHED) {
             return None;
         }
         let ws = !self.compaction_http && client_session.responses_websocket_enabled();
@@ -112,6 +113,12 @@ pub(crate) async fn handle_response_stream_error(
         ResponsesStreamRequest::LocalCompaction => RetryOperation::LocalCompaction,
         ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
     };
+    let mut runtime = sess.services.model_client.provider_runtime_receiver();
+    if matches!(err.details(), CodexErrorDetails::Stream(message)
+        if message == crate::client::PROVIDER_RUNTIME_REFRESHED) {
+        client_session.reset_retry_websocket_connection();
+        return Ok(());
+    }
     let delay = fixed_retry_delay();
     if matches!(
         err.details(),
@@ -124,38 +131,6 @@ pub(crate) async fn handle_response_stream_error(
 
     // Retire a failed socket without changing the provider's transport choice.
     client_session.reset_retry_websocket_connection();
-
-    if max_retries > 0
-        && turn_context
-            .config
-            .features
-            .enabled(Feature::UnboundedConnectionRetries)
-        && matches!(request, ResponsesStreamRequest::Sampling)
-        && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_))
-        && !turn_context.session_source.is_internal()
-        && !turn_context.provider.info().is_amazon_bedrock()
-    {
-        retry_state.connection_retries = retry_state.connection_retries.saturating_add(1);
-        maybe_activate_route_recovery(client_session, retry_state.connection_retries);
-        retry_state.display_retries = retry_state.display_retries.saturating_add(1);
-        log_retry(
-            request,
-            turn_context,
-            &err,
-            retry_state.display_retries,
-            max_retries,
-            delay,
-        );
-        sess.notify_stream_error(
-            turn_context,
-            retry_status_message(&err, retry_state.display_retries),
-            err,
-        )
-        .await;
-        codex_client::record_retry!(retry_state.connection_retries, delay, operation);
-        tokio::time::sleep(delay).await;
-        return Ok(());
-    }
 
     if retry_state.retries < max_retries {
         retry_state.retries = retry_state.retries.saturating_add(1);
@@ -177,7 +152,10 @@ pub(crate) async fn handle_response_stream_error(
         )
         .await;
         codex_client::record_retry!(retry_count, delay, operation);
-        tokio::time::sleep(delay).await;
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {},
+            _ = runtime.changed() => {},
+        }
         return Ok(());
     }
 

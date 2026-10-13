@@ -487,6 +487,7 @@ fn map_api_error_preserves_misalignment_details_from_403_body() {
             "code": "misalignment_policy_violation",
             "misalignment": {
                 "error_type": "unauthorized_data_transfer",
+                "review_target": " RB/opaque== ",
                 "detailed_explanation": "The agent attempted an external transfer.",
                 "steer": { "message": "Do not transfer the user's files." }
             }
@@ -513,6 +514,7 @@ fn map_api_error_preserves_misalignment_details_from_403_body() {
         misalignment,
         &Some(MisalignmentErrorDetails {
             error_type: Some("unauthorized_data_transfer".to_string()),
+            review_target: Some(" RB/opaque== ".to_string()),
             detailed_explanation: Some("The agent attempted an external transfer.".to_string()),
             steer: Some(codex_protocol::protocol::MisalignmentSteer {
                 message: "Do not transfer the user's files.".to_string(),
@@ -533,6 +535,7 @@ fn map_api_error_preserves_misalignment_details_from_wrapped_websocket_error() {
             "code": "misalignment_policy_violation",
             "misalignment": {
                 "error_type": "future_safety_category",
+                "review_target": " RB/opaque== ",
                 "detailed_explanation": "The agent attempted an external transfer.",
                 "steer": { "message": "Do not transfer the user's files." }
             }
@@ -562,6 +565,7 @@ fn map_api_error_preserves_misalignment_details_from_wrapped_websocket_error() {
         misalignment,
         &Some(MisalignmentErrorDetails {
             error_type: Some("future_safety_category".to_string()),
+            review_target: Some(" RB/opaque== ".to_string()),
             detailed_explanation: Some("The agent attempted an external transfer.".to_string()),
             steer: Some(codex_protocol::protocol::MisalignmentSteer {
                 message: "Do not transfer the user's files.".to_string(),

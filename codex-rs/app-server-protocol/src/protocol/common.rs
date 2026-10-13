@@ -225,6 +225,7 @@ macro_rules! client_request_definitions {
     ) => {
         /// Request from the client to the server.
         #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+        #[allow(clippy::large_enum_variant)]
         #[serde(tag = "method", rename_all = "camelCase")]
         pub enum ClientRequest {
             $(
@@ -677,6 +678,11 @@ client_request_definitions! {
         params: v2::ThreadAttachmentListParams,
         serialization: None,
         response: v2::ThreadAttachmentListResponse,
+    },
+    ThreadAttachmentOwnerList => "thread/attachmentOwner/list" {
+        params: v2::ThreadAttachmentOwnerListParams,
+        serialization: None,
+        response: v2::ThreadAttachmentOwnerListResponse,
     },
     ThreadAttachmentRemove => "thread/attachment/remove" {
         params: v2::ThreadAttachmentRemoveParams,
@@ -2605,6 +2611,7 @@ mod tests {
         let environment_add = ClientRequest::EnvironmentAdd {
             request_id: request_id(),
             params: v2::EnvironmentAddParams {
+                skills: None,
                 auth_bearer_token: None,
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
@@ -3868,6 +3875,7 @@ mod tests {
         let request = ClientRequest::EnvironmentAdd {
             request_id: RequestId::Integer(9),
             params: v2::EnvironmentAddParams {
+                skills: None,
                 auth_bearer_token: Some("private-executor-token".into()),
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
@@ -3883,7 +3891,8 @@ mod tests {
                     "environmentId": "remote-a",
                     "execServerUrl": "ws://127.0.0.1:8765",
                     "connectTimeoutMs": 300000,
-                    "authBearerToken": "private-executor-token"
+                    "authBearerToken": "private-executor-token",
+                    "skills": null
                 }
             }),
             serde_json::to_value(&request)?,
@@ -4408,6 +4417,7 @@ mod tests {
         let request = ClientRequest::EnvironmentAdd {
             request_id: RequestId::Integer(1),
             params: v2::EnvironmentAddParams {
+                skills: None,
                 auth_bearer_token: None,
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),

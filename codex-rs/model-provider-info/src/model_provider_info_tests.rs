@@ -97,6 +97,7 @@ base_url = "http://localhost:11434/v1"
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        capabilities: None,
         include_internal_metadata: false,
     };
 
@@ -135,6 +136,7 @@ query_params = { api-version = "2025-04-01-preview" }
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        capabilities: None,
         include_internal_metadata: false,
     };
 
@@ -177,6 +179,7 @@ supports_standalone_web_search = true
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: true,
+        capabilities: None,
         include_internal_metadata: false,
     };
 
@@ -366,6 +369,7 @@ fn test_create_amazon_bedrock_provider() {
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            capabilities: None,
             include_internal_metadata: false,
         }
     );

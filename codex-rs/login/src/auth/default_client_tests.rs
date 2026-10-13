@@ -66,8 +66,6 @@ fn test_display_user_agent_keeps_local_suffix() {
 #[test]
 #[cfg(target_os = "linux")]
 fn os_discovery_is_cached_without_freezing_user_agent_overrides() {
-    use std::os::unix::fs::PermissionsExt;
-
     const PROBE_DIR: &str = "CODEX_TEST_USER_AGENT_PROBE_DIR";
     if std::env::var_os(PROBE_DIR).is_some() {
         // Race the first lookup as well as exercising repeated requests.
@@ -96,15 +94,13 @@ fn os_discovery_is_cached_without_freezing_user_agent_overrides() {
         ("getconf", "64\n"),
     ] {
         let script = temp.path().join(program);
-        std::fs::write(
+        codex_utils_cargo_bin::write_executable(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '{program}\\n' >> \"${PROBE_DIR}/calls\"\nprintf '{output}'\n"
             ),
         )
         .expect("write probe");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("make probe executable");
     }
     let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
         .args([

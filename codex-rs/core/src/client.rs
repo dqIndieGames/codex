@@ -106,7 +106,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
-use codex_tools::create_tools_json_for_responses_api;
+use codex_tools::ToolSpec;
 use codex_tools::create_tools_json_for_responses_lite;
 use codex_tools::create_tools_raw_json_for_responses_api;
 use eventsource_stream::Event;
@@ -250,6 +250,8 @@ struct ModelClientState {
     thread_id: ThreadId,
     provider: ArcSwap<ModelProviderHandle>,
     provider_runtime_generation: AtomicU64,
+    provider_runtime_changed: tokio::sync::watch::Sender<u64>,
+    runtime_service_tier: StdMutex<Option<Option<String>>>,
     force_service_tier_priority: AtomicBool,
     /// Session AuthManager kept even when the current provider isolates bearer
     /// tokens, so a later refresh back to a no-token provider can restore it.
@@ -268,6 +270,8 @@ struct ModelClientState {
     attestation_provider: Option<Arc<dyn AttestationProvider>>,
     agent_identity_session_fallback: AgentIdentitySessionFallback,
     cached_websocket_session: StdMutex<WebsocketSession>,
+    /// Last full tool list used for sampling, retained across turns and connection resets.
+    last_inference_tools: StdMutex<Option<Arc<[ToolSpec]>>>,
 }
 
 #[derive(Debug)]
@@ -360,6 +364,7 @@ pub struct ModelClientSession {
     turn_state: Arc<OnceLock<String>>,
     /// Incremented every 3 consecutive retries for non-ChatGPT relay sticky-break.
     route_recovery_generation: u64,
+    provider_runtime_generation: u64,
     /// Whether the most recently resolved Responses route permits relay sticky-break.
     route_recovery_allowed: bool,
     request_retry_notifier: Option<RequestRetryNotifier>,
@@ -401,7 +406,6 @@ fn responses_request_properties_match(
 ) -> bool {
     let ResponsesApiRequest {
         model: previous_model,
-        instructions: previous_instructions,
         input: _,
         tools: previous_tools,
         tool_choice: previous_tool_choice,
@@ -419,7 +423,6 @@ fn responses_request_properties_match(
     } = previous;
     let ResponsesApiRequest {
         model: current_model,
-        instructions: current_instructions,
         input: _,
         tools: current_tools,
         tool_choice: current_tool_choice,
@@ -437,7 +440,6 @@ fn responses_request_properties_match(
     } = current;
 
     previous_model == current_model
-        && previous_instructions == current_instructions
         && previous_tools == current_tools
         && previous_tool_choice == current_tool_choice
         && previous_parallel_tool_calls == current_parallel_tool_calls
@@ -579,6 +581,8 @@ impl ModelClient {
                     provider: model_provider,
                 }),
                 provider_runtime_generation: AtomicU64::new(0),
+                provider_runtime_changed: tokio::sync::watch::channel(0).0,
+                runtime_service_tier: StdMutex::new(None),
                 force_service_tier_priority: AtomicBool::new(true),
                 base_auth_manager: auth_manager,
                 workspace_routing,
@@ -595,6 +599,7 @@ impl ModelClient {
                 attestation_provider,
                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
+                last_inference_tools: StdMutex::new(None),
             }),
             agent_identity_policy,
             prompt_cache_key_override: None,
@@ -690,6 +695,7 @@ impl ModelClient {
             websocket_session,
             turn_state: Arc::new(OnceLock::new()),
             route_recovery_generation: 0,
+            provider_runtime_generation: self.current_provider_runtime_generation(),
             route_recovery_allowed: false,
             request_retry_notifier: None,
         }
@@ -718,22 +724,27 @@ impl ModelClient {
         Arc::new(move || client.current_provider_runtime_generation() == runtime_generation)
     }
 
+    pub(crate) fn provider_runtime_receiver(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.state.provider_runtime_changed.subscribe()
+    }
+
     pub(crate) fn refresh_provider_runtime(
         &self,
         provider_info: ModelProviderInfo,
         force_service_tier_priority: bool,
+        service_tier: Option<String>,
     ) {
         self.state
             .force_service_tier_priority
             .store(force_service_tier_priority, Ordering::Relaxed);
         let auth_manager = self.state.base_auth_manager.clone();
-        self.state
-            .provider_runtime_generation
-            .fetch_add(1, Ordering::AcqRel);
+        *self.state.runtime_service_tier.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(service_tier);
         self.state.provider.store(Arc::new(ModelProviderHandle {
             provider: create_model_provider(provider_info, auth_manager),
         }));
         self.store_cached_websocket_session(WebsocketSession::default());
+        let generation = self.state.provider_runtime_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.state.provider_runtime_changed.send_replace(generation);
     }
 
     fn auth_owner_generation(&self) -> Option<u64> {
@@ -997,44 +1008,40 @@ impl ModelClient {
             input.retain(|item| !matches!(item, ResponseItem::ConfigurationUpdate { .. }));
         }
         let is_openai = self.current_provider().info().is_openai();
-        let (instructions, tools) = if model_info.use_responses_lite {
-            // These prompt-only items are rebuilt on every request. Hash their visible payloads
-            // within the thread so retries and resumed sessions preserve their identity.
-            let prefix_namespace = Uuid::new_v5(
-                &Uuid::NAMESPACE_OID,
-                self.state.thread_id.to_string().as_bytes(),
-            );
-            let tools = if self.current_provider().capabilities().namespace_tools {
-                create_tools_json_for_responses_lite(&prompt.tools)?
-            } else {
-                create_tools_json_for_responses_api(&prompt.tools)?
-            };
-            let mut prefix = vec![ResponseItem::AdditionalTools {
-                id: Some(ResponseItemId::with_suffix(
-                    "at",
-                    Uuid::new_v5(&prefix_namespace, &serde_json::to_vec(&tools)?),
-                )),
-                role: "developer".to_string(),
-                tools,
-            }];
-            if !prompt.base_instructions.text.is_empty() {
-                let mut instructions = ContextualUserFragment::into(BaseInstructionsFragment(
-                    prompt.base_instructions.text.clone(),
-                ));
-                instructions.set_id(Some(ResponseItemId::with_suffix(
-                    "msg",
-                    Uuid::new_v5(&prefix_namespace, prompt.base_instructions.text.as_bytes()),
-                )));
-                prefix.push(instructions);
+        // These prompt-only items are rebuilt on every request. Hash their visible payloads
+        // within the thread so retries and resumed sessions preserve their identity.
+        let prefix_namespace = Uuid::new_v5(
+            &Uuid::NAMESPACE_OID,
+            self.state.thread_id.to_string().as_bytes(),
+        );
+        let mut prefix = Vec::new();
+        let tools = if model_info.use_responses_lite {
+            if !prompt.tools.is_empty() {
+                let tools = create_tools_json_for_responses_lite(&prompt.tools)?;
+                prefix.push(ResponseItem::AdditionalTools {
+                    id: Some(ResponseItemId::with_suffix(
+                        "at",
+                        Uuid::new_v5(&prefix_namespace, &serde_json::to_vec(&tools)?),
+                    )),
+                    role: "developer".to_string(),
+                    tools,
+                });
             }
-            input.splice(0..0, prefix);
-            (String::new(), None)
+            None
         } else {
-            (
-                prompt.base_instructions.text.clone(),
-                Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into()),
-            )
+            Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into())
         };
+        if !prompt.base_instructions.text.is_empty() {
+            let mut instructions = ContextualUserFragment::into(BaseInstructionsFragment(
+                prompt.base_instructions.text.clone(),
+            ));
+            instructions.set_id(Some(ResponseItemId::with_suffix(
+                "msg",
+                Uuid::new_v5(&prefix_namespace, prompt.base_instructions.text.as_bytes()),
+            )));
+            prefix.push(instructions);
+        }
+        input.splice(0..0, prefix);
         if !is_openai {
             for item in &mut input {
                 item.clear_internal_chat_message_metadata_passthrough();
@@ -1072,18 +1079,16 @@ impl ModelClient {
             prompt.output_schema_strict,
         );
         let prompt_cache_key = Some(self.prompt_cache_key(responses_metadata));
-        let service_tier = if self.current_provider().info().is_amazon_bedrock() {
-            // Bedrock only supports the implicit default tier, including with custom catalogs.
-            None
-        } else if self
-            .state
-            .force_service_tier_priority
-            .load(Ordering::Relaxed)
-        {
+        let service_tier = self.state.runtime_service_tier.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or(service_tier);
+        let service_tier = if self.state.force_service_tier_priority.load(Ordering::Relaxed) {
             Some(ServiceTier::Fast.request_value().to_string())
         } else {
             model_info.service_tier_for_request(service_tier)
-        };
+        }.filter(|tier| {
+            !self.current_provider().info().is_amazon_bedrock()
+                || model_info.service_tiers.iter().any(|supported| supported.id == *tier)
+        });
         if !include_internal {
             for item in &mut input {
                 item.clear_tool_result_metadata();
@@ -1092,7 +1097,6 @@ impl ModelClient {
         let client_metadata = responses_metadata.client_metadata(include_internal);
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
-            instructions,
             input,
             tools,
             tool_choice: "auto".to_string(),
@@ -1485,6 +1489,17 @@ impl ModelClientSession {
         self.websocket_session.last_response_from_untraced_warmup = false;
         self.websocket_session
             .set_connection_reused(/*connection_reused*/ false);
+    }
+
+    pub(crate) fn inference_tools_changed(&self, tools: &Arc<[ToolSpec]>) -> bool {
+        let previous = self
+            .client
+            .state
+            .last_inference_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(Arc::clone(tools));
+        previous.is_some_and(|previous| previous != *tools)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2411,6 +2426,13 @@ impl ModelClientSession {
         inference_trace: &InferenceTraceContext,
         force_http: bool,
     ) -> Result<ResponseStream> {
+        let mut runtime = self.client.provider_runtime_receiver();
+        let generation = *runtime.borrow_and_update();
+        if generation != self.provider_runtime_generation {
+            self.reset_websocket_session();
+            self.provider_runtime_generation = generation;
+        }
+        let establish = async {
         if force_http {
             // A later ordinary request must not resume the pre-compaction socket history.
             self.reset_websocket_session();
@@ -2452,12 +2474,52 @@ impl ModelClientSession {
                 .await
             }
         }
+        };
+        let stream = tokio::select! {
+            biased;
+            _ = runtime.changed() => return Err(provider_runtime_refreshed()),
+            result = establish => result?,
+        };
+        Ok(interrupt_on_provider_refresh(stream, runtime))
     }
 
     /// Release a failed socket; retained conversation items supply retry input.
     pub(crate) fn reset_retry_websocket_connection(&mut self) {
         self.websocket_session.connection = None;
     }
+}
+
+pub(crate) const PROVIDER_RUNTIME_REFRESHED: &str = "provider runtime refreshed";
+
+fn provider_runtime_refreshed() -> CodexErr {
+    CodexErr::Stream(PROVIDER_RUNTIME_REFRESHED.to_string())
+}
+
+fn interrupt_on_provider_refresh(
+    mut stream: ResponseStream,
+    mut runtime: tokio::sync::watch::Receiver<u64>,
+) -> ResponseStream {
+    let (tx_event, rx_event) = mpsc::channel(RESPONSE_STREAM_CHANNEL_CAPACITY);
+    let consumer_dropped = CancellationToken::new();
+    let stopped = consumer_dropped.clone();
+    let interrupt = stream.interrupt.take();
+    tokio::spawn(async move {
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = stopped.cancelled() => break,
+                _ = runtime.changed() => {
+                    let _ = tx_event.send(Err(provider_runtime_refreshed())).await;
+                    break;
+                }
+                event = stream.next() => event,
+            };
+            let Some(event) = event else { break };
+            let terminal = event.is_err() || matches!(&event, Ok(ResponseEvent::Completed { .. }));
+            if tx_event.send(event).await.is_err() || terminal { break; }
+        }
+    });
+    ResponseStream { rx_event, interrupt, consumer_dropped }
 }
 
 /// Stamp a ResponsesWsRequest with the current time.

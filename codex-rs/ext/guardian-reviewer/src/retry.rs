@@ -119,7 +119,8 @@ fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
             | CodexErrorInfo::ThreadRollbackFailed
             | CodexErrorInfo::Other => false,
         },
-        GuardianReviewOutcome::Completed(_)
+        GuardianReviewOutcome::CachedApproval
+        | GuardianReviewOutcome::Completed(_)
         | GuardianReviewOutcome::Error(
             GuardianReviewError::InputBudgetExceeded
             | GuardianReviewError::PromptBuild { .. }

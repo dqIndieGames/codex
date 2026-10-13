@@ -207,7 +207,8 @@ async fn daemon_startup(command: &str) -> Result<()> {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&codex, &managed)?;
         #[cfg(not(unix))]
-        fs::hard_link(&codex, &managed).or_else(|_| fs::copy(&codex, &managed).map(|_| ()))?;
+        fs::hard_link(&codex, &managed)
+            .or_else(|_| codex_utils_cargo_bin::copy_executable(&codex, &managed))?;
         if command != "restrictive-job" {
             fs::create_dir(home.path().join("app-server-daemon"))?;
             fs::write(
@@ -363,6 +364,17 @@ async fn daemon_startup(command: &str) -> Result<()> {
                             ensure!(text.contains("Cannotusethesharedbackgroundserver:Thissessionrequiresapi_key_model_discoverytobedisabled."));
                         } else {
                             ensure!(text.contains("Server:Localbackgroundserver") == restart);
+                            if restart {
+                                let settings: serde_json::Value = serde_json::from_slice(
+                                    &fs::read(home.path().join("app-server-daemon/settings.json"))?
+                                )?;
+                                let flag = if disabling && !persisted {
+                                    "auth_elicitation"
+                                } else {
+                                    "api_key_model_discovery"
+                                };
+                                assert_eq!(settings["featureOverrides"], serde_json::json!({(flag): false}));
+                            }
                         }
                     } else if command == "start" {
                         ensure!(text.contains("Server:Localbackgroundserver"));
