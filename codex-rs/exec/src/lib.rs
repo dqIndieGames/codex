@@ -744,7 +744,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         session_source: SessionSource::Exec,
         enable_codex_api_key_env: true,
         client_name: "codex_exec".to_string(),
-        client_version: concat!(env!("CARGO_PKG_VERSION"), "-local3").to_string(),
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
         experimental_api: true,
         mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
