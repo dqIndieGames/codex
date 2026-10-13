@@ -18,7 +18,7 @@ from test_websocket_recovery import Fixture, command
 
 
 class Rpc:
-    def __init__(self, binary, fixture, home, output, extra=()):
+    def __init__(self, binary, fixture, home, output, extra=(), settings=None):
         home.mkdir(parents=True, exist_ok=True)
         output.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
@@ -26,7 +26,7 @@ class Rpc:
         for key in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL'):
             env.pop(key, None)
         args = command(binary, fixture)
-        settings = args[args.index('-c'):-1]
+        settings = args[args.index('-c'):-1] if settings is None else settings
         self.stderr = (output / 'app-server.stderr.txt').open('w', encoding='utf-8')
         self.log = (output / 'rpc.jsonl').open('w', encoding='utf-8')
         self.process = subprocess.Popen([binary, 'app-server', *settings, *extra],

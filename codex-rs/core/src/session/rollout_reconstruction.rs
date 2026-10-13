@@ -614,6 +614,9 @@ impl Session {
             previous_id: None,
             id: None,
         });
+        history.with_raw_items_mut(|items| {
+            crate::context_overflow_image_ladder::repair_legacy_placeholders(items);
+        });
         RolloutReconstruction {
             retained_context: history.retained_context().clone(),
             guardian_history: history.guardian_history_checkpoint(),

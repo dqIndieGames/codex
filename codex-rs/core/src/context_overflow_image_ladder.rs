@@ -24,7 +24,8 @@ use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 
-const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+const LEGACY_BROKEN_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==";
 const MAX_TIER: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +91,19 @@ pub(crate) fn apply_image_ladder_tier(items: &mut [ResponseItem], tier: u8) -> u
         3 => placeholder_except_last(items, 5),
         4 => placeholder_except_last(items, 1),
         _ => 0,
+    }
+}
+
+/// Repair only the exact legacy placeholder in reconstructed memory, never arbitrary
+/// images or the original rollout file. Existing image slots and detail stay intact.
+pub(crate) fn repair_legacy_placeholders(items: &mut [ResponseItem]) {
+    let legacy = format!("data:image/png;base64,{LEGACY_BROKEN_PNG_BASE64}");
+    let replacement = tiny_png_data_url();
+    for slot in collect_slots(items) {
+        if let Some((ImageReference::Inline { image_url }, _)) = image_parts_mut(items, slot)
+            && *image_url == legacy {
+            *image_url = replacement.clone();
+        }
     }
 }
 

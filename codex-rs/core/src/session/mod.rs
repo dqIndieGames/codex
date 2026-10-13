@@ -1979,6 +1979,9 @@ impl Session {
             if mcp_inputs_changed {
                 self.mark_mcp_runtime_dirty();
             }
+            if state.session_configuration.step_settings.service_tier != updated.step_settings.service_tier {
+                self.services.model_client.set_runtime_service_tier(updated.step_settings.service_tier.clone());
+            }
             // Save new environment defaults for future turns. The running turn keeps its own.
             state.session_configuration = updated;
             if root_service_tier_changed {

@@ -724,6 +724,11 @@ impl ModelClient {
         Arc::new(move || client.current_provider_runtime_generation() == runtime_generation)
     }
 
+    pub(crate) fn set_runtime_service_tier(&self, service_tier: Option<String>) {
+        *self.state.runtime_service_tier.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(service_tier);
+    }
+
     pub(crate) fn provider_runtime_receiver(&self) -> tokio::sync::watch::Receiver<u64> {
         self.state.provider_runtime_changed.subscribe()
     }

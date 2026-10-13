@@ -254,8 +254,8 @@ def verify(binary, scenario, output_dir=None):
             print(result.stdout[-5000:]); print(result.stderr[-3000:])
             raise AssertionError(f"{scenario}: expected completed CLI response")
         http = [r for r in server.requests if r["transport"] == "http"]
-        # Checklist 2.1 preserves upstream suffixes; only the product version is bare.
-        assert all(r['user_agent'] and '-local3' not in r['user_agent'].split()[0] for r in server.requests
+        # Checklist 2.1/21: all product version segments in the complete UA are bare.
+        assert all(r['user_agent'] and '-local3' not in r['user_agent'] for r in server.requests
                    if r['transport'] in ('ws', 'http')), 'checklist 2.1/21: server User-Agent uses the bare version'
         compaction_fallback = scenario.startswith("compact") and "1009-success" not in scenario
         if compaction_fallback:
