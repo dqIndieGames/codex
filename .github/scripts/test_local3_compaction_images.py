@@ -3,7 +3,9 @@
 Checks original-image preservation on disk, image changes on the next request,
 and a new WS compaction after the earlier compaction used HTTP.
 """
+import base64
 import hashlib
+import io
 import json
 import struct
 import zlib
@@ -11,6 +13,8 @@ from pathlib import Path
 import sys
 import threading
 import time
+
+from PIL import Image
 
 from test_local3_lifecycle import Rpc
 from test_websocket_recovery import Fixture
@@ -61,8 +65,11 @@ def verify(binary, root, scenario):
         tid = rpc.start(home)
         def chunk(kind, data):
             return struct.pack('!I', len(data)) + kind + data + struct.pack('!I', zlib.crc32(kind + data))
-        png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!IIBBBBB', 2, 2, 8, 2, 0, 0, 0))
-               + chunk(b'IDAT', zlib.compress((b'\0' + bytes([40, 120, 200]) * 2) * 2)) + chunk(b'IEND', b''))
+        # Large enough for original -> high to change the actual transmitted pixels,
+        # including Responses Lite where the detail marker is omitted on the wire.
+        side = 2048
+        png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!IIBBBBB', side, side, 8, 2, 0, 0, 0))
+               + chunk(b'IDAT', zlib.compress((b'\0' + bytes([40, 120, 200]) * side) * side)) + chunk(b'IEND', b''))
         image_file = root / 'original.png'
         image_file.write_bytes(png)
         original_hash = hashlib.sha256(png).hexdigest()
@@ -98,6 +105,12 @@ def verify(binary, root, scenario):
             assert all(r['transport'] == 'http' for r in attempts)
             for threshold in (3, 6, 9, 12):
                 assert images(attempts[threshold - 1]['payload']) != images(attempts[threshold]['payload'])
+            for tier, keep in ((9, 5), (12, 1)):
+                for url, _ in images(attempts[tier]['payload'])[:-keep]:
+                    data = base64.b64decode(url.split(',', 1)[1])
+                    decoded = Image.open(io.BytesIO(data))
+                    decoded.load()
+                    assert decoded.format == 'PNG' and decoded.size == (1, 1), 'valid fully decoded placeholder'
         elif 'fallback' in scenario:
             assert attempts[1]['transport'] == 'ws', 'one WS retry after first 1009'
             assert attempts[-1]['transport'] == 'http', 'failed WS retry must fall back'

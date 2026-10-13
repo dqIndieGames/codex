@@ -683,6 +683,7 @@ impl ModelClient {
     /// This constructor does not perform network I/O itself; the session opens a websocket lazily
     /// when the first stream request is issued.
     pub fn new_session(&self) -> ModelClientSession {
+        let provider_runtime_generation = self.current_provider_runtime_generation();
         let auth_owner_generation = self.auth_owner_generation();
         let mut websocket_session = self.take_cached_websocket_session();
         if websocket_session.auth_owner_generation != auth_owner_generation {
@@ -695,7 +696,7 @@ impl ModelClient {
             websocket_session,
             turn_state: Arc::new(OnceLock::new()),
             route_recovery_generation: 0,
-            provider_runtime_generation: self.current_provider_runtime_generation(),
+            provider_runtime_generation,
             route_recovery_allowed: false,
             request_retry_notifier: None,
         }
@@ -747,8 +748,13 @@ impl ModelClient {
         self.state.provider.store(Arc::new(ModelProviderHandle {
             provider: create_model_provider(provider_info, auth_manager),
         }));
-        self.store_cached_websocket_session(WebsocketSession::default());
-        let generation = self.state.provider_runtime_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = {
+            let mut cached = self.state.cached_websocket_session.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let generation = self.state.provider_runtime_generation.fetch_add(1, Ordering::AcqRel) + 1;
+            *cached = WebsocketSession::default();
+            generation
+        };
         self.state.provider_runtime_changed.send_replace(generation);
     }
 
@@ -768,14 +774,6 @@ impl ModelClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::mem::take(&mut *cached_websocket_session)
-    }
-
-    fn store_cached_websocket_session(&self, websocket_session: WebsocketSession) {
-        *self
-            .state
-            .cached_websocket_session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = websocket_session;
     }
 
     pub(crate) async fn create_realtime_call_with_headers(
@@ -1445,8 +1443,11 @@ impl ModelClient {
 impl Drop for ModelClientSession {
     fn drop(&mut self) {
         let websocket_session = std::mem::take(&mut self.websocket_session);
-        self.client
-            .store_cached_websocket_session(websocket_session);
+        let mut cached = self.client.state.cached_websocket_session.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.provider_runtime_generation == self.client.current_provider_runtime_generation() {
+            *cached = websocket_session;
+        }
     }
 }
 
