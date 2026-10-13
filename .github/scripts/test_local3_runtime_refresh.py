@@ -18,10 +18,14 @@ from _groundtruth.local3_retry_contract import RETRY_SECONDS
 class RecordingHandler(Handler):
     def do_GET(self):
         self.server.local.headers = dict(self.headers)
+        self.server.local.method = 'GET'
+        self.server.local.path = self.path
         super().do_GET()
 
     def do_POST(self):
         self.server.local.headers = dict(self.headers)
+        self.server.local.method = 'POST'
+        self.server.local.path = self.path
         super().do_POST()
 
 
@@ -37,6 +41,8 @@ class RuntimeFixture(Fixture):
     def record(self, transport, payload, user_agent=None):
         compact = super().record(transport, payload, user_agent)
         self.requests[-1]['headers'] = dict(getattr(self.local, 'headers', {}))
+        self.requests[-1]['method'] = getattr(self.local, 'method', None)
+        self.requests[-1]['path'] = getattr(self.local, 'path', None)
         return compact
 
     def events(self, payload, compact=False):
