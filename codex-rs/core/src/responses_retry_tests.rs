@@ -12,10 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing_test::internal::MockWriter;
 
-// Product contract: local3 checklist transport recovery, three consecutive
-// WS failures preserve protocol even with an unlimited budget; official sticky state stays intact.
+// Product contract: local3 checklist 3.4, the third consecutive WS failure locks the session onto
+// HTTP even with an unlimited budget; official sticky state stays intact.
 #[tokio::test(start_paused = true)]
-async fn websocket_recovery_preserves_protocol_for_sampling_and_both_compaction_paths() {
+async fn websocket_recovery_falls_back_to_http_for_sampling_and_both_compaction_paths() {
     for official in [true, false] {
         for request in [
             ResponsesStreamRequest::Sampling,
@@ -65,8 +65,8 @@ async fn websocket_recovery_preserves_protocol_for_sampling_and_both_compaction_
                 );
                 assert_eq!(
                     session.services.model_client.responses_websocket_enabled(),
-                    true,
-                    "WS recovery must preserve protocol, independent of retry budget",
+                    attempt < 3,
+                    "checklist 3.4: three consecutive WS failures switch the session to HTTP",
                 );
                 assert!(start.elapsed() >= Duration::from_secs(10));
                 if official {
@@ -80,6 +80,36 @@ async fn websocket_recovery_preserves_protocol_for_sampling_and_both_compaction_
             }
         }
     }
+}
+
+// Product contract: local3 checklist 3.4, a WS 1009 switches to HTTP without another WS attempt.
+#[tokio::test(start_paused = true)]
+async fn websocket_message_too_big_switches_session_to_http() {
+    let (session, context, _events) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("fixture-key"),
+        Vec::new(),
+        |config| {
+            config.model_provider.supports_websockets = true;
+        },
+    )
+    .await;
+    let context = StepContext::for_test(Arc::new(context));
+    let mut client = session.services.model_client.new_session();
+    let mut state = ResponsesStreamRetryState::default();
+    handle_response_stream_error(
+        &mut state,
+        u64::MAX,
+        CodexErr::Stream(
+            "websocket closed by server before response.completed (close code: 1009)".to_string(),
+        ),
+        &mut client,
+        &session,
+        &context.turn,
+        ResponsesStreamRequest::Sampling,
+    )
+    .await
+    .unwrap();
+    assert!(!session.services.model_client.responses_websocket_enabled());
 }
 
 #[tokio::test(start_paused = true)]

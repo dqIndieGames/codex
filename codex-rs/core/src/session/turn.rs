@@ -37,6 +37,7 @@ use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::ResponsesStreamRetryState;
 use crate::responses_retry::handle_response_stream_error;
+use crate::responses_retry::is_request_size_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::daemon_recovery::RecordedTurnInput;
@@ -1760,12 +1761,11 @@ async fn run_sampling_request(
             return Err(err);
         }
 
-        let is_context_window_exceeded =
-            matches!(err.details(), CodexErrorDetails::ContextWindowExceeded);
-        if is_context_window_exceeded {
+        // Context overflow and HTTP 413 share one consecutive counter; compaction counts its own.
+        let is_size_error = is_request_size_error(&err);
+        if is_size_error {
             image_size_failures = image_size_failures.saturating_add(1);
         } else {
-            // Sampling counts consecutive overflows; compaction has its own cumulative count.
             image_size_failures = 0;
         }
         // Sampling guidance needs the captured step model; compaction retries
@@ -1810,7 +1810,7 @@ async fn run_sampling_request(
             ));
         }
         retry??;
-        if is_context_window_exceeded && image_size_failures % 3 == 0 {
+        if is_size_error && image_size_failures % 3 == 0 {
             if let Some(report) = sess
                 .apply_context_overflow_image_ladder(&turn_context.sub_id)
                 .await

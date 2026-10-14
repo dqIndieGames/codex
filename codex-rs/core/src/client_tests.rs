@@ -2176,8 +2176,6 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
 #[tokio::test]
 async fn inference_tools_changes_follow_full_specs_across_turns() {
     let client = test_model_client(SessionSource::Cli);
-    let telemetry = test_session_telemetry();
-    let model_info = test_model_info();
     let alpha = ResponsesApiTool {
         name: "alpha".into(),
         description: "Original".into(),
@@ -2209,7 +2207,7 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
     .enumerate()
     {
         if index == 4 {
-            session.try_switch_fallback_transport(&telemetry, &model_info);
+            session.try_switch_fallback_transport();
             drop(session);
             session = client.new_session();
         }

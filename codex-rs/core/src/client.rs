@@ -270,6 +270,8 @@ struct ModelClientState {
     attestation_provider: Option<Arc<dyn AttestationProvider>>,
     agent_identity_session_fallback: AgentIdentitySessionFallback,
     cached_websocket_session: StdMutex<WebsocketSession>,
+    /// Set once a failed Responses WebSocket request locks this session onto HTTP.
+    responses_http_fallback: AtomicBool,
     /// Last full tool list used for sampling, retained across turns and connection resets.
     last_inference_tools: StdMutex<Option<Arc<[ToolSpec]>>>,
 }
@@ -314,7 +316,7 @@ impl RequestRouteTelemetry {
 /// This holds configuration and state that should be shared across turns within a Codex session
 /// (auth, provider selection, thread id, and transport connection state).
 ///
-/// Failed WebSocket requests reconnect through WebSocket while the provider selects it.
+/// A WebSocket `1009` or three consecutive WebSocket failures lock the session onto HTTP.
 ///
 /// Turn-scoped settings (model selection, reasoning controls, telemetry context, and turn
 /// metadata) are passed explicitly to the relevant methods to keep turn lifetime visible at the
@@ -599,6 +601,7 @@ impl ModelClient {
                 attestation_provider,
                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
+                responses_http_fallback: AtomicBool::new(false),
                 last_inference_tools: StdMutex::new(None),
             }),
             agent_identity_policy,
@@ -1131,9 +1134,26 @@ impl ModelClient {
 
     /// Returns whether the Responses-over-WebSocket transport is active for this session.
     ///
-    /// WebSocket use is controlled by provider capability, including after failed requests.
+    /// WebSocket use follows provider capability until a failed request locks this session onto
+    /// HTTP; the lock lasts for the session and survives provider refreshes.
     pub fn responses_websocket_enabled(&self) -> bool {
         self.current_provider().info().supports_websockets
+            && !self.state.responses_http_fallback.load(Ordering::Acquire)
+    }
+
+    /// Locks this session onto HTTP. Returns `true` only for the call that activated the lock.
+    fn activate_responses_http_fallback(&self) -> bool {
+        if !self.current_provider().info().supports_websockets
+            || self.state.responses_http_fallback.swap(true, Ordering::AcqRel)
+        {
+            return false;
+        }
+        *self
+            .state
+            .cached_websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = WebsocketSession::default();
+        true
     }
 
     /// Returns auth + provider configuration resolved from the current session auth state.
@@ -2394,7 +2414,8 @@ impl ModelClientSession {
     ///
     /// The caller is responsible for passing per-turn settings explicitly (model selection,
     /// reasoning settings, telemetry context, and turn metadata). This method will prefer the
-    /// Responses WebSocket transport when the provider supports it, including on retry. The trace context may be enabled or
+    /// Responses WebSocket transport when the provider supports it and the session has not fallen
+    /// back to HTTP. The trace context may be enabled or
     /// disabled, but is always explicit so transport paths do not need separate trace/no-trace
     /// branches.
     pub async fn stream(
@@ -2418,7 +2439,7 @@ impl ModelClientSession {
         self.client.responses_websocket_enabled()
     }
 
-    /// The HTTP override belongs to one compaction attempt, never to the provider/session.
+    /// `force_http` overrides one request; session-wide fallback uses `try_switch_fallback_transport`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn stream_with_transport(
         &mut self,
@@ -2492,6 +2513,14 @@ impl ModelClientSession {
     /// Release a failed socket; retained conversation items supply retry input.
     pub(crate) fn reset_retry_websocket_connection(&mut self) {
         self.websocket_session.connection = None;
+    }
+
+    /// Locks the session onto HTTP after a failed WebSocket request. Later requests, compactions
+    /// and newly spawned sub-sessions use HTTP until a new session starts.
+    pub(crate) fn try_switch_fallback_transport(&mut self) -> bool {
+        let activated = self.client.activate_responses_http_fallback();
+        self.reset_websocket_session();
+        activated
     }
 }
 

@@ -1,8 +1,9 @@
 """Black-box local3 transport contract tests; never builds the supplied CLI.
 
-Truth source: local3 checklist sections 3.1 and 3.4: three failed WS
-attempts, fixed ten-second waits, then a successful WS retry; tools survive.
-The server implements RFC 6455 framing and the Responses streaming lifecycle.
+Truth source: local3 checklist sections 3.1 and 3.4: fixed ten-second waits;
+three failed WS attempts, or one WS 1009, switch the session to HTTP for the
+rest of the process; tools survive. The server implements RFC 6455 framing and
+the Responses streaming lifecycle.
 """
 
 import base64
@@ -159,12 +160,10 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 compact = self.server.record("ws", payload, self.headers.get("User-Agent"))
                 scenario = self.server.scenario
-                fail = (scenario == "close" or (scenario == "tool" and self.server.tool_sent)
+                fail = (scenario.startswith("close") or (scenario == "tool" and self.server.tool_sent)
                         or (scenario.startswith("compact") and compact))
                 limit = WS_FAILURES_BEFORE_HTTP
-                if "1009-success" in scenario:
-                    limit = 1
-                elif "1009-fallback" in scenario:
+                if "1009" in scenario:
                     limit = 1 + WS_RETRY_AFTER_1009
                 if fail and len(self.server.failures) < limit:
                     self.server.failures.append(time.monotonic())
@@ -257,16 +256,18 @@ def verify(binary, scenario, output_dir=None):
         # Checklist 2.1/21: all product version segments in the complete UA are bare.
         assert all(r['user_agent'] and '-local3' not in r['user_agent'] for r in server.requests
                    if r['transport'] in ('ws', 'http')), 'checklist 2.1/21: server User-Agent uses the bare version'
-        compaction_fallback = scenario.startswith("compact") and "1009-success" not in scenario
-        if compaction_fallback:
-            assert http and all(r["compact"] for r in http), "only this compaction may use HTTP"
-            assert server.requests[-1]["transport"] == "ws", "sampling must return to configured WS"
+        if scenario == "healthy":
+            assert not http, "a healthy session stays on WS"
         else:
-            assert not http, "ordinary sampling and recovered 1009 must remain WS"
+            # Checklist 3.4: the failed WS sequence falls back once and the session keeps HTTP.
+            first_http = next((i for i, r in enumerate(server.requests) if r["transport"] == "http"), None)
+            assert first_http is not None, "failed WS sequence must fall back to HTTP"
+            assert all(r["transport"] != "http" for r in server.requests[:first_http])
+            assert all(r["transport"] == "http" for r in server.requests[first_http:]), \
+                "the session must stay on HTTP after falling back"
         waits = []
         if scenario != "healthy":
-            expected_failures = (1 if "1009-success" in scenario else
-                                 1 + WS_RETRY_AFTER_1009 if "1009-fallback" in scenario else
+            expected_failures = (1 + WS_RETRY_AFTER_1009 if "1009" in scenario else
                                  WS_FAILURES_BEFORE_HTTP)
             assert len(server.failures) == expected_failures, "failure sequence must match the product contract"
             for failed_at in server.failures:

@@ -1,4 +1,4 @@
-//! Shared retry and protocol-preserving recovery for Responses requests.
+//! Shared retry, recovery and WebSocket-to-HTTP fallback for Responses requests.
 
 use std::time::Duration;
 
@@ -12,6 +12,8 @@ use codex_protocol::error::CodexErrorDetails;
 use tracing::debug;
 
 const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
+/// Consecutive failed WebSocket attempts of one request before the session locks onto HTTP.
+const WEBSOCKET_HTTP_FALLBACK_THRESHOLD: u64 = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -23,10 +25,8 @@ pub(crate) enum ResponsesStreamRequest {
 pub(crate) struct ResponsesStreamRetryState {
     pub(crate) retries: u64,
     display_retries: u64,
-    compaction_ws_failures: u64,
+    websocket_failures: u64,
     compaction_size_failures: u64,
-    compaction_1009_retried: bool,
-    pub(crate) compaction_http: bool,
 }
 
 impl Default for ResponsesStreamRetryState {
@@ -34,22 +34,19 @@ impl Default for ResponsesStreamRetryState {
         Self {
             retries: 0,
             display_retries: 0,
-            compaction_ws_failures: 0,
+            websocket_failures: 0,
             compaction_size_failures: 0,
-            compaction_1009_retried: false,
-            compaction_http: false,
         }
     }
 }
 
 impl ResponsesStreamRetryState {
-    /// Decide recovery before the shared single ten-second wait. The returned tier must also
-    /// be applied to the compaction caller's snapshot so stale images are never resent.
+    /// Decide image recovery before the shared single ten-second wait. The returned tier must
+    /// also be applied to the compaction caller's snapshot so stale images are never resent.
     pub(crate) async fn prepare_compaction_retry(
         &mut self,
         max_retries: u64,
         err: &CodexErr,
-        client_session: &ModelClientSession,
         sess: &Session,
         turn_context: &TurnContext,
     ) -> Option<u8> {
@@ -62,24 +59,12 @@ impl ResponsesStreamRetryState {
             if message == crate::client::PROVIDER_RUNTIME_REFRESHED) {
             return None;
         }
-        let ws = !self.compaction_http && client_session.responses_websocket_enabled();
-        let first_1009 = ws && !self.compaction_1009_retried
-            && matches!(err.details(), CodexErrorDetails::Stream(message)
-                if message.contains("(close code: 1009)"));
-        if ws {
-            self.compaction_ws_failures = self.compaction_ws_failures.saturating_add(1);
-            if first_1009 {
-                self.compaction_1009_retried = true;
-            } else if self.compaction_1009_retried || self.compaction_ws_failures >= 3 {
-                self.compaction_http = true;
-            }
+        // A WebSocket 1009 switches to HTTP instead; only size errors count toward the ladder.
+        if !is_request_size_error(err) {
+            return None;
         }
-        let size_error = matches!(err.details(), CodexErrorDetails::ContextWindowExceeded)
-            || err.http_status_code_value() == Some(413);
-        if size_error {
-            self.compaction_size_failures = self.compaction_size_failures.saturating_add(1);
-        }
-        if first_1009 || (size_error && self.compaction_size_failures % 3 == 0) {
+        self.compaction_size_failures = self.compaction_size_failures.saturating_add(1);
+        if self.compaction_size_failures % 3 == 0 {
             if let Some(report) = sess.apply_context_overflow_image_ladder(&turn_context.sub_id).await {
                 let tier = report.tier;
                 sess.notify_stream_error(turn_context, report.message, CodexErr::ContextWindowExceeded).await;
@@ -88,6 +73,18 @@ impl ResponsesStreamRetryState {
         }
         None
     }
+}
+
+/// Context-window overflow or HTTP 413: rebuilding the request with smaller images can help.
+pub(crate) fn is_request_size_error(err: &CodexErr) -> bool {
+    matches!(err.details(), CodexErrorDetails::ContextWindowExceeded)
+        || err.http_status_code_value() == Some(413)
+}
+
+/// The server closed the WebSocket because one message exceeded its size limit.
+fn is_websocket_message_too_big(err: &CodexErr) -> bool {
+    matches!(err.details(), CodexErrorDetails::Stream(message)
+        if message.contains("(close code: 1009)"))
 }
 
 /// Server retry advice retained after stream retries are exhausted. The turn ID
@@ -129,7 +126,8 @@ pub(crate) async fn handle_response_stream_error(
         return Err(err);
     }
 
-    // Retire a failed socket without changing the provider's transport choice.
+    // Retire a failed socket; the fallback check below decides the next transport.
+    let attempt_used_websocket = client_session.responses_websocket_enabled();
     client_session.reset_retry_websocket_connection();
 
     if retry_state.retries < max_retries {
@@ -137,6 +135,23 @@ pub(crate) async fn handle_response_stream_error(
         let retry_count = retry_state.retries;
         retry_state.display_retries = retry_state.display_retries.saturating_add(1);
         maybe_activate_route_recovery(client_session, retry_state.display_retries);
+        if attempt_used_websocket {
+            retry_state.websocket_failures = retry_state.websocket_failures.saturating_add(1);
+            let message_too_big = is_websocket_message_too_big(&err);
+            // Resending an oversized message over WS cannot succeed; repeated failures fall back
+            // too. Either way the session stays on HTTP until a new session starts.
+            if (message_too_big
+                || retry_state.websocket_failures >= WEBSOCKET_HTTP_FALLBACK_THRESHOLD)
+                && client_session.try_switch_fallback_transport()
+            {
+                debug!(
+                    turn_id = %turn_context.sub_id,
+                    message_too_big,
+                    websocket_failures = retry_state.websocket_failures,
+                    "Responses WebSocket failed; using HTTP for the rest of this session",
+                );
+            }
+        }
         log_retry(
             request,
             turn_context,

@@ -411,7 +411,7 @@ async fn run_remote_compaction_request_v2(
                 step_context.settings.service_tier.clone(),
                 responses_metadata,
                 &InferenceTraceContext::disabled(),
-                retry_state.compaction_http,
+                /*force_http*/ false,
             )
             .await
         {
@@ -423,7 +423,7 @@ async fn run_remote_compaction_request_v2(
             Ok(compaction_output) => return Ok(compaction_output),
             Err(err) => {
                 if let Some(tier) = retry_state.prepare_compaction_retry(
-                    max_retries, &err, client_session, sess, turn_context,
+                    max_retries, &err, sess, turn_context,
                 ).await {
                     crate::context_overflow_image_ladder::apply_image_ladder_tier(&mut prompt.input, tier);
                 }

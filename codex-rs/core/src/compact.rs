@@ -328,7 +328,7 @@ async fn run_compact_task_inner_impl(
             &responses_metadata,
             &prompt,
             compaction_metadata.phase(),
-            retry_state.compaction_http,
+            /*force_http*/ false,
         )
         .await;
 
@@ -349,7 +349,7 @@ async fn run_compact_task_inner_impl(
             }
             Err(e) => {
                 if let Some(tier) = retry_state.prepare_compaction_retry(
-                    max_retries, &e, &client_session, &sess, &turn_context,
+                    max_retries, &e, &sess, &turn_context,
                 ).await {
                     history.with_raw_items_mut(|items| {
                         crate::context_overflow_image_ladder::apply_image_ladder_tier(items, tier);

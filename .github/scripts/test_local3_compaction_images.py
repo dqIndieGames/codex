@@ -1,7 +1,8 @@
-"""Manual compaction/image recovery using the checklist §§3.6 and 6 as truth.
+"""Manual compaction/image recovery using the checklist §§3.4, 3.6 and 6 as truth.
 
-Checks original-image preservation on disk, image changes on the next request,
-and a new WS compaction after the earlier compaction used HTTP.
+Checks original-image preservation on disk, image changes after counted size
+failures, a WS 1009 switching straight to HTTP without shrinking images, and
+the session staying on HTTP for later sampling and compaction.
 """
 import base64
 import hashlib
@@ -79,7 +80,8 @@ def verify(binary, root, scenario):
             attempts = fixture.requests
             (root / 'requests.json').write_text(json.dumps(attempts, indent=2), encoding='utf-8')
             original = images(attempts[0]['payload'])
-            assert len(attempts) == 6 and all(r['transport'] == 'ws' for r in attempts)
+            # Checklist 3.4: any three consecutive WS failures switch the session to HTTP.
+            assert [r['transport'] for r in attempts] == ['ws'] * 3 + ['http'] * 3
             assert all(images(r['payload']) == original for r in attempts[:-1]), 'do not shrink before three consecutive overflows'
             assert images(attempts[-1]['payload']) != original, 'shrink after three consecutive overflows'
             report = {'passed': True, 'scenario': scenario, 'consecutive_overflow_counter': True}
@@ -94,13 +96,13 @@ def verify(binary, root, scenario):
         attempts = [r for r in fixture.requests[start:] if r['compact']]
         (root / 'requests.json').write_text(json.dumps(fixture.requests, indent=2), encoding='utf-8')
         assert len(attempts) >= 2, 'must exercise retry'
-        original, shrunk = images(attempts[0]['payload']), images(attempts[3 if http else 1]['payload'])
+        original, retried = images(attempts[0]['payload']), images(attempts[3 if http else 1]['payload'])
         if not original and attempts[0]['payload'].get('previous_response_id'):
             # An incremental request refers to the images already sent in the setup turn.
             original = initial_images
-        assert len(original) == len(shrunk) == len(inputs), 'retain ordered image slots'
-        assert original != shrunk, 'next attempt after threshold must use changed images'
+        assert len(original) == len(retried) == len(inputs), 'retain ordered image slots'
         if http:
+            assert original != retried, 'next attempt after threshold must use changed images'
             assert len(attempts) == 13, 'four tiers trigger after size failures 3/6/9/12'
             assert all(r['transport'] == 'http' for r in attempts)
             for threshold in (3, 6, 9, 12):
@@ -111,19 +113,19 @@ def verify(binary, root, scenario):
                     decoded = Image.open(io.BytesIO(data))
                     decoded.load()
                     assert decoded.format == 'PNG' and decoded.size == (1, 1), 'valid fully decoded placeholder'
-        elif 'fallback' in scenario:
-            assert attempts[1]['transport'] == 'ws', 'one WS retry after first 1009'
-            assert attempts[-1]['transport'] == 'http', 'failed WS retry must fall back'
-            assert images(attempts[-1]['payload']) == shrunk, 'HTTP must not restore original images'
         else:
-            assert all(r['transport'] == 'ws' for r in attempts), 'successful recovery stays WS'
+            # Checklist 3.4/6.1: a WS 1009 switches straight to HTTP and never shrinks images by itself.
+            assert attempts[0]['transport'] == 'ws', 'first compaction attempt uses configured WS'
+            assert all(r['transport'] == 'http' for r in attempts[1:]), '1009 must not retry over WS'
+            assert retried == original, '1009 alone must not change images'
         rpc.turn(tid, 'Continue with a short reply.')
-        configured_transport = 'http' if http else 'ws'
-        assert fixture.requests[-1]['transport'] == configured_transport
+        # HTTP-configured sessions stay on HTTP; WS sessions keep HTTP after the 1009 fallback.
+        session_transport = 'http'
+        assert fixture.requests[-1]['transport'] == session_transport
         start = len(fixture.requests)
         rpc.call('thread/compact/start', {'threadId': tid})
         rpc.wait(lambda v: v.get('method') == 'turn/completed')
-        assert fixture.requests[start]['transport'] == configured_transport, 'next compaction uses configuration'
+        assert fixture.requests[start]['transport'] == session_transport, 'next compaction stays on HTTP'
         assert hashlib.sha256(image_file.read_bytes()).hexdigest() == original_hash, 'disk image must stay unchanged'
         shrunk_events = []
         for file in home.glob('sessions/**/*.jsonl'):
@@ -131,10 +133,13 @@ def verify(binary, root, scenario):
                 record = json.loads(line)
                 if record.get('type') == 'images_shrunk':
                     shrunk_events.append(record)
-        assert shrunk_events, 'image change must be persisted for resume/fork'
+        if http:
+            assert shrunk_events, 'image change must be persisted for resume/fork'
+        else:
+            assert not shrunk_events, '1009 alone must not record an image change'
         report = {'passed': True, 'scenario': scenario, 'transports': [r['transport'] for r in attempts],
-                  'images_changed': True, 'persisted': True, 'disk_original_unchanged': True,
-                  'next_compaction_transport': configured_transport}
+                  'images_changed': http, 'persisted': bool(shrunk_events), 'disk_original_unchanged': True,
+                  'next_compaction_transport': session_transport}
         (root / 'requests.json').write_text(json.dumps(fixture.requests, indent=2), encoding='utf-8')
         (root / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         print(json.dumps(report), flush=True)
