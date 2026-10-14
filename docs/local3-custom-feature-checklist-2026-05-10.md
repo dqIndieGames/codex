@@ -214,7 +214,7 @@ compact 按实际使用的请求方式和阶段验收。使用 Responses 流式�
 - 2026-09-29（`94a51d4dcd`）加入“WS 连续失败 3 次转 HTTP”；普通请求和压缩共用该入口，转 HTTP 后锁定整个会话。0.159.1-local3、0.159.3-local3 为此行为。
 - 2026-10-06 合并 0.160.1（`e01f4d5bc0`）时移除该逻辑，普通 sampling 改为始终保持 WS；0.161.0-local3 再加回仅限当次压缩的降级，并增加首次 1009 先处理图片。
 - 2026-10-14：用户截图显示普通对话因 WS `1009` 连续重连 364 次，约 2 小时 10 分钟。`1009` 表示单条 WS 消息超过服务端上限（社区实测约 16 MiB，非官方公布，见 [openai/codex#38846](https://github.com/openai/codex/issues/38846)）；断线、resume 或上次请求失败后需要整段重发历史，截图 base64 使其超限，原样重发必然再次失败。因此恢复会话级 HTTP 保底：1009 直接转 HTTP，其他失败连续 3 次转 HTTP，普通请求与压缩规则统一；图片处理只在转 HTTP 后仍超限时按计数触发。
-- 现行代码尚未实现本节规则：`codex-rs/core/src/responses_retry.rs` 的普通重试只重置连接、不换协议，`codex-rs/core/src/session/turn.rs` 只按上下文超限升档；实现并按第八节验收前，不得标记完成。
+- 2026-10-14 实现（提交 `7bc9eeaa1c`）：`codex-rs/core/src/client.rs` 增加会话级 HTTP 锁定，`codex-rs/core/src/responses_retry.rs` 在 1009 或连续 3 次 WS 失败时转 HTTP，`codex-rs/core/src/session/turn.rs` 把普通请求的 413 计入升档。当时按第八节用 run `38497878721` 的 exe 本地验收通过，发布为 `rust-v0.162.1-local3-ws-http-fallback-20261014`；后续版本仍需重新验收。
 
 ### 3.5 中转粘连恢复：每连续 3 次检查一次
 
@@ -358,7 +358,7 @@ HTTP request retry 和 stream / WS reconnect 是不同链路。调整其中一�
 - HTTP telemetry 需要累计已被 route recovery 消费的 retry offset。
 - 只减少下一轮 `max_attempts` 不够；新 client 的 `on_request_retry(1, ...)` 仍会造成显示回绕。
 - stream / WS 的内部 `retries` 用于恢复周期；独立 display retry 用于展示。
-- 展示计数变化不能改变固定 `10s` 等待或触发协议切换；协议切换由 3.4 的会话级连续失败计数和 HTTP 锁定状态控制。
+- 展示计数变化不能改变固定 `10s` 等待或触发协议切换；协议切换由 3.4 的连续失败计数和会话级 HTTP 锁定状态控制。
 
 **旧等待口径残留｜2026-07-03**
 

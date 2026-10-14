@@ -76,6 +76,18 @@ def verify(binary, root, scenario):
         original_hash = hashlib.sha256(png).hexdigest()
         inputs = [{'type': 'localImage', 'path': str(image_file), 'detail': 'original'} for _ in range(7)]
         rpc.turn(tid, 'Remember these images.', inputs)
+        if scenario == 'sampling-http413':
+            attempts = fixture.requests
+            (root / 'requests.json').write_text(json.dumps(attempts, indent=2), encoding='utf-8')
+            original = images(attempts[0]['payload'])
+            # Checklist 6.1: sampling counts HTTP 413 with context overflow; the third one shrinks images.
+            assert len(attempts) == 4 and all(r['transport'] == 'http' for r in attempts)
+            assert all(images(r['payload']) == original for r in attempts[:3]), 'do not shrink before three 413s'
+            assert images(attempts[3]['payload']) != original, 'shrink after three consecutive 413s'
+            report = {'passed': True, 'scenario': scenario, 'consecutive_413_counter': True}
+            (root / 'result.json').write_text(json.dumps(report), encoding='utf-8')
+            print(json.dumps(report), flush=True)
+            return
         if scenario == 'sampling-context':
             attempts = fixture.requests
             (root / 'requests.json').write_text(json.dumps(attempts, indent=2), encoding='utf-8')

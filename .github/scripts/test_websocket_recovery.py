@@ -178,7 +178,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         payload = json.loads(self.read_exact(int(self.headers["Content-Length"])))
         compact = self.server.record("http", payload, self.headers.get("User-Agent"))
-        if compact and "http413" in self.server.scenario and len(self.server.failures) < 12:
+        sampling_413 = self.server.scenario == "sampling-http413"
+        limit = 3 if sampling_413 else 12
+        if ((compact or sampling_413) and "http413" in self.server.scenario
+                and len(self.server.failures) < limit):
             self.server.failures.append(time.monotonic())
             body = b'{"error":{"message":"fixture request too large"}}'
             self.send_response(413)
