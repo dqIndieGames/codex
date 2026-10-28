@@ -13,16 +13,10 @@ use codex_api::map_api_error;
 use codex_login::default_client::default_headers;
 use http::StatusCode;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 use tokio::time::sleep;
 use tracing::info;
 use tracing::warn;
-
-const RECONNECT_BASE_DELAY: Duration = Duration::from_millis(200);
-const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(5);
-const STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(30);
 
 pub(super) fn spawn_webrtc_sideband_input_task(
     input: RealtimeWebrtcSidebandInputTask,
@@ -45,7 +39,6 @@ pub(super) fn spawn_webrtc_sideband_input_task(
 
     tokio::spawn(async move {
         let mut reconnecting = false;
-        let mut rapid_disconnects = 0_u32;
         let mut pending_outbound = None;
         let transcript_state = match &session_initialization {
             RealtimeSidebandSessionInitialization::ExistingCall {
@@ -114,7 +107,6 @@ pub(super) fn spawn_webrtc_sideband_input_task(
                 break;
             }
 
-            let connected_at = Instant::now();
             let exit = run_realtime_input_task(
                 RealtimeInputTask {
                     writer: connection.writer(),
@@ -152,15 +144,12 @@ pub(super) fn spawn_webrtc_sideband_input_task(
                 report_realtime_transport_loss(&events_tx, err).await;
                 break;
             }
-            if connected_at.elapsed() >= STABLE_CONNECTION_DURATION {
-                rapid_disconnects = 0;
-            }
-            rapid_disconnects = rapid_disconnects.saturating_add(1);
-            let delay = reconnect_delay(rapid_disconnects);
-            warn!(
+            let mapped_error = map_api_error(err);
+            let delay = mapped_error.server_retry_delay().unwrap_or_else(codex_client::fixed_retry_delay);
+            tracing::debug!(
                 call_id,
                 delay_ms = delay.as_millis(),
-                "live sideband transport lost; reconnecting: {err}"
+                "live sideband transport lost; reconnecting: {mapped_error}"
             );
             reconnecting = true;
             tokio::select! {
@@ -183,12 +172,6 @@ fn webrtc_sideband_session_ended(err: &ApiError) -> bool {
     )
 }
 
-fn reconnect_delay(rapid_disconnects: u32) -> Duration {
-    let multiplier = 2_u32.saturating_pow(rapid_disconnects.saturating_sub(1));
-    RECONNECT_BASE_DELAY
-        .saturating_mul(multiplier)
-        .min(RECONNECT_MAX_DELAY)
-}
 
 #[cfg(test)]
 #[path = "sideband_tests.rs"]

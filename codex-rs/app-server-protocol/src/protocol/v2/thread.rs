@@ -312,6 +312,10 @@ pub struct ThreadSettings {
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub model: String,
     pub model_provider: String,
+    /// Whether the active provider resolves to an official OpenAI route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_provider_is_official: Option<bool>,
     pub service_tier: Option<String>,
     pub effort: Option<ReasoningEffort>,
     pub summary: Option<ReasoningSummary>,

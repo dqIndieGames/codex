@@ -112,6 +112,7 @@ pub struct ThreadConfigSnapshot {
     pub turn_extension_init: codex_extension_api::ExtensionDataInit,
     pub model: String,
     pub model_provider_id: String,
+    pub model_provider_is_official: bool,
     pub service_tier: Option<String>,
     pub approval_policy: AskForApproval,
     pub approvals_reviewer: ApprovalsReviewer,

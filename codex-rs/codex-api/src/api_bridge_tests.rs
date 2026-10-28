@@ -31,7 +31,7 @@ fn map_api_error_preserves_content_filter_retry_and_public_error() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn map_api_error_preserves_server_advice_independently_of_fixed_retry() {
+async fn map_api_error_preserves_server_advice_independently_of_attempt() {
     let retry_delay = std::time::Duration::from_secs(17);
     let retry_after = RetryAfter::from_delay(retry_delay).expect("retry advice");
     for (error, expected_code, expected_message) in [
@@ -53,10 +53,10 @@ async fn map_api_error_preserves_server_advice_independently_of_fixed_retry() {
         ),
     ] {
         let err = map_api_error(error);
-        // Checklist #3: advice is retained, but never changes local retry policy.
+        // Checklist 3.1: advice sets the wait without changing the retry budget.
         assert!(err.is_retryable());
         assert_eq!(err.retry_delay(1), err.retry_delay(99));
-        assert_ne!(err.retry_delay(1), Some(retry_delay));
+        assert_eq!(err.retry_delay(1), Some(retry_delay));
         assert_eq!(
             (
                 err.to_codex_protocol_error(),
@@ -102,11 +102,7 @@ async fn http_retry_deadline_survives_mapping_and_respects_terminal_errors() {
             (Some(advice), Some(Duration::from_secs(6))),
             "{code}",
         );
-        assert_eq!(
-            error.retry_delay(/*retry_count*/ 1),
-            retryable.then_some(Duration::from_secs(6)),
-            "{code}",
-        );
+        assert_eq!(error.retry_delay(1), error.is_retryable().then(|| advice.remaining_delay()), "{code}");
         if status == 429 && retryable {
             assert_eq!(
                 (

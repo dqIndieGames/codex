@@ -290,6 +290,7 @@ mod tests {
 
     fn thread_settings(model: &str) -> ThreadSettings {
         ThreadSettings {
+            model_provider_is_official: None,
             disabled_plugin_ids: Vec::new(),
             cwd: AbsolutePathBuf::from_absolute_path("/tmp").expect("absolute path"),
             approval_policy: AskForApproval::OnRequest,

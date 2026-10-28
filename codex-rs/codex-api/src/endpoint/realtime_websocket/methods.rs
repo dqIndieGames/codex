@@ -1130,7 +1130,16 @@ impl RealtimeWebsocketClient {
                         transport = transport_label,
                         "realtime websocket connect failed; retrying"
                     );
-                    sleep(delay).await;
+                    let deadline = tokio::time::Instant::now() + delay;
+                    while tokio::time::Instant::now() < deadline {
+                        if self.request_retry_guard.as_ref().is_some_and(|guard| !guard()) {
+                            return Err(ApiError::Transport(TransportError::RetryInterrupted(
+                                "provider runtime changed during realtime retry".to_string(),
+                            )));
+                        }
+                        sleep(deadline.saturating_duration_since(tokio::time::Instant::now())
+                            .min(Duration::from_millis(250))).await;
+                    }
                 }
                 Err(err) => return Err(err),
             }

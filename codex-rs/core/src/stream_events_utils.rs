@@ -106,7 +106,7 @@ pub(crate) fn prepend_text_to_assistant_response_item(
     }
 
     if let Some(text) = content.iter_mut().find_map(|entry| match entry {
-        codex_protocol::models::ContentItem::OutputText { text } => Some(text),
+        codex_protocol::models::ContentItem::OutputText { text, .. } => Some(text),
         _ => None,
     }) {
         if !text.starts_with(prefix) {

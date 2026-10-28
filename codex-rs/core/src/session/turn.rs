@@ -3088,6 +3088,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        executed_tools,
                     });
                 }
                 break Err(err);

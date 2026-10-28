@@ -126,7 +126,7 @@
 - 普通 sampling。
 - Responses HTTP request retry。
 - SSE / WebSocket 流式重连。
-- local compact、旧 remote compact `/responses/compact`、remote compaction v2。
+- 当前版本的 local compact、remote compaction v2；旧版本的 `/responses/compact` 迁移说明见 3.6。
 - realtime WebSocket connect、WebRTC sideband join。
 - TUI、exec、subagent、agent_jobs 中对应的模型请求入口。
 
@@ -219,7 +219,7 @@ compact 按实际使用的请求方式和阶段验收。使用 Responses 流式�
 
 ### 3.4 Responses WS 失败转 HTTP 保底
 
-本节适用于选用 Responses WebSocket 的普通 sampling 和各压缩入口（local compact、旧 `/responses/compact`、remote compaction v2），两者使用同一套规则；官方和中转均执行。realtime 和 WebRTC 按 3.6 的 realtime 规则处理，不转 HTTP；原本使用 HTTP 的入口继续使用 HTTP。
+本节适用于选用 Responses WebSocket 的普通 sampling 和各压缩入口（local compact、remote compaction v2），两者使用同一套规则；官方和中转均执行。realtime 和 WebRTC 按 3.6 的 realtime 规则处理，不转 HTTP；原本使用 HTTP 的入口继续使用 HTTP。
 
 | 情况 | 处理 |
 |---|---|
@@ -280,19 +280,19 @@ sticky-break 指清除 Codex 可控的中转粘连信号；recovery generation �
 
 **compact：长会话的上下文压缩**
 
-local compact、旧 `/responses/compact`、remote compaction v2 分别验收：
+官方 0.165.0 已移除旧 `/responses/compact` 实现，远端压缩统一为 remote compaction v2；不恢复已移除接口。当前分别验收 local compact 和 remote compaction v2，重试、图片策略和历史保护要求保持不变。维护更早版本时，旧入口仍须独立验收。
 
 - 默认模式必须重试。
 - 每连续 3 次失败按实际 URL 判断是否执行中转粘连恢复。
 - 不能因 compact 专属预算或默认配置，在第 3 次之前提前终态。
 - 显式 bounded / zero 仍按用户设置处理。
-- 旧 `/responses/compact` 的 request retry 必须展示临时 `503 retry N` 或 `Reconnecting... N`。
+- 压缩请求重试必须展示临时 `503 retry N` 或 `Reconnecting... N`。
 - 只证明第四次请求 cache key 变化，不足以证明前三次提示和历史隔离正确。
 
 #### 压缩共用图片策略
 
 - HTTP 和 WS 压缩均接入第六节的四档图片梯子，覆盖自动压缩和手动压缩。
-- local compact、旧 `/responses/compact`、remote compaction v2 分别核对：携带历史图片的请求必须使用处理后的图片；使用 WS 的入口执行 3.4 的 HTTP 保底规则。
+- local compact、remote compaction v2 分别核对：携带历史图片的请求必须使用处理后的图片；使用 WS 的入口执行 3.4 的 HTTP 保底规则。
 - 启动上下文压缩本身不触发图片降档；只有上下文超限或 HTTP 413 按第六节计数触发，WS 1009 只触发转 HTTP。
 - 下一次请求必须使用处理后的历史，不能继续发送压缩开始时保存的旧图片副本。
 - 切换 HTTP 保留图片处理结果、档位和超限计数，不恢复已经降档或替换的旧图。
@@ -420,7 +420,7 @@ HTTP request retry 和 stream / WS reconnect 是不同链路。调整其中一�
 - `server_is_overloaded` 按 `ServerOverloaded` 处理；`turn_rate_limit_exceeded` 按限流错误处理。两者均须进入 retry / recovery，并保留等待建议直至实际等待；不能仅凭 capacity 文案统一分类，也不能只改 UI 或 `is_retryable()`。
 - sampling、local compact、remote compaction v2 都可能把错误转为终态 `ErrorEvent`，须逐条覆盖。
 - compact 必须同时验证自动重试、按实际 URL 恢复、两种协议的图片策略、1009 直接转 HTTP，以及转 HTTP 后本会话保持 HTTP。
-- Responses 通过不能代替 realtime、WebRTC sideband 和旧 remote compact 验收。
+- 普通 Responses 通过不能代替 realtime、WebRTC sideband 和各现存压缩入口验收；维护含旧 remote compact 的版本时，也须单独验证旧入口。
 
 **静态复核｜2026-10-09**
 

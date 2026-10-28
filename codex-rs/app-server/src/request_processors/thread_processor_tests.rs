@@ -802,6 +802,7 @@ mod thread_processor_behavior_tests {
         };
         let config_snapshot = ThreadConfigSnapshot {
             turn_extension_init: Default::default(),
+            model_provider_is_official: true,
             disabled_plugin_ids: Vec::new(),
             model: "gpt-5".to_string(),
             model_provider_id: "openai".to_string(),
@@ -870,6 +871,7 @@ mod thread_processor_behavior_tests {
         };
         let config_snapshot = ThreadConfigSnapshot {
             model: "gpt-5".to_string(),
+            model_provider_is_official: false,
             model_provider_id: "yunyi".to_string(),
             service_tier: None,
             approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,

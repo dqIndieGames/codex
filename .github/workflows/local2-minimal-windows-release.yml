@@ -33,9 +33,8 @@ jobs:
             local3-160-windows-latest-build-
             local3-159-windows-latest-build-
 
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
-          toolchain: "1.99.1"
           targets: x86_64-pc-windows-msvc
 
       - name: Configure official sandboxed V8 artifacts

@@ -51,12 +51,13 @@ class AdviceHandler(Handler):
 
 
 class AdviceFixture(Fixture):
-    def __init__(self, mode, advice, location, failures=1, message=None):
+    def __init__(self, mode, advice, location, failures=1, message=None, code='turn_rate_limit_exceeded'):
         super().__init__('healthy')
         self.RequestHandlerClass = AdviceHandler
         self.mode, self.advice, self.location = mode, advice, location
         self.limit = failures
         self.message = message or 'Codex is at capacity, please try again later'
+        self.code = code
         self.release = threading.Event()
         self.deadlines = []
         self.tool_sent = True
@@ -66,12 +67,17 @@ class AdviceFixture(Fixture):
             return None
         now = time.monotonic()
         self.failures.append(now)
-        error = {'code': 'turn_rate_limit_exceeded', 'message': self.message}
+        error = {'code': self.code, 'message': self.message}
         event = {'type': 'response.failed', 'response': {'id': 'resp_failed', 'error': error}}
         if self.location.startswith('error'):
             event = {'type': 'error', 'error': error, 'status': 429}
         if self.advice is not None:
-            headers = {'rEtRy-AfTeR': self.advice}
+            advice = self.advice
+            if advice == 'future-date':
+                target = (datetime.now(timezone.utc) + timedelta(seconds=3)).replace(microsecond=0)
+                self.deadlines.append((target - datetime.now(timezone.utc)).total_seconds())
+                advice = format_datetime(target, usegmt=True)
+            headers = {'rEtRy-AfTeR': advice}
             if self.location in ('nested', 'error-nested'):
                 error['headers'] = headers
             elif self.location == 'response':
@@ -89,8 +95,8 @@ class AdviceFixture(Fixture):
         return [event] if event else super().events(payload, compact)
 
 
-def verify(binary, output, name, mode, advice, location, expected, failures=1, message=None):
-    fixture = AdviceFixture(mode, advice, location, failures, message)
+def verify(binary, output, name, mode, advice, location, expected, failures=1, message=None, code='turn_rate_limit_exceeded'):
+    fixture = AdviceFixture(mode, advice, location, failures, message, code)
     thread = threading.Thread(target=fixture.serve_forever, daemon=True)
     thread.start()
     try:
@@ -110,10 +116,11 @@ def verify(binary, output, name, mode, advice, location, expected, failures=1, m
         assert result.returncode == 0 and 'WS_RECOVERY_OK' in result.stdout, (name, result.stderr[-2500:], result.stdout[-1500:])
         waits = []
         assert len(fixture.failures) == failures, (name, fixture.failures)
-        for failed in fixture.failures:
+        for index, failed in enumerate(fixture.failures):
             next_at = min(r['at'] for r in fixture.requests if r['at'] > failed)
             wait = next_at - failed
-            assert expected - .1 <= wait <= expected + 4, (name, expected, wait)
+            required = fixture.deadlines[index] if expected is None else expected
+            assert required - .1 <= wait <= required + 4, (name, required, wait)
             waits.append(round(wait, 3))
         report = {'case': name, 'passed': True, 'waits': waits,
                   'requests': [{k: v for k, v in r.items() if k != 'payload'} for r in fixture.requests]}
@@ -143,11 +150,14 @@ if __name__ == '__main__':
         ('ws-error', 'ws', '2', 'error-nested', 2),
         ('sse-zero', 'sse', '0', 'nested', 0),
         ('sse-expired', 'sse', 'Wed, 21 Oct 2015 07:28:00 GMT', 'top', 0),
+        ('sse-date', 'sse', 'future-date', 'top', None),
         ('sse-invalid', 'sse', '-1', 'top', RETRY_SECONDS),
         ('sse-missing', 'sse', None, 'top', RETRY_SECONDS),
         ('http-recovery', 'http', '0', 'nested', 0, 6),
         ('ws-fallback', 'ws', '2', 'nested', 2, 4),
         ('sse-text', 'sse', 'invalid', 'nested', 2, 1, 'Please try again in 2s.'),
+        ('ws-text', 'ws', 'invalid', 'error-nested', 2, 1, 'Please try again in 2s.'),
+        ('sse-context', 'sse', '2', 'nested', 2, 1, None, 'context_length_exceeded'),
     ]
     requested = set(sys.argv[3:])
     for case in cases:

@@ -186,6 +186,7 @@ pub(crate) fn thread_settings_from_config_snapshot(
         ),
         model: config_snapshot.model.clone(),
         model_provider: config_snapshot.model_provider_id.clone(),
+        model_provider_is_official: Some(config_snapshot.model_provider_is_official),
         service_tier: config_snapshot.service_tier.clone(),
         effort: config_snapshot.reasoning_effort.clone(),
         summary: config_snapshot.reasoning_summary,

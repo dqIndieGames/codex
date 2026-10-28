@@ -560,21 +560,10 @@ fn local1_first_turn_checklist_prefix_contains_current_local3_items() {
         "local3 定制功能已启用（当前版本：{}-local3）",
         env!("CARGO_PKG_VERSION")
     )));
-    assert!(prefix.contains("1. local3 版本身份保留"));
-    assert!(prefix.contains("3. 远端模型主链失败后的自动重试覆盖所有会直接终止一次 Codex 对话"));
-    assert!(prefix.contains("9. Provider refresh 的刷新范围扩大到所有正在使用的 Codex 入口"));
-    assert!(prefix.contains("10. Provider refresh 不是只在 retry 时才生效"));
-    assert!(prefix.contains("11. 所有 Codex retry 入口都要接入 hard route recovery"));
-    assert!(prefix.contains("12. 无 live instance 的 provider 字段复制仍视为成功"));
-    assert!(prefix.contains("13. app-server stderr 默认保持安静"));
-    assert!(prefix.contains("14. `node_repl` MCP 自动继承当前 local3 CLI 路径"));
-    assert!(prefix.contains("15. app-server 退出时只补已有 runtime 引用清理"));
-    assert!(prefix.contains("16. 配置了 `experimental_bearer_token` 的 provider"));
-    assert!(
-        prefix.contains("17. Windows 交付必须分为 GitHub build 和 GitHub release promotion 两段")
-    );
-    assert!(prefix.contains("18. context window 溢出后按图片梯子自愈"));
-    assert!(prefix.contains("19. 全局 `--account <账号名>` 只切换 Codex 登录凭据"));
+    // The maintained checklist is the copy source; all documented entries must be shown.
+    for (number, entry) in local3_first_turn_checklist_entries() {
+        assert!(prefix.contains(&format!("{number}. {entry}")));
+    }
     assert!(!prefix.contains("-local2"));
     assert!(prefix.ends_with("\n\n"));
 }

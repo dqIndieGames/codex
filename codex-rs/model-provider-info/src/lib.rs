@@ -319,6 +319,21 @@ fn default_aws_auth_refresh_timeout_ms() -> NonZeroU64 {
 }
 
 impl ModelProviderInfo {
+    /// Classifies the resolved default or configured route, independently of its display name.
+    pub fn uses_official_openai_route(&self) -> bool {
+        if self.is_amazon_bedrock() {
+            return false;
+        }
+        match self.base_url.as_deref() {
+            Some(base_url) => base_url.parse::<http::Uri>().ok().is_some_and(|url| {
+                matches!(url.scheme_str(), Some("https" | "wss"))
+                    && url.host().is_some_and(|host| host.eq_ignore_ascii_case("chatgpt.com")
+                        || host.eq_ignore_ascii_case("api.openai.com"))
+            }),
+            None => true,
+        }
+    }
+
     /// Returns the configured provider-scoped bearer token when it is non-empty.
     ///
     /// Whitespace-only values are treated as absent so a config typo does not

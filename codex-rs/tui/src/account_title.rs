@@ -12,13 +12,10 @@ static PREFIX: Mutex<String> = Mutex::new(String::new());
 pub(crate) fn initialize(config: &Config) -> io::Result<()> {
     let provider = config.model_providers.get(&config.model_provider_id)
         .unwrap_or(&config.model_provider);
-    let official = match provider.base_url.as_deref() {
-        Some(base_url) => url::Url::parse(base_url).ok().is_some_and(|url| {
-            matches!(url.scheme(), "https" | "wss")
-                && matches!(url.host_str(), Some("chatgpt.com" | "api.openai.com"))
-        }),
-        None => provider.requires_openai_auth && !provider.is_amazon_bedrock(),
-    };
+    initialize_effective(config, provider.uses_official_openai_route())
+}
+
+pub(crate) fn initialize_effective(config: &Config, official: bool) -> io::Result<()> {
     if !official {
         let initial = config.model_provider_id.chars().next().unwrap_or('?').to_ascii_lowercase();
         *PREFIX.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = format!("[{initial}] ");

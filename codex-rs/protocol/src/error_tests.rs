@@ -81,9 +81,9 @@ fn retryability_preserves_error_details_distinctions() {
     }
 }
 
-/// Product truth: local3 checklist item 3 fixes delay and retries remote quota errors.
-#[test]
-fn retry_delay_is_fixed_independent_of_advice_and_attempt() {
+/// Checklist 3.1: the supplied deadline controls waiting independently of attempt count.
+#[tokio::test(start_paused = true)]
+async fn retry_delay_obeys_advice_independently_of_attempt() {
     for advised in [Duration::ZERO, Duration::from_secs(30)] {
         let advice = RetryAfter::from_delay(advised).expect("retry deadline");
         for error in [
@@ -93,7 +93,7 @@ fn retry_delay_is_fixed_independent_of_advice_and_attempt() {
         ] {
             let error = error.with_retry_after(advice);
             for attempt in [1, 3, 6] {
-                assert_eq!(error.retry_delay(attempt), Some(Duration::from_secs(10)));
+                assert_eq!(error.retry_delay(attempt), Some(advised));
             }
             assert!(error.retry_after().is_some());
         }

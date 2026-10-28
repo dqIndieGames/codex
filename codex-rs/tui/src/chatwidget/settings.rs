@@ -500,7 +500,11 @@ impl ChatWidget {
         let cwd_changed = self.config.cwd != settings.cwd;
         self.apply_thread_settings_cwd(settings.cwd.clone());
         self.config.model_provider_id = settings.model_provider.clone();
-        if let Err(error) = crate::account_title::initialize(&self.config) {
+        let title_result = match settings.model_provider_is_official {
+            Some(official) => crate::account_title::initialize_effective(&self.config, official),
+            None => crate::account_title::initialize(&self.config),
+        };
+        if let Err(error) = title_result {
             tracing::warn!(%error, "failed to refresh terminal account title");
         }
         self.last_terminal_title = None;
