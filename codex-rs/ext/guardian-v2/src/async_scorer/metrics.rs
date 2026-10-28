@@ -29,7 +29,13 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
         LunaSamplerError::IncompatibleCompaction => "incompatible_compaction",
         LunaSamplerError::InputTooLarge => "input_too_large",
         LunaSamplerError::QueueFull => "queue_full",
-        LunaSamplerError::Api(error) => match error {
+        LunaSamplerError::Api(error) => api_failure_reason(error),
+    }
+}
+
+fn api_failure_reason(error: &ApiError) -> &'static str {
+    match error {
+            ApiError::WithRetryAfter { error, .. } => api_failure_reason(error),
             ApiError::Transport(TransportError::Http { status, .. })
             | ApiError::Api { status, .. } => match status.as_u16() {
                 401 => "http_401",
@@ -61,7 +67,6 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             | ApiError::MisalignmentPolicyViolation { .. } => "policy_error",
             ApiError::ServerOverloaded { .. } => "server_overloaded",
             ApiError::FlexUnavailable => "flex_unavailable",
-        },
     }
 }
 

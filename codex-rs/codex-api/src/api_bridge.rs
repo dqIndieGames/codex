@@ -45,6 +45,7 @@ fn retryable_stream(message: String) -> CodexErr {
 
 fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
     let retry_after = match &err {
+        ApiError::WithRetryAfter { retry_after, .. } => Some(*retry_after),
         ApiError::Retryable { retry_after, .. }
         | ApiError::RateLimitExceeded { retry_after, .. }
         | ApiError::ServerOverloaded { retry_after }
@@ -75,6 +76,7 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
 
 fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
     match err {
+        ApiError::WithRetryAfter { error, .. } => map_api_error_with_mode(*error, mode),
         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
@@ -141,7 +143,7 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                 let parsed_body = serde_json::from_str::<Value>(&body_text).ok();
                 let provider_error = parsed_body.as_ref().and_then(|body| body.get("error"));
                 if let Some(error) = parse_terminal_provider_error(provider_error, Some(status)) {
-                    return map_api_error_details(error);
+                    return map_api_error_details(error, mode);
                 }
 
                 if status == http::StatusCode::BAD_REQUEST

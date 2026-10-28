@@ -2442,6 +2442,7 @@ fn websocket_probe_warning(
 
 fn websocket_error_detail(err: &ApiError) -> String {
     match err {
+        ApiError::WithRetryAfter { error, .. } => websocket_error_detail(error),
         ApiError::Transport(transport) => format!("handshake transport error: {transport}"),
         ApiError::Api { status, message } => {
             format!("handshake API error: {status} {message}")

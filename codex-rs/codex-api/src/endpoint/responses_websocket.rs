@@ -681,6 +681,16 @@ fn map_wrapped_websocket_error_event(
     .flatten()
     .find_map(|headers| RetryAfter::from_headers(&json_headers_to_http_headers(headers)));
 
+    if error.as_ref().and_then(|error| error.code.as_deref()).is_some_and(|code|
+        matches!(code, "rate_limit_exceeded" | "turn_rate_limit_exceeded" | "slow_down"))
+    {
+        let payload: Value = serde_json::from_str(&original_payload).ok()?;
+        return Some(crate::sse::parse_failed_response(
+            Some(serde_json::json!({"error": payload.get("error")})),
+            payload.get("headers").cloned(),
+        ));
+    }
+
     if let Some(error) = error.as_ref()
         && let Some(code) = error.code.as_deref()
         && let Some(fallback_message) = match code {

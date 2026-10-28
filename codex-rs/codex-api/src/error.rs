@@ -9,6 +9,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
+    #[error("{error}")]
+    WithRetryAfter {
+        error: Box<ApiError>,
+        retry_after: RetryAfter,
+    },
     #[error(transparent)]
     Transport(#[from] TransportError),
     #[error("api error {status}: {message}")]
@@ -59,6 +64,18 @@ pub enum ApiError {
     FlexUnavailable,
     #[error("server overloaded")]
     ServerOverloaded { retry_after: Option<RetryAfter> },
+}
+
+impl ApiError {
+    pub(crate) fn with_retry_after(self, advice: Option<RetryAfter>) -> Self {
+        if matches!(&self, Self::Retryable { .. } | Self::RateLimitExceeded { .. } | Self::ServerOverloaded { .. }) {
+            return self;
+        }
+        match advice {
+            Some(retry_after) => Self::WithRetryAfter { error: Box::new(self), retry_after },
+            None => self,
+        }
+    }
 }
 
 impl From<RateLimitError> for ApiError {

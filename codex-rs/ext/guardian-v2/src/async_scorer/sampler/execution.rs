@@ -137,6 +137,9 @@ impl SamplingExecution {
         retries: &mut usize,
     ) -> bool {
         let retryable = match error {
+            LunaSamplerError::Api(ApiError::WithRetryAfter { error, .. }) => {
+                matches!(error.as_ref(), ApiError::FlexUnavailable)
+            }
             LunaSamplerError::ConnectionTimeout
             | LunaSamplerError::Api(
                 ApiError::Retryable { .. }

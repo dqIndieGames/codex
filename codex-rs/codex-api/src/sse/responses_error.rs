@@ -23,7 +23,7 @@ struct Error {
     misalignment: Option<Value>,
 }
 
-pub(super) fn parse_failed_response(response: Option<Value>, headers: Option<Value>) -> ApiError {
+pub(crate) fn parse_failed_response(response: Option<Value>, headers: Option<Value>) -> ApiError {
     let error = response.as_ref().and_then(|response| response.get("error"));
     let retry_after_header = [
         error.and_then(|error| error.get("headers")),
@@ -32,7 +32,7 @@ pub(super) fn parse_failed_response(response: Option<Value>, headers: Option<Val
     ].into_iter().flatten().filter_map(Value::as_object)
         .find_map(|headers| RetryAfter::from_headers(&json_headers_to_http_headers(headers)));
     if let Some(error) = parse_terminal_provider_error(error, /*status*/ None) {
-        return error;
+        return error.with_retry_after(retry_after_header);
     }
     let Some(error) = error.and_then(|error| serde_json::from_value::<Error>(error.clone()).ok())
     else {
@@ -46,7 +46,7 @@ pub(super) fn parse_failed_response(response: Option<Value>, headers: Option<Val
         };
     };
 
-    match error.code.as_deref() {
+    let parsed = match error.code.as_deref() {
         Some("context_length_exceeded") => ApiError::ContextWindowExceeded,
         Some(
             "insufficient_quota"
@@ -101,7 +101,8 @@ pub(super) fn parse_failed_response(response: Option<Value>, headers: Option<Val
             message: error.message.unwrap_or_default(),
             retry_after: retry_after_header,
         },
-    }
+    };
+    parsed.with_retry_after(retry_after_header)
 }
 
 fn try_parse_retry_delay(err: &Error) -> Option<Duration> {

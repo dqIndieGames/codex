@@ -164,6 +164,7 @@ fn safe_endpoint_from_url(url: Option<&str>) -> Option<String> {
 
 pub fn telemetry_api_error_message(error: &ApiError) -> String {
     match error {
+        ApiError::WithRetryAfter { error, .. } => telemetry_api_error_message(error),
         ApiError::Transport(transport) => telemetry_transport_error_message(transport),
         ApiError::Api { status, .. } => format!("api error {}", status.as_u16()),
         ApiError::Stream(err) => err.to_string(),
