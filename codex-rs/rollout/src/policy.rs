@@ -184,6 +184,7 @@ fn persisted_event_msg(
         | EventMsg::ModelVerification(_)
         | EventMsg::TurnModerationMetadata(_)
         | EventMsg::AgentReasoningSectionBreak(_)
+        | EventMsg::PrivateSessionEvent(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::RawResponseCompleted(_)
         | EventMsg::SessionConfigured(_)
@@ -197,6 +198,7 @@ fn persisted_event_msg(
         | EventMsg::RequestPermissions(_)
         | EventMsg::RequestUserInput(_)
         | EventMsg::ElicitationRequest(_)
+        | EventMsg::ElicitationAbandoned(_)
         | EventMsg::ApplyPatchApprovalRequest(_)
         | EventMsg::StreamError(_)
         | EventMsg::PatchApplyBegin(_)
@@ -282,3 +284,7 @@ fn persisted_item_completed_event<'a>(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "policy_tests.rs"]
+mod tests;

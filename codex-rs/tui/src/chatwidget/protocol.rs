@@ -112,7 +112,11 @@ impl ChatWidget {
                 self.last_non_retry_error = None;
                 if !matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages)) {
                     self.warning_display_state.startup_complete = true;
-                    self.on_task_started();
+                    if from_replay {
+                        self.on_replayed_task_started(notification.turn.started_at);
+                    } else {
+                        self.on_task_started();
+                    }
                 }
             }
             ServerNotification::TurnCompleted(notification) => {
@@ -137,6 +141,8 @@ impl ChatWidget {
                             &notification.item_id,
                         ))
                 {
+                    self.transcript.active_streamed_agent_message =
+                        Some((notification.turn_id, notification.item_id));
                     self.on_agent_message_delta(notification.delta);
                 }
             }
@@ -358,7 +364,7 @@ impl ChatWidget {
             }
             ServerNotification::ThreadRealtimeError(notification) => {
                 if !from_replay {
-                    self.on_realtime_error(notification.message);
+                    self.on_realtime_error(notification.message, RealtimeFailureCause::Backend);
                 }
             }
             ServerNotification::ThreadRealtimeClosed(notification) => {
@@ -372,6 +378,7 @@ impl ChatWidget {
             | ServerNotification::AccountRateLimitsUpdated(_)
             | ServerNotification::ThreadStarted(_)
             | ServerNotification::ThreadStatusChanged(_)
+            | ServerNotification::ThreadReadStateChanged(_)
             | ServerNotification::ThreadReverted(_)
             | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadPredictionUpdated(_)

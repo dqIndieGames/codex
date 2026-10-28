@@ -4,13 +4,14 @@ use crate::common::ResponseStream;
 use crate::common::SafetyBuffering;
 use crate::common::SafetyBufferingTreatment;
 use crate::error::ApiError;
-use crate::error::parse_flex_unavailable;
+use crate::error::parse_terminal_provider_error;
 use crate::rate_limits::parse_all_rate_limits;
 use crate::safety_buffering::treatment_from_headers;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
 use codex_protocol::ResponseUsageMetadata;
+use codex_protocol::error::ResponseIncompleteError;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ModelVerification;
 use codex_protocol::protocol::TokenUsage;
@@ -363,9 +364,9 @@ pub fn process_responses_event(
 ) -> std::result::Result<Option<ResponseEvent>, ResponsesEventError> {
     match event.kind.as_str() {
         "error" => {
-            if let Some(error) = event.error.as_ref().and_then(parse_flex_unavailable) {
-                return Err(ResponsesEventError::Api(error));
-            }
+            return Err(ResponsesEventError::Api(parse_failed_response(
+                Some(serde_json::json!({"error": event.error})), event.headers,
+            )));
         }
         "response.output_item.done" => {
             if let Some(item_val) = event.item {
@@ -430,6 +431,7 @@ pub fn process_responses_event(
         "response.failed" => {
             return Err(ResponsesEventError::Api(parse_failed_response(
                 event.response,
+                event.headers,
             )));
         }
         "response.completed" | "response.incomplete" => {
@@ -446,8 +448,24 @@ pub fn process_responses_event(
                     return Err(ResponsesEventError::Api(ApiError::ContentFilter));
                 }
                 if reason != "interrupted" {
-                    let message = format!("Incomplete response returned, reason: {reason}");
-                    return Err(ResponsesEventError::Api(ApiError::Stream(message)));
+                    let response = event.response.as_ref();
+                    let response_id = response
+                        .and_then(|response| response.get("id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let token_usage = response
+                        .and_then(|response| response.get("usage"))
+                        .and_then(|usage| {
+                            serde_json::from_value::<ResponseCompletedUsage>(usage.clone()).ok()
+                        })
+                        .map(Into::into);
+                    return Err(ResponsesEventError::Api(ApiError::ResponseIncomplete(
+                        Box::new(ResponseIncompleteError {
+                            reason: reason.to_string(),
+                            response_id,
+                            token_usage,
+                        }),
+                    )));
                 }
             }
             if let Some(resp_val) = event.response {
@@ -548,7 +566,6 @@ async fn process_sse_with_treatment(
     safety_buffering_treatment: SafetyBufferingTreatment,
 ) {
     let mut stream = stream.eventsource();
-    let mut response_error: Option<ApiError> = None;
     let mut last_server_model: Option<String> = None;
 
     let mut seen_model_event = false;
@@ -578,9 +595,9 @@ async fn process_sse_with_treatment(
                 return;
             }
             Ok(None) => {
-                let error = response_error.unwrap_or(ApiError::Stream(
+                let error = ApiError::Stream(
                     "stream closed before response.completed".into(),
-                ));
+                );
                 let _ = tx_event.send(Err(error)).await;
                 return;
             }
@@ -678,11 +695,8 @@ async fn process_sse_with_treatment(
             Ok(None) => {}
             Err(error) => {
                 let error = error.into_api_error();
-                if matches!(error, ApiError::FlexUnavailable) {
-                    let _ = tx_event.send(Err(error)).await;
-                    return;
-                }
-                response_error = Some(error);
+                let _ = tx_event.send(Err(error)).await;
+                return;
             }
         };
     }
@@ -978,6 +992,8 @@ mod tests {
         ] if start_content.is_empty()
             && text == "First result."
             && done_content == &vec![codex_protocol::models::ContentItem::OutputText {
+                annotations: None,
+                logprobs: None,
                 text: "First result.".to_string()
             }]);
     }

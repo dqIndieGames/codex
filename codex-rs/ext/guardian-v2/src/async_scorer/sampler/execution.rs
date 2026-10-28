@@ -1,26 +1,36 @@
 //! Executes one prepared classifier request with the existing retry and streaming rules.
-//! Snapshot output returns immediately with a detached drain. Retained requests publish
-//! the same early result but keep ownership until completion to capture reusable output.
+//! Snapshot output returns immediately with a detached drain that retains cancellation.
+//! Retained requests publish the same early result but keep ownership through completion.
+//! Sampling outcomes describe score delivery, independently of retained response draining.
 //! Requests and retries stop when the account owner that started the classification changes.
+//! Dropped responses interrupt and drain before their transport can return to the pool.
 
 use super::CLASSIFICATION_TOKEN_USAGE_METRIC;
 use super::ConnectionPool;
 use super::LunaSamplerConfig;
 use super::LunaSamplerError;
 use super::MAX_OUTPUT_BYTES;
+use super::SampledScore;
 use super::connection_pool::RequestMode;
+use super::response::PendingResponse;
+use super::telemetry::SamplingTelemetry;
+use super::telemetry::record_retry;
 use codex_api::ApiError;
 use codex_api::ResponseEvent;
 use codex_api::ResponsesApiRequest;
 use codex_api::TransportError;
+use codex_core::cyber_access_program;
 use codex_extension_api::ExtensionMetrics;
 use codex_login::UnauthorizedRecovery;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::turn_input::CyberAccessProgram;
 use http::StatusCode;
 use serde_json::json;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -33,6 +43,7 @@ const TURN_METADATA_KEY: &str = "x-codex-turn-metadata";
 
 pub(super) struct SamplingExecution {
     pub(super) auth_owner_generation: Option<u64>,
+    pub(super) cyber_access_program: Option<CyberAccessProgram>,
     pub(super) config: Arc<LunaSamplerConfig>,
     pub(super) connections: Arc<ConnectionPool>,
     pub(super) request: ResponsesApiRequest,
@@ -43,7 +54,7 @@ pub(super) struct SamplingExecution {
 }
 
 pub(super) struct RetainedCompletion {
-    pub(super) ready: Option<oneshot::Sender<Result<String, LunaSamplerError>>>,
+    pub(super) ready: Option<oneshot::Sender<Result<SampledScore, LunaSamplerError>>>,
     pub(super) output: Option<Vec<ResponseItem>>,
     pub(super) remaining_tokens: usize,
     pub(super) early_score: Option<String>,
@@ -52,7 +63,7 @@ pub(super) struct RetainedCompletion {
 /// Snapshot admission owns supersession; retained admission owns the response through completion.
 pub(super) enum SamplingMode<'a> {
     Snapshot {
-        superseded: oneshot::Receiver<()>,
+        superseded: Pin<Box<dyn Future<Output = ()> + Send>>,
         scored: Arc<AtomicBool>,
     },
     Retained(&'a mut RetainedCompletion),
@@ -62,7 +73,7 @@ impl SamplingMode<'_> {
     async fn superseded(&mut self) {
         match self {
             Self::Snapshot { superseded, .. } => {
-                let _ = superseded.await;
+                superseded.await;
             }
             Self::Retained(_) => std::future::pending().await,
         }
@@ -105,13 +116,14 @@ impl RetainedCompletion {
     pub(super) fn finish(
         mut self,
         result: Result<String, LunaSamplerError>,
+        telemetry: &mut SamplingTelemetry,
     ) -> Option<Vec<ResponseItem>> {
         let reusable = result.as_ref().is_ok_and(|score| {
             matches!(score.as_str(), "high" | "low")
                 && self.early_score.as_ref().is_none_or(|early| early == score)
         });
         if let Some(ready) = self.ready.take() {
-            let _ = ready.send(result);
+            telemetry.deliver(ready, result);
         }
         self.output.filter(|output| reusable && !output.is_empty())
     }
@@ -151,6 +163,7 @@ impl SamplingExecution {
                         return false;
                     }
                     self.connections.clear();
+                    record_retry(self.config.metrics.as_deref(), "http_401", "auth_recovery");
                     return true;
                 } else {
                     status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS
@@ -170,10 +183,12 @@ impl SamplingExecution {
                     | TransportError::Policy(_),
                 )
                 | ApiError::ContextWindowExceeded
+                | ApiError::ResponseIncomplete(_)
                 | ApiError::QuotaExceeded
                 | ApiError::UsageNotIncluded
                 | ApiError::RateLimit(_)
                 | ApiError::InvalidRequest { .. }
+                | ApiError::ModelNotFound { .. }
                 | ApiError::InvalidPrompt { .. }
                 | ApiError::MisalignmentPolicyViolation { .. }
                 | ApiError::CyberPolicy { .. }
@@ -182,6 +197,11 @@ impl SamplingExecution {
         };
         if retryable && *retries < MAX_SAMPLING_RETRIES {
             *retries += 1;
+            record_retry(
+                self.config.metrics.as_deref(),
+                super::super::metrics::sampler_failure_reason(error),
+                "transport",
+            );
             return true;
         }
         false
@@ -190,6 +210,7 @@ impl SamplingExecution {
     pub(super) async fn run(
         &mut self,
         mut mode: SamplingMode<'_>,
+        telemetry: &mut SamplingTelemetry,
     ) -> Result<String, LunaSamplerError> {
         let auth_changes = self
             .config
@@ -237,6 +258,7 @@ impl SamplingExecution {
         };
         'retry: loop {
             ensure_account_owner()?;
+            telemetry.attempts = telemetry.attempts.saturating_add(1);
             if let SamplingMode::Retained(completion) = &mut mode {
                 completion.output = Some(Vec::new());
                 completion.remaining_tokens = retention_budget;
@@ -256,6 +278,24 @@ impl SamplingExecution {
                         continue;
                     }
                     return Err(error);
+                }
+            };
+            // Omitted programs need no auth lookup, which can refresh credentials.
+            self.request.access_programs = match self.cyber_access_program {
+                None => None,
+                Some(program) => {
+                    let auth = tokio::select! {
+                        biased;
+                        _ = &mut owner_changed => return Err(account_changed_error()),
+                        _ = mode.superseded() => return Err(LunaSamplerError::Superseded),
+                        auth = self.config.provider.auth() => auth,
+                    };
+                    cyber_access_program::for_auth(
+                        auth.as_ref(),
+                        Some(program),
+                        self.config.api_key_cyber_access_programs,
+                    )
+                    .map_err(LunaSamplerError::Provider)?
                 }
             };
             ensure_account_owner()?;
@@ -295,7 +335,7 @@ impl SamplingExecution {
                 client_metadata.insert("parent_response_id".to_owned(), parent_response_id.clone());
             }
             self.request.client_metadata = Some(client_metadata);
-            let mut stream = match tokio::select! {
+            let stream = match tokio::select! {
                 biased;
                 _ = &mut owner_changed => return Err(account_changed_error()),
                 _ = mode.superseded() => return Err(LunaSamplerError::Superseded),
@@ -314,6 +354,7 @@ impl SamplingExecution {
                 }
             };
 
+            let mut response = PendingResponse::new(stream, lease, self.config.metrics.clone());
             let mut output = String::new();
             while let Some(event) = tokio::select! {
                 biased;
@@ -326,7 +367,7 @@ impl SamplingExecution {
                         Err(LunaSamplerError::Superseded)
                     };
                 }
-                event = stream.rx_event.recv() => event,
+                event = response.next() => event,
             } {
                 ensure_account_owner()?;
                 let event = match event {
@@ -364,27 +405,21 @@ impl SamplingExecution {
                             SamplingMode::Retained(ref mut retained) => {
                                 retained.early_score = Some(delta.clone());
                                 if let Some(ready) = retained.ready.take() {
-                                    let _ = ready.send(Ok(delta));
+                                    telemetry.deliver(ready, Ok(delta));
                                 }
                                 continue;
                             }
                         };
                         scored.store(true, Ordering::Relaxed);
-                        let mut remaining_stream = stream;
-                        let metrics = self.config.metrics.clone();
                         tokio::spawn(async move {
                             while let Some(event) = tokio::select! {
                                 biased;
                                 _ = &mut superseded => None,
-                                event = remaining_stream.rx_event.recv() => event,
+                                event = response.next() => event,
                             } {
                                 match event {
                                     Ok(ResponseEvent::Completed { token_usage, .. }) => {
-                                        record_token_usage(
-                                            metrics.as_deref(),
-                                            token_usage.as_ref(),
-                                        );
-                                        lease.reuse();
+                                        response.reuse(token_usage.as_ref()).await;
                                         break;
                                     }
                                     Err(_) => break,
@@ -402,15 +437,14 @@ impl SamplingExecution {
                             && role == "assistant"
                         {
                             for item in content {
-                                if let ContentItem::OutputText { text } = item {
+                                if let ContentItem::OutputText { text, .. } = item {
                                     output.push_str(&text);
                                 }
                             }
                         }
                     }
                     ResponseEvent::Completed { token_usage, .. } => {
-                        record_token_usage(self.config.metrics.as_deref(), token_usage.as_ref());
-                        lease.reuse();
+                        response.reuse(token_usage.as_ref()).await;
                         if !output.is_empty() {
                             return Ok(output);
                         }
@@ -432,7 +466,10 @@ impl SamplingExecution {
     }
 }
 
-fn record_token_usage(metrics: Option<&dyn ExtensionMetrics>, token_usage: Option<&TokenUsage>) {
+pub(super) fn record_token_usage(
+    metrics: Option<&dyn ExtensionMetrics>,
+    token_usage: Option<&TokenUsage>,
+) {
     let (Some(metrics), Some(token_usage)) = (metrics, token_usage) else {
         return;
     };

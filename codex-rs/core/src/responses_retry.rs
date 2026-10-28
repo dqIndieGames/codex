@@ -41,7 +41,7 @@ impl Default for ResponsesStreamRetryState {
 }
 
 impl ResponsesStreamRetryState {
-    /// Decide image recovery before the shared single ten-second wait. The returned tier must
+    /// Decide image recovery before the shared retry wait. The returned tier must
     /// also be applied to the compaction caller's snapshot so stale images are never resent.
     pub(crate) async fn prepare_compaction_retry(
         &mut self,
@@ -116,7 +116,9 @@ pub(crate) async fn handle_response_stream_error(
         client_session.reset_retry_websocket_connection();
         return Ok(());
     }
-    let delay = fixed_retry_delay();
+    let retry_at = err.retry_after().map(|advice| advice.deadline())
+        .unwrap_or_else(|| tokio::time::Instant::now() + fixed_retry_delay());
+    let delay = retry_at.saturating_duration_since(tokio::time::Instant::now());
     if matches!(
         err.details(),
         CodexErrorDetails::Interrupted
@@ -168,7 +170,7 @@ pub(crate) async fn handle_response_stream_error(
         .await;
         codex_client::record_retry!(retry_count, delay, operation);
         tokio::select! {
-            _ = tokio::time::sleep(delay) => {},
+            _ = tokio::time::sleep_until(retry_at) => {},
             _ = runtime.changed() => {},
         }
         return Ok(());
@@ -178,7 +180,7 @@ pub(crate) async fn handle_response_stream_error(
         .thread_extension_data
         .insert(ExhaustedResponseRetry {
             turn_id: turn_context.sub_id.clone(),
-            retry_at: Some(tokio::time::Instant::now() + delay),
+            retry_at: Some(retry_at),
         });
     Err(err)
 }

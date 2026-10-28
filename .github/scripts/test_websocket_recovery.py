@@ -1,6 +1,6 @@
 """Black-box local3 transport contract tests; never builds the supplied CLI.
 
-Truth source: local3 checklist sections 3.1 and 3.4: fixed ten-second waits;
+Truth source: local3 checklist sections 3.1 and 3.4: ten-second default without advice;
 three failed WS attempts, or one WS 1009, switch the session to HTTP for the
 rest of the process; tools survive. The server implements RFC 6455 framing and
 the Responses streaming lifecycle.

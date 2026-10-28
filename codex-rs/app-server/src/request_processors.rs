@@ -233,6 +233,8 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadItemEntry;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
+use codex_app_server_protocol::ThreadItemsReadParams;
+use codex_app_server_protocol::ThreadItemsReadResponse;
 use codex_app_server_protocol::ThreadListCwdFilter;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
@@ -542,12 +544,12 @@ use uuid::Uuid;
 #[cfg(test)]
 use codex_app_server_protocol::ServerRequest;
 
-mod account_processor;
+pub(crate) mod account_processor;
 mod apps_processor;
 mod bedrock_auth;
 mod catalog_processor;
 mod command_exec_processor;
-mod config_processor;
+pub(crate) mod config_processor;
 #[cfg(test)]
 #[path = "request_processors/config_reload_tests.rs"]
 mod config_reload_tests;
@@ -575,8 +577,10 @@ mod thread_attachments;
 mod thread_enrichment;
 mod thread_fork_goal;
 mod thread_input;
+mod thread_memory;
 mod thread_processor;
 mod thread_queue_processor;
+mod thread_read_state;
 mod thread_sections;
 mod token_usage_replay;
 mod turn_processor;
@@ -614,6 +618,7 @@ use crate::error_code::invalid_request;
 use crate::filters::compute_source_filters;
 use crate::filters::source_kind_matches;
 use crate::thread_state::ConnectionCapabilities;
+use crate::thread_state::PendingThreadUnloads;
 use crate::thread_state::ThreadListenerCommand;
 use crate::thread_state::ThreadState;
 use crate::thread_state::ThreadStateManager;
@@ -707,7 +712,7 @@ fn resolve_runtime_workspace_roots(workspace_roots: Vec<AbsolutePathBuf>) -> Vec
     resolved_roots
 }
 
-mod config_errors;
+pub(crate) mod config_errors;
 mod request_errors;
 mod thread_delete;
 mod thread_goal_processor;

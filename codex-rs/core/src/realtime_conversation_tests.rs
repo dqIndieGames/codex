@@ -29,6 +29,129 @@ use std::time::Instant;
 use test_case::test_case;
 use tokio::sync::Mutex;
 
+/// Hold old input cleanup open while a successor tries to claim the connection.
+#[tokio::test]
+async fn natural_close_finishes_before_successor_and_ignores_old_identity() {
+    use super::ConversationState;
+    use super::RealtimeConversationEnd;
+    use super::RealtimeHandoffAdmission;
+    use codex_protocol::protocol::Event;
+    use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::RealtimeConversationStartedEvent;
+    use codex_protocol::protocol::RealtimeConversationVersion;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    let (sess, _turn, events) = crate::session::tests::make_session_and_context_with_rx().await;
+    let old_identity = Arc::new(AtomicBool::new(true));
+    let stop_token = CancellationToken::new();
+    let input_stop = stop_token.clone();
+    let (entered, cleaning_up) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    let input_task = tokio::spawn(async move {
+        input_stop.cancelled().await;
+        entered.send(()).unwrap();
+        released.await.unwrap();
+    });
+    let handoff = RealtimeHandoffState {
+        output_tx: bounded(1).0,
+        last_output: Arc::new(Mutex::new(None)),
+        stream: Arc::new(Mutex::new(Default::default())),
+        client_managed_handoffs: false,
+        codex_responses_as_items: false,
+        codex_response_item_prefix: None,
+        backend_reasoning_status: false,
+        codex_response_handoff_mode: CodexResponseHandoffMode::Thinking,
+        codex_response_handoff_channel_prefixes: Arc::new(BTreeMap::new()),
+        session_kind: RealtimeSessionKind::V1,
+        event_parser: RealtimeEventParser::V1,
+    };
+    let connection = |identity, input_task, stop_token, session: &str| ConversationState {
+        session_id: Some(session.to_owned()),
+        sub_id: session.to_owned(),
+        audio_tx: bounded(1).0,
+        text_tx: bounded(1).0,
+        session_kind: RealtimeSessionKind::V1,
+        handoff: handoff.clone(),
+        input_task,
+        fanout_task: None,
+        realtime_active: identity,
+        route_handoffs: Arc::new(RealtimeHandoffAdmission::new()),
+        stop_token,
+    };
+    sess.conversation.state.lock().await.conversation = Some(connection(
+        Arc::clone(&old_identity),
+        input_task,
+        stop_token,
+        "A",
+    ));
+    let close = sess.conversation.finish_if_active(
+        &sess,
+        &old_identity,
+        "A".to_owned(),
+        RealtimeConversationEnd::TransportClosed,
+    );
+    tokio::pin!(close);
+    assert!(futures::poll!(&mut close).is_pending());
+    cleaning_up.await.unwrap();
+
+    // This is the same state publication boundary used by start_inner.
+    let successor = async {
+        sess.conversation.state.lock().await.conversation = Some(connection(
+            Arc::new(AtomicBool::new(true)),
+            tokio::spawn(async {}),
+            CancellationToken::new(),
+            "B",
+        ));
+        sess.send_event_raw(Event {
+            id: "B".to_owned(),
+            msg: EventMsg::RealtimeConversationStarted(RealtimeConversationStartedEvent {
+                realtime_session_id: Some("B".to_owned()),
+                version: RealtimeConversationVersion::V3,
+            }),
+        })
+        .await;
+    };
+    tokio::pin!(successor);
+    assert!(futures::poll!(&mut successor).is_pending());
+    release.send(()).unwrap();
+    close.await;
+    successor.await;
+    sess.conversation
+        .finish_if_active(
+            &sess,
+            &old_identity,
+            "A".to_owned(),
+            RealtimeConversationEnd::TransportClosed,
+        )
+        .await;
+    let observed = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event.msg {
+            EventMsg::RealtimeConversationClosed(_) => Some((event.id, "closed")),
+            EventMsg::RealtimeConversationStarted(_) => Some((event.id, "started")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![("A".to_owned(), "closed"), ("B".to_owned(), "started")]
+    );
+    assert_eq!(
+        sess.conversation
+            .state
+            .lock()
+            .await
+            .conversation
+            .as_ref()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some("B")
+    );
+    sess.conversation.shutdown().await.unwrap();
+}
+
 #[test]
 fn prefers_handoff_input_transcript_over_active_transcript() {
     let handoff = RealtimeHandoffRequested {
@@ -296,6 +419,7 @@ fn streamed_v3_handoff_omits_the_final_message_prefix() {
 fn uses_quicksilver_alpha_header_for_realtime_v1() {
     let headers = realtime_request_headers(
         Some("session_1"),
+        /*voice_session_id*/ None,
         Some("sk-test"),
         RealtimeEventParser::V1,
         "codex_work_desktop",
@@ -315,6 +439,7 @@ fn uses_quicksilver_alpha_header_for_realtime_v1() {
 fn omits_quicksilver_alpha_header_for_realtime_v2() {
     let headers = realtime_request_headers(
         Some("session_1"),
+        /*voice_session_id*/ None,
         Some("sk-test"),
         RealtimeEventParser::RealtimeV2,
         "codex_work_desktop",
@@ -329,6 +454,7 @@ fn omits_quicksilver_alpha_header_for_realtime_v2() {
 fn uses_frameless_alpha_header_for_realtime_v3() {
     let headers = realtime_request_headers(
         Some("session_1"),
+        /*voice_session_id*/ None,
         Some("sk-test"),
         RealtimeEventParser::FramelessBidi,
         "codex_work_desktop",
@@ -353,6 +479,7 @@ fn realtime_headers_include_only_non_default_originator() {
     ] {
         let headers = realtime_request_headers(
             Some("session_1"),
+            /*voice_session_id*/ None,
             Some("sk-test"),
             RealtimeEventParser::RealtimeV2,
             originator,
@@ -367,4 +494,30 @@ fn realtime_headers_include_only_non_default_originator() {
             expected_header
         );
     }
+}
+
+#[test]
+fn realtime_headers_keep_realtime_and_voice_session_ids_distinct() {
+    let headers = realtime_request_headers(
+        Some("realtime_session_1"),
+        Some("voice_session_1"),
+        /*api_key*/ None,
+        RealtimeEventParser::RealtimeV2,
+        "codex_work_desktop",
+    )
+    .expect("headers")
+    .expect("headers");
+
+    assert_eq!(
+        headers
+            .get("x-session-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("realtime_session_1")
+    );
+    assert_eq!(
+        headers
+            .get("voice-session-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("voice_session_1")
+    );
 }

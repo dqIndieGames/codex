@@ -127,9 +127,15 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
                 };
                 Self::ResponseItem {
                     payload: Cow::Owned(ResponseItem::Message {
+                        status: None,
+                        encrypted_content: None,
                         id: message.message_id.clone().map(ResponseItemId::from_server),
                         role: "assistant".to_owned(),
-                        content: vec![ContentItem::OutputText { text }],
+                        content: vec![ContentItem::OutputText {
+                            annotations: None,
+                            logprobs: None,
+                            text,
+                        }],
                         // Older Guardian clients exclude commentary from root-to-worker
                         // review. Keep the phase unspecified so they can review this
                         // confirmed delivery without claiming it ended the turn.
@@ -167,7 +173,9 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
 impl From<RolloutItemWire<'_>> for RolloutItem {
     fn from(item: RolloutItemWire<'_>) -> Self {
         match item {
-            RolloutItemWire::SessionMeta { payload } => Self::SessionMeta(payload.into_owned()),
+            RolloutItemWire::SessionMeta { payload } => {
+                Self::SessionMeta(Box::new(payload.into_owned()))
+            }
             RolloutItemWire::ResponseItem { payload, metadata } => {
                 if let (
                     ResponseItem::Message {
@@ -180,7 +188,7 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
                     Some(metadata),
                 ) = (payload.as_ref(), metadata.as_deref())
                     && role == "assistant"
-                    && let [ContentItem::OutputText { text }] = content.as_slice()
+                    && let [ContentItem::OutputText { text, .. }] = content.as_slice()
                     && let Some(turn_id) = passthrough.turn_id.as_ref()
                     && let Some(acceptance_order) = metadata.user_input_order
                     && let Some(marker) = metadata.delivered_assistant_message.as_deref()
@@ -219,7 +227,9 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
                     trigger_turn: payload.trigger_turn,
                 }
             }
-            RolloutItemWire::Compacted { payload } => Self::Compacted(payload.into_owned()),
+            RolloutItemWire::Compacted { payload } => {
+                Self::Compacted(Box::new(payload.into_owned()))
+            }
             RolloutItemWire::ImagesShrunk { payload } => Self::ImagesShrunk(payload.into_owned()),
             RolloutItemWire::TurnContext { payload } => Self::TurnContext(payload.into_owned()),
             RolloutItemWire::TokenUsageRecord { payload } => {

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use codex_api::ApiError;
 use codex_context_fragments::RenderedFragment;
+use codex_core::cyber_access_program::ApiKeyCyberAccessPrograms;
 use codex_extension_api::ContextualUserFragment;
 use codex_extension_api::ExtensionMetrics;
 use codex_guardian_context::PreviousReviews;
@@ -22,6 +23,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::turn_input::CyberAccessProgram;
 use core_test_support::responses;
 use core_test_support::responses::WebSocketConnectionConfig;
 use core_test_support::responses::ev_assistant_message;
@@ -140,7 +142,9 @@ pub(in crate::async_scorer) enum ProxyPrewarmLimit {
     StopAfter { ready_connections: usize },
 }
 
-async fn proxy_websocket_servers(servers: &[&responses::WebSocketTestServer]) -> Result<String> {
+pub(super) async fn proxy_websocket_servers(
+    servers: &[&responses::WebSocketTestServer],
+) -> Result<String> {
     proxy_websocket_servers_with_prewarm_limit(servers, ProxyPrewarmLimit::AllConnections).await
 }
 
@@ -204,6 +208,7 @@ pub(in crate::async_scorer) async fn proxy_websocket_servers_with_http(
 
 pub(in crate::async_scorer) fn sampler_config(base_url: String) -> LunaSamplerConfig {
     LunaSamplerConfig {
+        api_key_cyber_access_programs: ApiKeyCyberAccessPrograms::Disabled,
         workspace_routing: codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
         ),
@@ -227,7 +232,7 @@ pub(in crate::async_scorer) fn sampler_config(base_url: String) -> LunaSamplerCo
     }
 }
 
-async fn connect_sampler(config: LunaSamplerConfig) -> Result<LunaSampler> {
+pub(super) async fn connect_sampler(config: LunaSamplerConfig) -> Result<LunaSampler> {
     let sampler = LunaSampler::new(config);
     sampler.prewarm().await;
     Ok(sampler)
@@ -258,6 +263,9 @@ fn assert_classifier_instructions(request: &serde_json::Value) {
             }],
             "internal_chat_message_metadata_passthrough": {
                 "content_item_kinds": ["guardian.classifier_instructions"],
+                "content_item_metadata": [{
+                    "provenance": {"type": "harness", "hook": false},
+                }],
             },
         })
     );
@@ -265,6 +273,7 @@ fn assert_classifier_instructions(request: &serde_json::Value) {
 
 pub(in crate::async_scorer) fn sample_request(parent_turn_id: &str) -> LunaSamplingRequest {
     LunaSamplingRequest {
+        cyber_access_program: None,
         parent_response_id: None,
         instructions: classifier_instructions(),
         input: vec![responses::user_message_item(
@@ -275,13 +284,114 @@ pub(in crate::async_scorer) fn sample_request(parent_turn_id: &str) -> LunaSampl
         reasoning_effort: ReasoningEffort::None,
         parent_turn_id: parent_turn_id.to_owned(),
         root_turn_id: None,
+        pending_score: None,
     }
+}
+
+#[tokio::test]
+async fn classifier_preserves_api_key_cyber_program_policy() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    for policy in [
+        ApiKeyCyberAccessPrograms::Enabled,
+        ApiKeyCyberAccessPrograms::Disabled,
+        ApiKeyCyberAccessPrograms::UnsupportedProvider,
+    ] {
+        let server = responses::start_mock_server().await;
+        let response = responses::mount_sse_once(
+            &server,
+            responses::sse(vec![
+                ev_assistant_message("score", "low"),
+                ev_completed("score"),
+            ]),
+        )
+        .await;
+        let mut config = sampler_config(server.uri());
+        config.api_key_cyber_access_programs = policy;
+        let sampler = LunaSampler::new(config);
+        let mut request = sample_request("parent");
+        request.cyber_access_program = Some(CyberAccessProgram::DaybreakRed);
+        let result = sampler.sample(request).await;
+        match policy {
+            ApiKeyCyberAccessPrograms::Disabled => {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Cyber access programs are disabled for this API-key session.")
+                );
+                assert!(response.requests().is_empty());
+            }
+            ApiKeyCyberAccessPrograms::Enabled | ApiKeyCyberAccessPrograms::UnsupportedProvider => {
+                assert_eq!(result?, "low");
+                let expected = match policy {
+                    ApiKeyCyberAccessPrograms::Enabled => Some(json!({"cyber": "daybreak_blue"})),
+                    ApiKeyCyberAccessPrograms::UnsupportedProvider => None,
+                    ApiKeyCyberAccessPrograms::Disabled => unreachable!(),
+                };
+                assert_eq!(
+                    response
+                        .single_request()
+                        .body_json()
+                        .get("access_programs")
+                        .cloned(),
+                    expected,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 type RecordedMetric = (String, i64, Vec<(String, String)>);
 
 #[derive(Default)]
-struct RecordingMetrics(Mutex<Vec<RecordedMetric>>);
+pub(in crate::async_scorer) struct RecordingMetrics(
+    pub(in crate::async_scorer) Mutex<Vec<RecordedMetric>>,
+    pub(in crate::async_scorer) tokio::sync::Notify,
+);
+
+impl RecordingMetrics {
+    pub(in crate::async_scorer) fn assert_outcome(
+        &self,
+        outcome: &str,
+        attempts: i64,
+        failure_reason: &str,
+    ) {
+        let tags = json!([
+            ["outcome", outcome],
+            ["attempt_count", attempts.to_string()],
+            ["retried", if attempts > 1 { "true" } else { "false" }],
+            ["failure_reason", failure_reason]
+        ]);
+        let samples = self.0.lock().unwrap();
+        for (name, value) in [
+            ("codex.guardian_v2.sampling.attempt_count", attempts),
+            ("codex.guardian_v2.sampling.retry_outcome", 1),
+        ] {
+            assert_eq!(
+                json!(
+                    samples
+                        .iter()
+                        .filter(|metric| metric.0 == name)
+                        .map(|metric| (&metric.1, &metric.2))
+                        .collect::<Vec<_>>()
+                ),
+                json!([[value, tags]]),
+            );
+        }
+    }
+
+    fn retries(&self) -> serde_json::Value {
+        let samples = self.0.lock().unwrap();
+        let mut retries = samples
+            .iter()
+            .filter(|metric| metric.0 == "codex.guardian_v2.sampling.retry")
+            .map(|metric| (&metric.1, &metric.2))
+            .collect::<Vec<_>>();
+        retries.sort();
+        json!(retries)
+    }
+}
 
 impl ExtensionMetrics for RecordingMetrics {
     fn histogram_with_boundaries(
@@ -294,7 +404,12 @@ impl ExtensionMetrics for RecordingMetrics {
         self.histogram(name, value, tags);
     }
 
-    fn counter(&self, _name: &str, _inc: i64, _tags: &[(&str, &str)]) {}
+    fn counter(&self, name: &str, inc: i64, tags: &[(&str, &str)]) {
+        self.histogram(name, inc, tags);
+        if name == "codex.guardian_v2.sampling.retry_outcome" {
+            self.1.notify_one();
+        }
+    }
 
     fn histogram(&self, name: &str, value: i64, tags: &[(&str, &str)]) {
         if name == "codex.guardian_v2.connection.duration_ms" {
@@ -382,16 +497,67 @@ async fn sampler_records_token_usage_after_returning_an_early_classification() -
         .iter()
         .map(codex_guardian_context::estimate_input_tokens)
         .sum::<usize>();
-    assert!(metrics.0.lock().unwrap().contains(&(
-        codex_guardian_context::REQUEST_TOKENS_METRIC.to_owned(),
-        i64::try_from(estimated)?,
-        vec![
-            ("target".to_owned(), "async".to_owned()),
-            ("component".to_owned(), "total".to_owned()),
-        ],
-    )));
+    assert_eq!(
+        metrics
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(
+                |metric| metric.0 == codex_guardian_context::REQUEST_TOKENS_METRIC
+                    && metric.2.iter().any(|(key, _)| key == "token_bucket")
+            )
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![(
+            codex_guardian_context::REQUEST_TOKENS_METRIC.to_owned(),
+            i64::try_from(estimated)?,
+            vec![
+                ("target".to_owned(), "async".to_owned()),
+                ("component".to_owned(), "total".to_owned()),
+                (
+                    "token_bucket".to_owned(),
+                    codex_guardian_context::request_token_bucket(estimated).to_owned()
+                ),
+            ],
+        )],
+    );
 
     Ok(())
+}
+
+#[tokio::test]
+async fn oversized_classification_keeps_untagged_request_histograms() {
+    let metrics = Arc::new(RecordingMetrics::default());
+    let mut config = sampler_config("http://localhost".to_owned());
+    config.max_input_tokens = 1;
+    config.metrics = Some(metrics.clone());
+    let sampler = LunaSampler::new(config);
+    assert!(matches!(
+        sampler.sample(sample_request("parent")).await,
+        Err(LunaSamplerError::InputTooLarge)
+    ));
+    assert_eq!(
+        metrics
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|metric| metric.2.iter().any(|(key, _)| key == "token_bucket"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        Vec::<RecordedMetric>::new(),
+    );
+    assert_eq!(
+        metrics
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|metric| metric.0 == codex_guardian_context::REQUEST_TOKENS_METRIC)
+            .count(),
+        3,
+    );
 }
 
 struct RefreshableAuth(std::sync::Mutex<&'static str>);
@@ -518,6 +684,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     );
 
     let sampler = connect_sampler(LunaSamplerConfig {
+        api_key_cyber_access_programs: ApiKeyCyberAccessPrograms::Disabled,
         workspace_routing: codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
         ),
@@ -564,9 +731,12 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
 
     let first = sampler
         .sample(LunaSamplingRequest {
+            cyber_access_program: None,
             parent_response_id: None,
             instructions: classifier_instructions(),
             input: vec![ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_owned(),
                 content: vec![
@@ -585,6 +755,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
             reasoning_effort: ReasoningEffort::None,
             parent_turn_id: "turn-1".to_owned(),
             root_turn_id: Some("turn-1".to_owned()),
+            pending_score: None,
         })
         .await?;
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -607,6 +778,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     sampler.prewarm().await;
     let second = sampler
         .sample(LunaSamplingRequest {
+            cyber_access_program: None,
             parent_response_id: None,
             instructions: classifier_instructions(),
             input: vec![responses::user_message_item(
@@ -617,6 +789,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
             reasoning_effort: ReasoningEffort::Medium,
             parent_turn_id: "turn-2".to_owned(),
             root_turn_id: Some("root-2".to_owned()),
+            pending_score: None,
         })
         .await?;
 
@@ -779,6 +952,7 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
         ))),
     );
     let sampler = connect_sampler(LunaSamplerConfig {
+        api_key_cyber_access_programs: ApiKeyCyberAccessPrograms::Disabled,
         workspace_routing: codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
         ),
@@ -800,6 +974,7 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
     let output = tokio::time::timeout(
         Duration::from_secs(2),
         sampler.sample(LunaSamplingRequest {
+            cyber_access_program: None,
             parent_response_id: None,
             instructions: classifier_instructions(),
             input: vec![responses::user_message_item(
@@ -810,6 +985,7 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
             reasoning_effort: ReasoningEffort::None,
             parent_turn_id: "turn-1".to_owned(),
             root_turn_id: Some("turn-1".to_owned()),
+            pending_score: None,
         }),
     )
     .await??;
@@ -1089,8 +1265,9 @@ async fn sampler_uses_http_with_a_fresh_identity_when_warm_connections_expire() 
         ev_assistant_message("response-1", "low"),
         ev_completed("response-1"),
     ];
-    let first = responses::start_websocket_server(vec![vec![response.clone()]]).await;
-    let second = responses::start_websocket_server(vec![vec![response.clone()]]).await;
+    // Keep the sockets open until the test expires their pooled connections.
+    let first = responses::start_websocket_server(vec![vec![response.clone(), Vec::new()]]).await;
+    let second = responses::start_websocket_server(vec![vec![response.clone(), Vec::new()]]).await;
     let http = responses::start_mock_server().await;
     let http_mock = responses::mount_sse_once(&http, responses::sse(response)).await;
     let sampler = connect_sampler(sampler_config(
@@ -1164,17 +1341,33 @@ async fn sampler_reconnects_after_transient_service_failures() -> Result<()> {
         ]),
     )
     .await;
-    let sampler = connect_sampler(sampler_config(
+    let metrics = Arc::new(RecordingMetrics::default());
+    let mut config = sampler_config(
         proxy_websocket_servers_with_http(
             &[&first, &second],
             ProxyPrewarmLimit::AllConnections,
             Some(&http.uri()),
         )
         .await?,
-    ))
-    .await?;
+    );
+    config.metrics = Some(metrics.clone());
+    let sampler = connect_sampler(config).await?;
 
     assert_eq!(sampler.sample(sample_request("turn-1")).await?, "low");
+    metrics.assert_outcome("success", /*attempts*/ 3, "none");
+    assert_eq!(
+        metrics.retries(),
+        json!([
+            [
+                1,
+                [
+                    ["failure_reason", "flex_unavailable"],
+                    ["kind", "transport"]
+                ]
+            ],
+            [1, [["failure_reason", "http_5xx"], ["kind", "transport"]]],
+        ])
+    );
     assert_eq!(first.single_connection().len(), 1);
     assert_eq!(second.single_connection().len(), 1);
     let request = recovered.single_request();
@@ -1220,15 +1413,17 @@ async fn sampler_limits_transient_recovery_attempts() -> Result<()> {
         })]),
     )
     .await;
-    let sampler = connect_sampler(sampler_config(
+    let metrics = Arc::new(RecordingMetrics::default());
+    let mut config = sampler_config(
         proxy_websocket_servers_with_http(
             &[&first, &second],
             ProxyPrewarmLimit::AllConnections,
             Some(&http.uri()),
         )
         .await?,
-    ))
-    .await?;
+    );
+    config.metrics = Some(metrics.clone());
+    let sampler = connect_sampler(config).await?;
 
     let error = sampler
         .sample(sample_request("turn-1"))
@@ -1239,6 +1434,7 @@ async fn sampler_limits_transient_recovery_attempts() -> Result<()> {
         error,
         LunaSamplerError::Api(ApiError::FlexUnavailable)
     ));
+    metrics.assert_outcome("failure", /*attempts*/ 3, "flex_unavailable");
     assert_eq!(first.single_connection().len(), 1);
     assert_eq!(second.single_connection().len(), 1);
     assert_eq!(third.requests().len(), 1);
@@ -1272,6 +1468,8 @@ async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> 
                 )),
             );
         }
+        let metrics = Arc::new(RecordingMetrics::default());
+        config.metrics = Some(metrics.clone());
         let sampler = connect_sampler(config).await?;
         let expired_id = expired.single_handshake().header("thread-id").unwrap();
         sampler
@@ -1284,6 +1482,7 @@ async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> 
         let mut request = sample_request("turn-1");
         request.parent_response_id = Some(parent_response_id.to_owned());
         assert_eq!(sampler.sample(request).await?, "low");
+        metrics.assert_outcome("success", /*attempts*/ 2, "none");
         for server in [&expired, &healthy] {
             let requests = server.single_connection();
             assert_eq!(requests.len(), 1);
@@ -1299,5 +1498,49 @@ async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> 
         }
     }
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sampler_records_401_recovery_separately_from_transport_retries() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let rejected = vec![vec![json!({"type": "error", "status": 401,
+        "error": {"type": "authentication_error", "message": "expired"}})]];
+    let ws = responses::start_websocket_server(vec![rejected.clone(), rejected]).await;
+    let http = responses::start_mock_server().await;
+    let recovered = responses::mount_sse_once(
+        &http,
+        responses::sse(vec![
+            ev_assistant_message("recovered", "low"),
+            ev_completed("recovered"),
+        ]),
+    )
+    .await;
+    let metrics = Arc::new(RecordingMetrics::default());
+    let base_url = proxy_websocket_servers_with_http(
+        &[&ws, &ws],
+        ProxyPrewarmLimit::AllConnections,
+        Some(&http.uri()),
+    )
+    .await?;
+    let mut config = sampler_config(base_url);
+    config.metrics = Some(metrics.clone());
+    let auth = config.provider.auth_manager().unwrap();
+    auth.set_external_auth(Arc::new(RefreshableAuth(Mutex::new("refreshed"))))
+        .await?;
+    let sampler = connect_sampler(config).await?;
+    assert_eq!(sampler.sample(sample_request("turn-1")).await?, "low");
+    assert_eq!(
+        recovered.single_request().header("authorization"),
+        Some("Bearer refreshed".to_owned())
+    );
+    metrics.assert_outcome("success", /*attempts*/ 2, "none");
+    assert_eq!(
+        metrics.retries(),
+        json!([[
+            1,
+            [["failure_reason", "http_401"], ["kind", "auth_recovery"]]
+        ],])
+    );
     Ok(())
 }

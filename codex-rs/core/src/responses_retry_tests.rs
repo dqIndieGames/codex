@@ -175,9 +175,9 @@ async fn sampling_retry_does_not_warn_on_intermediate_stream_error() {
     );
 }
 
-/// Product truth: local3 checklist item 3 fixes every retry wait at ten seconds.
+/// Product truth: local3 checklist section 3.1 preserves the server deadline.
 #[tokio::test(start_paused = true)]
-async fn stream_retry_ignores_short_and_long_server_advice() {
+async fn stream_retry_preserves_short_and_long_server_deadlines() {
     let (session, context) = make_session_and_context().await;
     let context = StepContext::for_test(Arc::new(context));
     let mut client = session.services.model_client.new_session();
@@ -189,6 +189,6 @@ async fn stream_retry_ignores_short_and_long_server_advice() {
             &mut state, 4, CodexErr::InternalServerError.with_retry_after(advice),
             &mut client, &session, &context.turn, ResponsesStreamRequest::Sampling,
         ).await.expect("retry allowed");
-        assert!((Duration::from_secs(10)..=Duration::from_millis(10001)).contains(&start.elapsed()));
+        assert!((advised..=advised + Duration::from_millis(1)).contains(&start.elapsed()));
     }
 }

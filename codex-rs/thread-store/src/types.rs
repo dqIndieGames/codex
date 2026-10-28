@@ -86,6 +86,9 @@ pub struct CreateThreadParams {
     pub extra_config: Option<ExtraConfig>,
     /// Source thread id when this thread is created as a fork.
     pub forked_from_id: Option<ThreadId>,
+    /// Saved fork role, persisted independently of the thread index.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attached_thread: bool,
     /// The ID of the parent thread. This will only be set if this thread is a subagent.
     pub parent_thread_id: Option<ThreadId>,
     /// Runtime source for the thread.
@@ -308,13 +311,15 @@ pub enum SortDirection {
     Desc,
 }
 
-/// Spawn-graph relationship used to filter thread listings.
+/// Parent relationship used to filter thread listings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThreadRelationFilter {
     /// Return only threads whose immediate parent is the given thread.
     DirectChildrenOf(ThreadId),
     /// Return every thread transitively descended from the given thread.
     DescendantsOf(ThreadId),
+    /// Saved attached threads, independent of the spawned-agent graph.
+    AttachedThreadsOf(ThreadId),
 }
 
 /// Parameters for listing threads.
@@ -494,6 +499,8 @@ pub enum ListItemsPosition {
 /// Parameters for listing persisted items within a thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListItemsParams {
+    /// Exact item lookup scoped to `turn_id`; incompatible with cursors and update replay.
+    pub item_ids: Option<Vec<String>>,
     /// Thread id to read.
     pub thread_id: ThreadId,
     /// Optional turn id to filter by. When omitted, returns items across the thread.
@@ -1141,12 +1148,12 @@ mod tests {
     }
 
     fn session_meta(history_mode: ThreadHistoryMode) -> RolloutItem {
-        RolloutItem::SessionMeta(codex_protocol::protocol::SessionMetaLine {
+        RolloutItem::SessionMeta(Box::new(codex_protocol::protocol::SessionMetaLine {
             meta: codex_protocol::protocol::SessionMeta {
                 history_mode,
                 ..Default::default()
             },
             git: None,
-        })
+        }))
     }
 }

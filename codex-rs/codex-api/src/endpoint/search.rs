@@ -83,7 +83,9 @@ mod tests {
     struct DummyAuth;
 
     impl AuthProvider for DummyAuth {
-        fn add_auth_headers(&self, _headers: &mut HeaderMap) {}
+        fn add_auth_headers(&self, _headers: &mut HeaderMap) -> Result<(), crate::AuthError> {
+            Ok(())
+        }
     }
 
     #[derive(Clone)]
@@ -158,6 +160,8 @@ mod tests {
                     model: "gpt-test".to_string(),
                     reasoning: None,
                     input: Some(SearchInput::Items(vec![ResponseItem::Message {
+                        status: None,
+                        encrypted_content: None,
                         id: Some(ResponseItemId::with_suffix("msg", "search")),
                         role: "user".to_string(),
                         content: vec![

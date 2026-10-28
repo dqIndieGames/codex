@@ -14,6 +14,7 @@ use super::LoadedPlugin;
 use super::PluginLoadOutcome;
 use crate::PluginGitMode;
 use crate::app_mcp_routing::apply_app_mcp_routing_policy;
+use crate::app_mcp_routing::plugin_supports_apps;
 use crate::http_client_selector::HttpClientSelector;
 use crate::installed_marketplaces::installed_marketplace_roots_from_layer_stack;
 use crate::is_openai_curated_marketplace_name;
@@ -95,6 +96,7 @@ use codex_config::clear_user_plugin;
 use codex_config::set_user_plugin_enabled;
 use codex_config::skill_config_rules_from_stack;
 use codex_config::types::PluginConfig;
+use codex_config::types::PluginsConfigToml;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverableType;
 use codex_connectors::ConnectorSnapshot;
@@ -157,6 +159,7 @@ type EffectivePluginsChangedCallback = Arc<dyn Fn(EffectivePluginsChange) + Send
 #[derive(Debug, Clone)]
 pub struct PluginsConfigInput {
     pub config_layer_stack: ConfigLayerStack,
+    pub plugins: PluginsConfigToml,
     pub model_provider_id: String,
     pub plugins_enabled: bool,
     pub remote_plugin_enabled: bool,
@@ -167,8 +170,11 @@ pub struct PluginsConfigInput {
 }
 
 impl PluginsConfigInput {
+    // Require validated policy at construction; a default followed by a setter could fail open.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config_layer_stack: ConfigLayerStack,
+        plugins: PluginsConfigToml,
         model_provider_id: String,
         plugins_enabled: bool,
         remote_plugin_enabled: bool,
@@ -178,6 +184,7 @@ impl PluginsConfigInput {
     ) -> Self {
         Self {
             config_layer_stack,
+            plugins,
             model_provider_id,
             plugins_enabled,
             remote_plugin_enabled,
@@ -633,6 +640,7 @@ impl LoadedPluginsCache {
 #[derive(Clone, PartialEq, Eq)]
 struct PluginLoadCacheKey {
     configured_plugins: HashMap<String, PluginConfig>,
+    plugin_policy: PluginsConfigToml,
     skill_config_rules: SkillConfigRules,
     remote_global_catalog_active: bool,
     auth_identity: Option<RemoteInstalledPluginsAuthIdentity>,
@@ -650,6 +658,7 @@ impl PluginLoadCacheKey {
                 &config.config_layer_stack,
                 codex_home,
             ),
+            plugin_policy: config.plugins.clone(),
             skill_config_rules: skill_config_rules_from_stack(&config.config_layer_stack),
             remote_global_catalog_active,
             // Local curated loads are auth-independent; only remote snapshots vary by account.
@@ -882,6 +891,7 @@ impl PluginsManager {
             let load_started = Instant::now();
             let plugins = load_plugins_from_layer_stack(
                 &config.config_layer_stack,
+                &config.plugins,
                 self.remote_installed_plugins_snapshot(),
                 &self.store,
                 Some(&plugin_skill_snapshots),
@@ -1003,6 +1013,7 @@ impl PluginsManager {
         let target_curated_marketplace = target_curated_marketplace(self.auth_mode());
         load_plugin_hooks_from_layer_stack(
             config_layer_stack,
+            &config.plugins,
             self.remote_installed_plugin_configs(),
             &self.store,
             target_curated_marketplace,
@@ -2752,7 +2763,7 @@ impl PluginsManager {
             })
             .collect();
         let auth_mode = self.auth_mode();
-        let mut app_declarations = if manifest_format == PluginManifestFormat::Legacy {
+        let mut app_declarations = if plugin_supports_apps(manifest_format, &plugin_id) {
             load_plugin_apps_from_manifest(source_path.as_path(), &manifest.paths).await
         } else {
             Vec::new()
@@ -2767,14 +2778,12 @@ impl PluginsManager {
             manifest_format,
         )
         .await;
-        if manifest_format == PluginManifestFormat::Legacy {
-            apply_app_mcp_routing_policy(
-                &mut app_declarations,
-                &mut mcp_servers,
-                auth_mode,
-                /*plugin_active*/ true,
-            );
-        }
+        apply_app_mcp_routing_policy(
+            &mut app_declarations,
+            &mut mcp_servers,
+            auth_mode,
+            /*plugin_active*/ true,
+        );
         let apps = app_connector_ids_from_declarations(&app_declarations);
         let mut seen_app_connector_ids = HashSet::new();
         let mut app_category_by_id = HashMap::new();
@@ -3577,7 +3586,10 @@ impl PluginsManager {
             .collect::<HashSet<_>>();
         let enabled = configured_plugins
             .into_iter()
-            .filter_map(|(plugin_key, plugin)| plugin.enabled.then_some(plugin_key))
+            .filter_map(|(plugin_key, plugin)| {
+                (plugin.enabled.unwrap_or(true) && config.plugins.allows_plugin(&plugin_key))
+                    .then_some(plugin_key)
+            })
             .collect::<HashSet<_>>();
         ConfiguredPluginStates { installed, enabled }
     }

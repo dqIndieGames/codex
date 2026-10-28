@@ -16,7 +16,6 @@ pub(crate) use input_budget::should_compact as should_compact_guardian_input;
 pub(crate) use permissions::for_tool as tool_permission_context;
 mod request_budget;
 pub(crate) use request_budget::ExhaustedReviewBudget;
-pub(crate) use request_budget::observe as observe_guardian_request;
 pub(crate) use request_budget::prepare_prompt as prepare_guardian_prompt;
 mod review;
 mod review_session;
@@ -37,6 +36,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::GuardianAssessmentOutcome;
 
+use crate::agents_md::LoadedAgentsMd;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::step_context::StepContext;
 use crate::session::step_settings::ResolvedStepSettings;
@@ -86,6 +86,7 @@ pub(crate) struct GuardianReviewContext {
     pub(crate) parent_response_id: Option<String>,
     turn: Arc<TurnContext>,
     environments: TurnEnvironmentSnapshot,
+    project_instructions: Option<Arc<LoadedAgentsMd>>,
     // Model and reasoning inputs are carried for the follow-up Guardian and V2 migrations.
     pub(crate) model_info: Arc<ModelInfo>,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
@@ -96,6 +97,17 @@ pub(crate) struct GuardianReviewContext {
 }
 
 impl GuardianReviewContext {
+    /// Keep the issuing instructions across retries even if a later turn selects other environments.
+    async fn capture_project_instructions(&mut self, session: &crate::session::session::Session) {
+        if self.project_instructions.is_none() {
+            self.project_instructions = session
+                .services
+                .agents_md_manager
+                .project_snapshot(&self.turn.config, &self.environments)
+                .await;
+        }
+    }
+
     pub(crate) fn model_context(&self) -> ModelInvocationContext {
         ModelInvocationContext {
             model_slug: self.model_info.slug.clone(),
@@ -118,6 +130,7 @@ impl GuardianReviewContext {
                 .get::<codex_api::ResponseId>()
                 .map(|id| id.0.clone()),
             environments: environments.clone(),
+            project_instructions: None,
             model_info: Arc::clone(&settings.model_info),
             reasoning_effort: settings.reasoning_effort().cloned(),
             reasoning_summary: settings.reasoning_summary,
@@ -147,6 +160,7 @@ impl From<&Arc<StepContext>> for GuardianReviewContext {
                 .map(|id| id.0.clone()),
             turn: Arc::clone(&step.turn),
             environments: step.environments.clone(),
+            project_instructions: Some(step.loaded_agents_md.clone().unwrap_or_default()),
             model_info: Arc::clone(&step.settings.model_info),
             reasoning_effort: step.settings.reasoning_effort().cloned(),
             reasoning_summary: step.settings.reasoning_summary,
@@ -165,6 +179,7 @@ impl From<Arc<TurnContext>> for GuardianReviewContext {
                 .get::<codex_api::ResponseId>()
                 .map(|id| id.0.clone()),
             environments: turn.initial_environments.clone(),
+            project_instructions: None,
             model_info: Arc::clone(turn.model_info()),
             reasoning_effort: turn.reasoning_effort().cloned(),
             reasoning_summary: turn.reasoning_summary(),

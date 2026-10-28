@@ -252,11 +252,22 @@ impl ChatWidget {
             } else {
                 self.ambient_pet_wrap_reserved_cols()
             };
+            options.rendered_selection = Some(&self.rendered_selection);
             options.warning_count = self.warning_display_state.count;
             options.textarea_right_reserve = right_reserve;
             options.separate_status_line = options.command_popup_placement
                 != crate::bottom_pane::CommandPopupPlacement::AboveComposer;
-            self.bottom_pane.backdrop_with_options(options)
+            let bottom_pane = self.bottom_pane.backdrop_with_options(options);
+            if !self.quick_dial_menu {
+                return bottom_pane;
+            }
+            let mut column = FlexRenderable::new();
+            column.push(
+                /*flex*/ 1,
+                RenderableItem::Owned(Box::new(self.quick_dial_hud())),
+            );
+            column.push(/*flex*/ 0, bottom_pane);
+            RenderableItem::Owned(Box::new(column))
         }
     }
 

@@ -52,6 +52,7 @@ use crate::history_cell::HistoryCell;
 #[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
 use crate::hooks_rpc::HookTrustUpdate;
+use crate::key_hint::KeyBinding;
 use crate::key_hint::KeyBindingListExt;
 use crate::keymap::KeyChordMatcher;
 use crate::keymap::RuntimeKeymap;
@@ -215,8 +216,11 @@ mod app_server_events;
 pub(crate) mod app_server_requests;
 mod app_server_thread_ownership;
 mod backend_banner_fallback;
+mod backend_events;
+pub(crate) mod backend_sessions;
 mod background_requests;
 mod composer_hints;
+mod config_panel;
 mod config_persistence;
 mod connector_mentions;
 mod daemon_menu;
@@ -236,9 +240,11 @@ mod managed_worktree_creation;
 mod misalignment_policy;
 mod model_defaults;
 mod new_session;
+mod quick_dials;
 mod turn_tips;
 pub(crate) use new_session::has_launch_setting;
 mod clipboard;
+mod footer_selection;
 mod native_history;
 mod owned_transcript;
 mod pending_interactive_replay;
@@ -256,6 +262,7 @@ mod replay_filter;
 mod resize_reflow;
 mod resume_config;
 mod right_click_paste;
+pub(crate) use right_click_paste::PasteEnvironment;
 mod safety_buffering;
 mod server_version_notice;
 mod session_lifecycle;
@@ -274,6 +281,7 @@ mod thread_settings;
 mod thread_title;
 mod transcript_export;
 mod tui_mode_picker;
+mod user_turn_submission;
 mod user_verification;
 mod user_verification_errors;
 mod user_verification_requests;
@@ -529,8 +537,11 @@ struct InitialHistoryReplayBuffer {
 
 pub(crate) struct App {
     feature_write_lock: Arc<tokio::sync::Mutex<()>>,
+    config_notification_test_generation: u64,
+    config_notification_test_pending: Option<u64>,
     model_catalog: Arc<ModelCatalog>,
     pub(crate) session_telemetry: SessionTelemetry,
+    terminal_size_tags: crate::terminal_size_telemetry::LaunchTags,
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) chat_widget: ChatWidget,
     workspace_command_runner: Option<WorkspaceCommandRunner>,
@@ -574,6 +585,7 @@ pub(crate) struct App {
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) keymap: RuntimeKeymap,
     pub(crate) key_chord_matcher: KeyChordMatcher,
+    routed_key_activation: Option<KeyBinding>,
 
     /// The foreground loop owns stream pacing; stopped animations have no timer.
     pub(crate) commit_animation: Option<tokio::time::Interval>,
@@ -600,6 +612,8 @@ pub(crate) struct App {
     /// Set when the user confirms an update; propagated on exit.
     daemon_cli_executable: Option<AbsolutePathBuf>,
     pub(crate) pending_update_action: Option<UpdateAction>,
+    /// Retained through all loop exits so shutdown cannot interrupt stop followed by start.
+    daemon_restart: Option<JoinHandle<anyhow::Result<codex_app_server_daemon::LifecycleOutput>>>,
 
     /// Tracks the thread we intentionally shut down while exiting the app.
     ///
@@ -655,7 +669,8 @@ pub(crate) struct App {
     pending_managed_worktree_attach: Option<Box<working_directory::ManagedWorktreeAttach>>,
     /// Keeps protected screens quarantined until initialized chat receives genuine user input.
     startup_protected_input_boundary: bool,
-    /// Keeps that boundary armed while a startup approval waits for the typing-idle timer.
+    /// Keeps that boundary armed while an approval waits for the typing-idle timer or a visible
+    /// modal's terminal input has not settled.
     startup_pending_protected_request: bool,
     /// Invalidates in-flight full rate-limit reads when a newer rolling hard stop arrives.
     account_email_request_id: Option<uuid::Uuid>,
@@ -855,7 +870,27 @@ impl App {
         self.invalidate_right_click_paste(&event);
         self.finish_clipboard(tui, &event);
         let event = self.finish_right_click_paste(tui, event);
+        if self.startup_protected_input_boundary
+            && self.startup_pending_protected_request
+            && self.chat_widget.has_active_modal()
+            && matches!(
+                &event,
+                TuiEvent::Key(_) | TuiEvent::Paste(_) | TuiEvent::Mouse(_)
+            )
+        {
+            self.discard_startup_modal_input(tui)?;
+            return Ok(AppRunControl::Continue);
+        }
+        if matches!(&event, TuiEvent::Key(key) if key.kind != KeyEventKind::Release)
+            || matches!(&event, TuiEvent::Paste(text) if !text.is_empty())
+            || matches!(&event, TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
+        {
+            self.chat_widget.acknowledge_program_status();
+        }
         let idle_draw = matches!(event, TuiEvent::Draw);
+        if self.handle_rendered_selection_event(tui, &event)? {
+            return Ok(AppRunControl::Continue);
+        }
         if matches!(&event, TuiEvent::Key(_))
             && self.handle_composer_copy_event(tui, &event, |tui, text| {
                 tui.copy_transcript_selection(text, crate::clipboard_copy::CopyFormat::PlainText)
@@ -884,6 +919,9 @@ impl App {
         if self.reconnect.offline
             && !transcript_owns_input
             && !self.chat_widget.keymap_contexts().is_warnings()
+            && !self
+                .chat_widget
+                .active_view_accepts_input_when_disconnected()
             && let TuiEvent::Key(key) = &event
             && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
             && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -904,8 +942,15 @@ impl App {
             self.handle_draw_pre_render(tui, screen_size)?;
         }
 
-        if matches!(&event, TuiEvent::Paste(_) | TuiEvent::FocusLost) {
+        if matches!(&event, TuiEvent::Paste(_) | TuiEvent::FocusLost)
+            || matches!(&event, TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
+        {
             self.cancel_pending_key_chord();
+        }
+        if matches!(&event, TuiEvent::FocusLost)
+            || matches!(&event, TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
+        {
+            self.chat_widget.interrupt_config_editor_transition();
         }
 
         if self.overlay.is_none()
@@ -1015,16 +1060,29 @@ impl App {
                         && self.chat_widget.agents_navigation_key_available()))
             {
                 self.open_agents_overview(app_server);
-            } else if self.reconnect.presentation == reconnect::ReconnectPresentation::Overview {
-                self.chat_widget.handle_disconnected_view_key(*key);
-                if self
-                    .chat_widget
-                    .selected_index_for_present_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
-                    .is_none()
+            } else if self
+                .chat_widget
+                .active_view_accepts_input_when_disconnected()
+                || (self.reconnect.presentation == reconnect::ReconnectPresentation::Overview
+                    && self
+                        .chat_widget
+                        .active_view_is(agents_overview::AGENTS_OVERVIEW_VIEW_ID))
+            {
+                let activation_key = self.routed_key_activation.take();
+                self.chat_widget
+                    .handle_disconnected_view_key(*key, activation_key);
+                if self.reconnect.presentation == reconnect::ReconnectPresentation::Overview
+                    && self
+                        .chat_widget
+                        .selected_index_for_present_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
+                        .is_none()
                 {
                     self.reconnect.presentation = reconnect::ReconnectPresentation::Conversation;
                 }
             } else {
+                if self.reconnect.presentation == reconnect::ReconnectPresentation::Overview {
+                    self.reconnect.presentation = reconnect::ReconnectPresentation::Conversation;
+                }
                 self.chat_widget
                     .handle_restricted_key(*key, RestrictedInputMode::Disconnected);
             }
@@ -1073,12 +1131,15 @@ impl App {
                             self.reset_backtrack_state();
                         }
                     }
-                    self.chat_widget.handle_paste(pasted);
-                    if self.reconnect.offline
+                    let restrict_disconnected_input = self.reconnect.offline
                         && !self.chat_widget.keymap_contexts().is_warnings()
                         && self.reconnect.presentation
-                            == reconnect::ReconnectPresentation::Conversation
-                    {
+                            != reconnect::ReconnectPresentation::Overview
+                        && !self
+                            .chat_widget
+                            .active_view_accepts_input_when_disconnected();
+                    self.chat_widget.handle_paste(pasted);
+                    if restrict_disconnected_input {
                         self.chat_widget.handle_restricted_key(
                             KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
                             RestrictedInputMode::Disconnected,
@@ -1116,8 +1177,7 @@ impl App {
                         && self.chat_widget.has_active_modal()
                         && self.startup_protected_input_boundary
                     {
-                        tui.discard_pending_input_before_interactive_screen()?;
-                        self.startup_pending_protected_request = false;
+                        self.discard_startup_modal_input(tui)?;
                     }
                     if self.chat_widget.ambient_pet_image_enabled() {
                         let ambient_pet_area = Rect::new(
@@ -1170,7 +1230,6 @@ impl App {
     }
 
     fn render_chat_widget_frame(&mut self, tui: &mut tui::Tui, screen_size: Size) -> Result<Rect> {
-        self.sync_thread_title_progress();
         self.chat_widget
             .set_sparkle_terminal_focus(tui.is_terminal_focused());
         if tui.is_owned_screen() {

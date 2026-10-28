@@ -27,8 +27,10 @@ use self::connection::Connection;
 use self::connection::ConnectionError;
 use self::connection::RemoteSession;
 use self::connection::SessionCleanup;
+use self::delegate::TracedCellDelegate;
 
 mod connection;
+mod delegate;
 
 /// Private CLI dispatch flag for the host embedded in the single-file package.
 pub const BUNDLED_HOST_ARG: &str = "--local3-code-mode-host";
@@ -277,6 +279,10 @@ impl ProcessOwnedCodeModeSession {
         preempt: Option<CancellationToken>,
     ) -> Result<StartedCell, String> {
         let binding = self.connection().await?;
+        let delegate = Arc::new(TracedCellDelegate {
+            delegate,
+            trace: codex_otel::current_span_w3c_trace_context(),
+        });
         binding
             .connection
             .execute(binding.remote, request, delegate, preempt)

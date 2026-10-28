@@ -14,8 +14,20 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::REMOTE_ENVIRONMENT_ID;
 use codex_exec_server::RemoveOptions;
+use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ToolFinishInput;
+use codex_extension_api::ToolLifecycleContributor;
+use codex_extension_api::ToolLifecycleFuture;
 use codex_features::Feature;
 use codex_history::RolloutItem;
+#[cfg(unix)]
+use codex_network_proxy::CredentialProviderConfig;
+#[cfg(unix)]
+use codex_network_proxy::MitmHookActionsConfig;
+#[cfg(unix)]
+use codex_network_proxy::MitmHookConfig;
+#[cfg(unix)]
+use codex_network_proxy::MitmHookMatchConfig;
 use codex_network_proxy::NetworkProxyConfig;
 use codex_network_proxy::PROXY_ACTIVE_ENV_KEY;
 use codex_protocol::approvals::ExecApprovalKind;
@@ -657,10 +669,34 @@ async fn timed_out_guardian_network_review_uses_timeout_outcome_without_user_fal
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
-    let server = start_mock_server().await;
-    let test = managed_network_unified_exec_test(&server).await?;
+    struct HoldExecResult {
+        call_id: &'static str,
+        release: tokio::sync::Notify,
+    }
+
+    impl ToolLifecycleContributor for HoldExecResult {
+        fn on_tool_finish<'a>(&'a self, input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
+            Box::pin(async move {
+                if input.call_id == self.call_id {
+                    self.release.notified().await;
+                }
+            })
+        }
+    }
+
     let call_id = "guardian-network-timeout";
     let poll_call_id = "guardian-network-timeout-poll";
+    let hold_result = Arc::new(HoldExecResult {
+        call_id,
+        release: tokio::sync::Notify::new(),
+    });
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.tool_lifecycle_contributor(hold_result.clone());
+    let server = start_mock_server().await;
+    let test = managed_network_unified_exec_builder(&[])?
+        .with_extensions(Arc::new(extensions.build()))
+        .build_with_remote_and_local_env(&server)
+        .await?;
     mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
@@ -692,7 +728,9 @@ async fn timed_out_guardian_network_review_uses_timeout_outcome_without_user_fal
     mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            !is_guardian_request(request) && request_body_contains(request, call_id)
+            !is_guardian_request(request)
+                && request_body_contains(request, call_id)
+                && request_body_contains(request, "Process running with session ID 1000")
         },
         sse(vec![
             ev_response_created("resp-guardian-timeout-parent-followup"),
@@ -712,7 +750,7 @@ async fn timed_out_guardian_network_review_uses_timeout_outcome_without_user_fal
     let parent_final = mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            !is_guardian_request(request) && request_body_contains(request, poll_call_id)
+            !is_guardian_request(request) && request_body_contains(request, call_id)
         },
         sse(vec![
             ev_response_created("resp-guardian-timeout-parent-final"),
@@ -734,12 +772,33 @@ async fn timed_out_guardian_network_review_uses_timeout_outcome_without_user_fal
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(91)).await;
     tokio::time::resume();
+
+    // The clock jump expires the review, but cancellation and output drainage
+    // still run asynchronously. Hold the tool result until its terminal event
+    // so the model cannot poll before the final failure is available.
+    let completion = tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 10),
+        wait_for_event(&test.codex, |event| match event {
+            EventMsg::ExecCommandEnd(event) => event.call_id == call_id,
+            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_) => true,
+            _ => false,
+        }),
+    )
+    .await;
+    // notify_one retains a permit if the tool-finish callback has not run yet.
+    hold_result.release.notify_one();
+    let completion = completion.context("timed out waiting for the network command to finish")?;
+    assert!(
+        matches!(completion, EventMsg::ExecCommandEnd(_)),
+        "unexpected event before command completion: {completion:?}"
+    );
     wait_for_completion_without_network_prompt(&test).await;
 
-    let tool_output = parent_final
-        .requests()
-        .iter()
-        .find_map(|request| request.function_call_output_text(poll_call_id))
+    let request = parent_final.single_request();
+    // If the initial exec call already returned its final error, no poll is needed.
+    let tool_output = request
+        .function_call_output_text(poll_call_id)
+        .or_else(|| request.function_call_output_text(call_id))
         .context("expected timed-out Guardian tool output")?;
     assert!(
         tool_output.contains(concat!(
@@ -1107,7 +1166,7 @@ async fn user_network_approval_once_session_and_denial_semantics() -> Result<()>
     assert_eq!(approval.cwd, test.config.cwd.clone().into());
     assert_eq!(
         approval.reason.as_deref(),
-        Some("codex-network-test.invalid is not in the allowed_domains")
+        Some("Network access to codex-network-test.invalid requires approval")
     );
     test.codex
         .submit(Op::ExecApproval {
@@ -1743,6 +1802,7 @@ async fn unattributed_network_request_uses_active_turn_environment_fallback(
             .environment_ready(
                 &selection,
                 EnvironmentConfig {
+                    environment_hooks: Default::default(),
                     allow_login_shell: test.config.permissions.allow_login_shell,
                     workspace_roots: selection.workspace_roots.clone(),
                     permission_profile: PermissionProfileSnapshot::legacy(
@@ -2720,6 +2780,7 @@ async fn owner_network_policy_follows_the_selected_remote_command() -> Result<()
                     PermissionProfile::from_runtime_permissions(&filesystem, network);
             }
             let owner_config = EnvironmentConfig {
+                environment_hooks: Default::default(),
                 allow_login_shell: test.config.permissions.allow_login_shell,
                 workspace_roots: remote.workspace_roots.clone(),
                 permission_profile: PermissionProfileSnapshot::legacy(permission_profile),
@@ -2737,6 +2798,7 @@ async fn owner_network_policy_follows_the_selected_remote_command() -> Result<()
             };
             let mut primary = local(test.cwd.path().abs());
             primary.config = EnvironmentConfigState::Ready(EnvironmentConfig {
+                environment_hooks: Default::default(),
                 workspace_roots: primary.workspace_roots.clone(),
                 permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::Disabled),
                 network_policy: None,
@@ -2942,6 +3004,7 @@ async fn escalated_owner_network_terminal_requires_stdin_approval(
     let mut proxy = NetworkProxyConfig::default();
     proxy.set_allowed_domains(vec!["owner-only.invalid".to_string()]);
     remote.config = EnvironmentConfigState::Ready(EnvironmentConfig {
+        environment_hooks: Default::default(),
         allow_login_shell: test.config.permissions.allow_login_shell,
         workspace_roots: remote.workspace_roots.clone(),
         permission_profile: PermissionProfileSnapshot::legacy(
@@ -3140,6 +3203,134 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
         )
         .await?;
 
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_started_proxy_denies_brokered_provider_alias() -> Result<()> {
+    const REAL_CREDENTIAL: &str = "alias_aaaaaaaaaaaaaaaaaaaaaaaa";
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = upstream.local_addr()?.port();
+    let mut network = NetworkProxyConfig {
+        enabled: true,
+        proxy_url: "http://127.0.0.1:0".to_string(),
+        socks_url: "http://127.0.0.1:0".to_string(),
+        // Local requests must stay behind the proxy for their credentials to be masked.
+        allow_local_binding: Some(false),
+        allow_upstream_proxy: false,
+        mitm_hooks: vec![MitmHookConfig {
+            host: "localhost".to_string(),
+            matcher: MitmHookMatchConfig {
+                methods: vec!["GET".to_string()],
+                path_prefixes: vec!["/v1".to_string()],
+                ..MitmHookMatchConfig::default()
+            },
+            actions: MitmHookActionsConfig::default(),
+        }],
+        ..NetworkProxyConfig::default()
+    };
+    network.set_credential_broker_enabled(/*enabled*/ true);
+    network.set_allowed_domains(vec!["localhost".to_string(), "127.0.0.1".to_string()]);
+    network.credential_providers.insert(
+        "alias_test".to_string(),
+        CredentialProviderConfig {
+            env: vec!["ALIAS_TEST_TOKEN".to_string()],
+            patterns: vec!["alias_[a-z]{24}".to_string()],
+            url_prefixes: vec![
+                format!("http://localhost:{port}/v1"),
+                format!("http://127.0.0.1:{port}/v2"),
+            ],
+            ..CredentialProviderConfig::default()
+        },
+    );
+    let permission_profile = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Enabled,
+        /*exclude_tmpdir_env_var*/ false,
+        /*exclude_slash_tmp*/ false,
+    );
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_config(move |config| {
+            for feature in [
+                Feature::UnifiedExec,
+                Feature::ShellSnapshot,
+                Feature::NetworkProxy,
+            ] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("enable test feature");
+            }
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            config
+                .permissions
+                .set_permission_profile(permission_profile.clone())
+                .expect("set permission profile");
+            config
+                .permissions
+                .shell_environment_policy
+                .r#set
+                .insert("ALIAS_TEST_TOKEN".to_string(), REAL_CREDENTIAL.to_string());
+            config.permissions.network = Some(
+                NetworkProxySpec::from_config_and_constraints(
+                    network,
+                    /*requirements*/ None,
+                    &permission_profile,
+                )
+                .expect("build brokered managed network proxy"),
+            );
+        })
+        // Credential brokerage currently runs only in the local environment.
+        .build(&server)
+        .await?;
+    let proxy = test
+        .session_configured
+        .network_proxy
+        .as_ref()
+        .context("agent did not start its managed network proxy")?;
+    let command = r#"printf 'BROKERED:%s\nACTIVE:%s\n' "$ALIAS_TEST_TOKEN" "$CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE""#;
+    let call_id = "exec-brokered-provider-alias";
+    let mut args = network_exec_args(command);
+    args["yield_time_ms"] = json!(30_000);
+    let responses =
+        mount_exec_network_turn(&server, "resp-brokered-provider-alias", call_id, args).await?;
+    test.submit_text_turn("read the brokered credential")
+        .await?;
+    let output = responses
+        .function_call_output_text(call_id)
+        .context("agent did not return command output")?;
+    assert!(output.contains("ACTIVE:1"), "{output}");
+    assert!(!output.contains(REAL_CREDENTIAL));
+    let token = output
+        .lines()
+        .find_map(|line| line.strip_prefix("BROKERED:"))
+        .context("agent did not expose its brokered dummy")?;
+    assert!(token.starts_with("alias_"));
+
+    // Probe after the command exits so the denial cannot interrupt the tool call.
+    let response = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        let mut connection = tokio::net::TcpStream::connect(&proxy.http_addr).await?;
+        connection
+            .write_all(
+                format!(
+                    "GET http://127.0.0.1:{port}/v2/resource HTTP/1.1\r\n\
+                     Host: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\
+                     Connection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await?;
+        let mut response = String::new();
+        connection.read_to_string(&mut response).await?;
+        Ok::<_, std::io::Error>(response)
+    })
+    .await
+    .context("alias denial did not finish")??;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert!(response.contains("blocked-by-mitm-hook"), "{response}");
+    assert!(!response.contains(REAL_CREDENTIAL));
     Ok(())
 }
 

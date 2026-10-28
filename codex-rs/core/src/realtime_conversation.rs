@@ -358,14 +358,14 @@ impl RealtimeStreamedItem {
             if self.buffered_text.is_empty() {
                 return None;
             }
-            let text = self.buffered_text.drain(..).collect::<String>();
+            let text = std::mem::take(&mut self.buffered_text);
             let text = format!("{prefix}{text}");
             self.sent_bytes += text.len();
             return Some(text);
         }
 
-        let head = self.buffered_text.drain(..).collect::<String>();
-        let tail = self.tail_text.drain(..).collect::<String>();
+        let head = std::mem::take(&mut self.buffered_text);
+        let tail = std::mem::take(&mut self.tail_text);
         let text = format!("{prefix}{head}{HANDOFF_STREAM_TRUNCATION_MARKER}{tail}");
         self.sent_bytes += text.len();
         Some(text)
@@ -519,6 +519,8 @@ impl RealtimeHandoffState {
 
 #[allow(dead_code)]
 struct ConversationState {
+    session_id: Option<String>,
+    sub_id: String,
     audio_tx: Sender<RealtimeAudioFrame>,
     text_tx: Sender<ConversationTextParams>,
     session_kind: RealtimeSessionKind,
@@ -621,23 +623,34 @@ impl RealtimeConversationManager {
         &self,
         start: RealtimeStart,
         mode_instructions: RealtimeModeInstructions,
+        sess: &Arc<Session>,
+        sub_id: &str,
     ) -> CodexResult<RealtimeStartOutput> {
         let previous_state = {
             let mut guard = self.state.lock().await;
             guard.conversation.take()
         };
         if let Some(state) = previous_state {
+            let previous_sub_id = state.sub_id.clone();
             stop_conversation_state(state, RealtimeFanoutTaskStop::Await).await;
+            send_realtime_conversation_closed(
+                sess,
+                previous_sub_id,
+                RealtimeConversationEnd::Requested,
+            )
+            .await;
         }
 
-        self.start_inner(start, mode_instructions).await
+        self.start_inner(start, mode_instructions, sub_id).await
     }
 
     async fn start_inner(
         &self,
         start: RealtimeStart,
         mode_instructions: RealtimeModeInstructions,
+        sub_id: &str,
     ) -> CodexResult<RealtimeStartOutput> {
+        let session_id = start.session_config.session_id.clone();
         let RealtimeStart {
             api_provider,
             http_client_factory,
@@ -798,6 +811,8 @@ impl RealtimeConversationManager {
 
         let mut state = self.state.lock().await;
         state.conversation = Some(ConversationState {
+            session_id,
+            sub_id: sub_id.to_owned(),
             audio_tx,
             text_tx,
             session_kind,
@@ -840,20 +855,32 @@ impl RealtimeConversationManager {
         }
     }
 
-    pub(crate) async fn finish_if_active(&self, realtime_active: &Arc<AtomicBool>) {
-        let state = {
-            let mut guard = self.state.lock().await;
-            match guard.conversation.as_ref() {
-                Some(state) if Arc::ptr_eq(&state.realtime_active, realtime_active) => {
-                    guard.conversation.take()
-                }
-                _ => None,
-            }
-        };
-
-        if let Some(state) = state {
-            stop_conversation_state(state, RealtimeFanoutTaskStop::Detach).await;
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "Publish the matching close before a replacement can start its history segment."
+    )]
+    async fn finish_if_active(
+        &self,
+        sess: &Arc<Session>,
+        realtime_active: &Arc<AtomicBool>,
+        sub_id: String,
+        end: RealtimeConversationEnd,
+    ) {
+        // Keep selection and its close event together. An old fanout must not
+        // close the history segment that belongs to a replacement.
+        let mut guard = self.state.lock().await;
+        if !guard
+            .conversation
+            .as_ref()
+            .is_some_and(|state| Arc::ptr_eq(&state.realtime_active, realtime_active))
+        {
+            return;
         }
+        let Some(state) = guard.conversation.take() else {
+            return;
+        };
+        stop_conversation_state(state, RealtimeFanoutTaskStop::Detach).await;
+        send_realtime_conversation_closed(sess, sub_id, end).await;
     }
 
     pub(crate) async fn audio_in(&self, frame: RealtimeAudioFrame) -> CodexResult<()> {
@@ -1463,6 +1490,7 @@ async fn prepare_realtime_start(
             let realtime_api_key = realtime_api_key(auth.as_ref(), &provider)?;
             realtime_request_headers(
                 requested_realtime_session_id.as_deref(),
+                params.voice_session_id.as_deref(),
                 Some(realtime_api_key.as_str()),
                 event_parser,
                 originator.as_str(),
@@ -1472,6 +1500,7 @@ async fn prepare_realtime_start(
         | ConversationStartTransport::ExistingCall { .. } => {
             realtime_request_headers(
                 requested_realtime_session_id.as_deref(),
+                params.voice_session_id.as_deref(),
                 /*api_key*/ None,
                 event_parser,
                 originator.as_str(),
@@ -1687,8 +1716,9 @@ fn realtime_backend_item(text: String, prefix: Option<&str>) -> String {
 fn validate_realtime_voice(version: RealtimeWsVersion, voice: RealtimeVoice) -> CodexResult<()> {
     let voices = RealtimeVoicesList::builtin();
     let allowed = match version {
-        RealtimeWsVersion::V1 | RealtimeWsVersion::V3 => &voices.v1,
+        RealtimeWsVersion::V1 => &voices.v1,
         RealtimeWsVersion::V2 => &voices.v2,
+        RealtimeWsVersion::V3 => &voices.v3,
     };
     if allowed.contains(&voice) {
         return Ok(());
@@ -1811,7 +1841,10 @@ async fn handle_start_inner(
         sdp,
         existing_call_id,
     };
-    let start_output = sess.conversation.start(start, mode_instructions).await?;
+    let start_output = sess
+        .conversation
+        .start(start, mode_instructions, sess, sub_id)
+        .await?;
 
     info!("realtime conversation started");
 
@@ -1896,7 +1929,14 @@ async fn handle_start_inner(
             }
         }
         // Make realtime_end eligible only after the tail has reached history.
-        sess_clone.conversation.state.lock().await.context_active = false;
+        {
+            let mut state = sess_clone.conversation.state.lock().await;
+            if state.conversation.as_ref().is_none_or(|current| {
+                Arc::ptr_eq(&current.realtime_active, &fanout_realtime_active)
+            }) {
+                state.context_active = false;
+            }
+        }
         if let Some(error) = handoff_error {
             end = RealtimeConversationEnd::Error;
             sess_clone
@@ -1918,9 +1958,8 @@ async fn handle_start_inner(
             }
             sess_clone
                 .conversation
-                .finish_if_active(&fanout_realtime_active)
+                .finish_if_active(&sess_clone, &fanout_realtime_active, sub_id, end)
                 .await;
-            send_realtime_conversation_closed(&sess_clone, sub_id, end).await;
         }
     });
     sess.conversation
@@ -1979,7 +2018,10 @@ fn wrap_realtime_delegation_input(
     transcript_delta: Option<&str>,
     source: RealtimeDelegationSource,
 ) -> String {
-    RealtimeDelegation::new(input, transcript_delta, source).render()
+    RealtimeDelegation::new(input, transcript_delta, source)
+        .render()
+        .into_text()
+        .unwrap_or_default()
 }
 
 fn realtime_api_key(auth: Option<&CodexAuth>, provider: &ModelProviderInfo) -> CodexResult<String> {
@@ -2010,6 +2052,7 @@ fn realtime_api_key(auth: Option<&CodexAuth>, provider: &ModelProviderInfo) -> C
 
 fn realtime_request_headers(
     realtime_session_id: Option<&str>,
+    voice_session_id: Option<&str>,
     api_key: Option<&str>,
     event_parser: RealtimeEventParser,
     originator: &str,
@@ -2030,6 +2073,12 @@ fn realtime_request_headers(
         && let Ok(realtime_session_id) = HeaderValue::from_str(realtime_session_id)
     {
         headers.insert("x-session-id", realtime_session_id);
+    }
+
+    if let Some(voice_session_id) = voice_session_id
+        && let Ok(voice_session_id) = HeaderValue::from_str(voice_session_id)
+    {
+        headers.insert("voice-session-id", voice_session_id);
     }
 
     if let Some(api_key) = api_key {
@@ -2079,7 +2128,41 @@ pub(crate) async fn handle_speech(
 }
 
 pub(crate) async fn handle_close(sess: &Arc<Session>, sub_id: String) {
-    end_realtime_conversation(sess, sub_id, RealtimeConversationEnd::Requested).await;
+    handle_detach(sess, /*expected*/ None, &sub_id).await;
+}
+
+/// Uses the ordinary sequential start path and reports its connection result.
+pub(crate) async fn handle_attach(
+    sess: &Arc<Session>,
+    sub_id: String,
+    params: ConversationStartParams,
+) -> CodexResult<()> {
+    let prepared = prepare_realtime_start(sess, params).await?;
+    handle_start_inner(sess, &sub_id, prepared).await
+}
+
+pub(crate) async fn handle_detach(sess: &Arc<Session>, expected: Option<&str>, stop_sub_id: &str) {
+    let current = {
+        let mut state = sess.conversation.state.lock().await;
+        if expected.is_some_and(|expected| {
+            state
+                .conversation
+                .as_ref()
+                .and_then(|current| current.session_id.as_deref())
+                != Some(expected)
+        }) {
+            return;
+        }
+        state.conversation.take()
+    };
+    let sub_id = if let Some(current) = current {
+        let sub_id = current.sub_id.clone();
+        stop_conversation_state(current, RealtimeFanoutTaskStop::Await).await;
+        sub_id
+    } else {
+        stop_sub_id.to_owned()
+    };
+    send_realtime_conversation_closed(sess, sub_id, RealtimeConversationEnd::Requested).await;
 }
 
 fn spawn_realtime_input_task(
@@ -2832,15 +2915,6 @@ async fn send_conversation_error(
         }),
     })
     .await;
-}
-
-async fn end_realtime_conversation(
-    sess: &Arc<Session>,
-    sub_id: String,
-    end: RealtimeConversationEnd,
-) {
-    let _ = sess.conversation.shutdown().await;
-    send_realtime_conversation_closed(sess, sub_id, end).await;
 }
 
 async fn send_realtime_conversation_closed(

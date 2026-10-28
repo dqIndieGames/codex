@@ -14,6 +14,9 @@ pub use compaction_resume_metadata::resume_multi_agent_version;
 mod compaction_checkpoint;
 pub use compaction_checkpoint::CompactionCheckpoint;
 
+mod initialization;
+pub use initialization::HistoryInitialization;
+
 use std::borrow::Borrow;
 use std::ops::Deref;
 use std::ops::DerefMut;
@@ -82,7 +85,7 @@ pub struct CodexHarnessMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_source: Option<RetainedSource>,
 
-    /// Whether a developer message was supplied by an app-server client.
+    /// Whether a developer message was supplied by a client or a client requested tool-output retention.
     #[serde(default)]
     pub client_authored: bool,
 
@@ -210,13 +213,13 @@ impl Borrow<ResponseItem> for ResponseItemEnvelope {
 /// Persisted rollout item used by core history and rollout storage.
 #[derive(Debug, Clone)]
 pub enum RolloutItem {
-    SessionMeta(SessionMetaLine),
+    SessionMeta(Box<SessionMetaLine>),
     ResponseItem(ResponseItemEnvelope),
     InterAgentCommunication(InterAgentCommunication),
     InterAgentCommunicationMetadata {
         trigger_turn: bool,
     },
-    Compacted(CompactedItem),
+    Compacted(Box<CompactedItem>),
     /// local3 image-ladder marker: replay re-applies `tier` to rebuilt history.
     ImagesShrunk(ImagesShrunkItem),
     TurnContext(TurnContextItem),
@@ -356,9 +359,13 @@ impl JsonSchema for CompactedItem {
 impl From<CompactedItem> for ResponseItem {
     fn from(value: CompactedItem) -> Self {
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
+                annotations: None,
+                logprobs: None,
                 text: value.message,
             }],
             phase: None,

@@ -9,6 +9,8 @@ pub use shutdown::AgentTreeShutdownReport;
 pub(crate) use shutdown::thread_store_error_kind;
 
 use crate::CodexAppsToolsCache;
+use crate::CodexThreadSettingsOverrides;
+use crate::agent::AgentStatus;
 use crate::agent::LocalAgentControl;
 use crate::agent::api::AgentConfigUpdate;
 use crate::agent::api::AgentControl;
@@ -40,7 +42,7 @@ use crate::tasks::interrupted_turn_history_marker;
 use crate::thread_startup_metadata::ThreadStartupMetadata;
 use codex_agent_graph_store::AgentGraphStore;
 use codex_agent_graph_store::LocalAgentGraphStore;
-use codex_agent_message_board_extension::LocalAgentMessageBoard;
+use codex_agent_message_board_extension::local_board_options;
 use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::TurnStatus;
@@ -58,13 +60,16 @@ use codex_extension_api::ThreadInstructionsProvider;
 use codex_extension_api::UserInstructionsProvider;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
+use codex_history::HistoryInitialization;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
+use codex_install_context::InstallContext;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
 use codex_login::default_client::originator;
+use codex_message_board::LocalAgentMessageBoard;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
@@ -107,6 +112,7 @@ use codex_thread_store::StoredThread;
 use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadStore;
 use codex_thread_store::ThreadStoreError;
+use codex_thread_store::ThreadStoreResumePreparation;
 use codex_thread_store::UpdateThreadMetadataParams;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_git_discovery::GitRootDiscovery;
@@ -360,8 +366,22 @@ pub struct InternalSessionParent {
     pub(crate) inherited_instructions: Option<SessionInstructions>,
 }
 
+/// Controls the prompt cache key sent on model requests, independently of session identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PromptCacheKey {
+    /// Preserve the existing session-derived key, including internal-session and fork routing.
+    #[default]
+    SessionDerived,
+    /// Send the caller's key on every model request in the session.
+    Custom(String),
+    /// Leave `prompt_cache_key` out of model requests.
+    Omit,
+}
+
 pub struct StartThreadOptions {
     pub config: Config,
+    /// Request-body cache key policy for this thread and its children. Hosts must reapply it on cold resume.
+    pub prompt_cache_key: PromptCacheKey,
     /// Host-owned provider for this root thread's additional instructions.
     ///
     /// Core composes these after the global [`UserInstructionsProvider`]
@@ -377,11 +397,15 @@ pub struct StartThreadOptions {
     pub thread_instructions_provider: Option<Arc<dyn ThreadInstructionsProvider>>,
     pub allow_provider_model_fallback: bool,
     pub initial_history: InitialHistory,
+    /// Store-owned state prepared while loading the resumed history.
+    pub resume_preparation: Option<ThreadStoreResumePreparation>,
     /// Parent captured for `start_thread`, including a parent not in the live registry.
     pub internal_parent: Option<InternalSessionParent>,
     pub history_mode: Option<ThreadHistoryMode>,
     pub session_source: Option<SessionSource>,
     pub thread_source: Option<ThreadSource>,
+    /// Creation metadata forwarded to storage; never inherited from a fork source.
+    pub attached_thread: bool,
     pub dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
     pub metrics_service_name: Option<String>,
     pub parent_trace: Option<W3cTraceContext>,
@@ -404,13 +428,16 @@ impl StartThreadOptions {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            prompt_cache_key: PromptCacheKey::default(),
             thread_instructions_provider: None,
             allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
+            resume_preparation: None,
             internal_parent: None,
             history_mode: None,
             session_source: None,
             thread_source: None,
+            attached_thread: false,
             dynamic_tools: Vec::new(),
             metrics_service_name: None,
             parent_trace: None,
@@ -496,6 +523,7 @@ fn effective_originator_value(
 
 pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) config: Config,
+    pub(crate) prompt_cache_key: Option<PromptCacheKey>,
     pub(crate) initial_history: InitialHistory,
     pub(crate) agent_control: LocalAgentControl,
     pub(crate) session_source: SessionSource,
@@ -526,7 +554,7 @@ pub(crate) struct ThreadManagerState {
     plugins_manager: Arc<PluginsManager>,
     mcp_manager: Arc<McpManager>,
     code_mode_session_provider: Arc<dyn CodeModeSessionProvider>,
-    extensions: Arc<ExtensionRegistry<Config>>,
+    pub(crate) extensions: Arc<ExtensionRegistry<Config>>,
     user_instructions_provider: Arc<dyn UserInstructionsProvider>,
     image_store: Arc<dyn AttachmentStore>,
     thread_store: Arc<dyn ThreadStore>,
@@ -575,13 +603,19 @@ pub fn thread_store_from_config(
                         let sqlite = sqlite.clone();
                         Box::pin(async move {
                             let boards = thread_ids.into_iter().map(Into::into).collect::<Vec<_>>();
-                            LocalAgentMessageBoard::delete_boards(&sqlite, &boards)
-                                .await
-                                .map_err(|err| ThreadStoreError::Internal {
+                            LocalAgentMessageBoard::delete_boards(
+                                &sqlite,
+                                &local_board_options(),
+                                &boards,
+                            )
+                            .await
+                            .map_err(|err| {
+                                ThreadStoreError::Internal {
                                     message: format!(
                                         "failed to delete agent message boards: {err}"
                                     ),
-                                })
+                                }
+                            })
                         })
                     }),
             );
@@ -669,7 +703,10 @@ impl ThreadManager {
             if config.features.enabled(Feature::CodeModeHost)
                 || config.code_mode.disable_in_process_fallback
             {
-                Arc::new(ProcessOwnedCodeModeSessionProvider::default())
+                Self::process_code_mode_session_provider(
+                    config,
+                    InstallContext::current().code_mode_host_program(),
+                )
             } else {
                 Arc::new(DisabledCodeModeSessionProvider)
             };
@@ -755,15 +792,31 @@ impl ThreadManager {
     pub(crate) fn with_code_mode_host_program_for_tests(
         mut self,
         host_program: PathBuf,
-        _config: &Config,
+        config: &Config,
     ) -> Self {
         let Some(state) = Arc::get_mut(&mut self.state) else {
             unreachable!("new thread manager state should not be shared");
         };
-        state.code_mode_session_provider = Arc::new(
-            ProcessOwnedCodeModeSessionProvider::with_host_program(host_program),
-        );
+        state.code_mode_session_provider =
+            Self::process_code_mode_session_provider(config, host_program);
         self
+    }
+
+    fn process_code_mode_session_provider(
+        config: &Config,
+        host_program: PathBuf,
+    ) -> Arc<dyn CodeModeSessionProvider> {
+        if config.features.enabled(Feature::CodeModeHostGrpc) {
+            Arc::new(
+                crate::code_mode_host::ProcessOwnedGrpcCodeModeSessionProvider::with_host_program(
+                    host_program,
+                ),
+            )
+        } else {
+            Arc::new(ProcessOwnedCodeModeSessionProvider::with_host_program(
+                host_program,
+            ))
+        }
     }
 
     /// Construct with a dummy AuthManager containing the provided CodexAuth.
@@ -1100,6 +1153,27 @@ impl ThreadManager {
 
     pub async fn get_thread(&self, thread_id: ThreadId) -> CodexResult<Arc<CodexThread>> {
         self.state.get_thread(thread_id).await
+    }
+
+    /// Board hosts may reach internal runtimes only through a matching explicit connection.
+    pub(crate) async fn get_thread_for_board(
+        &self,
+        thread_id: ThreadId,
+        connection: &codex_message_board::LocalBoardConnection,
+    ) -> CodexResult<Arc<CodexThread>> {
+        self.state
+            .threads
+            .read()
+            .await
+            .get(&thread_id)
+            .filter(|thread| {
+                thread
+                    .thread_extension_data()
+                    .get::<codex_message_board::LocalBoardConnection>()
+                    .is_some_and(|other| connection.same_board(&other))
+            })
+            .cloned()
+            .ok_or(CodexErr::ThreadNotFound(thread_id))
     }
 
     /// Updates metadata for loaded and cold threads through one entrypoint.
@@ -1520,7 +1594,7 @@ impl ThreadManager {
     /// as `Arc<CodexThread>`, it is possible that other references to it exist elsewhere.
     /// Returns the thread if the thread was found and removed.
     pub async fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<CodexThread>> {
-        self.state.threads.write().await.remove(thread_id)
+        self.state.remove_thread(thread_id).await
     }
 
     /// Removes a runtime for a client request, leaving internal workers with their owner.
@@ -1538,7 +1612,9 @@ impl ThreadManager {
                 "live internal threads can only be removed by their owner".to_owned(),
             ));
         }
-        Ok(threads.remove(thread_id))
+        Ok(threads.remove(thread_id).inspect(|thread| {
+            thread.session.services.mcp_runtime.revoke_ema();
+        }))
     }
 
     /// Removes a thread only if `thread_id` still maps to `expected`.
@@ -1555,7 +1631,9 @@ impl ThreadManager {
             .get(thread_id)
             .is_some_and(|thread| Arc::ptr_eq(thread, expected))
         {
-            threads.remove(thread_id)
+            threads.remove(thread_id).inspect(|thread| {
+                thread.session.services.mcp_runtime.revoke_ema();
+            })
         } else {
             None
         }
@@ -1597,7 +1675,9 @@ impl ThreadManager {
 
         let mut tracked_threads = self.state.threads.write().await;
         for thread_id in &report.completed {
-            tracked_threads.remove(thread_id);
+            if let Some(thread) = tracked_threads.remove(thread_id) {
+                thread.session.services.mcp_runtime.revoke_ema();
+            }
         }
 
         report
@@ -1610,6 +1690,36 @@ impl ThreadManager {
             .timed_out
             .sort_by_key(std::string::ToString::to_string);
         report
+    }
+
+    /// Captures the parent's current settings for a persisted-history fork.
+    /// Apply the returned settings to the new thread before starting its first turn.
+    pub async fn fork_options_from_parent(
+        &self,
+        source_thread_id: ThreadId,
+    ) -> CodexResult<(StartThreadOptions, CodexThreadSettingsOverrides)> {
+        let parent = self.get_thread(source_thread_id).await?;
+        let (config, settings, windows_sandbox_level, environments, reasoning_effort_pin) =
+            parent.session.fork_config().await;
+        let mut thread_extension_init = ExtensionDataInit::default();
+        thread_extension_init.insert(reasoning_effort_pin);
+        Ok((
+            StartThreadOptions {
+                history_mode: Some(settings.history_mode),
+                environments: Some(settings.environments.into_requests().environment_requests),
+                inherited_environments: Some(environments),
+                client_mcp_extensions: parent.client_mcp_extensions(),
+                disabled_plugin_ids: Some(settings.disabled_plugin_ids),
+                thread_extension_init,
+                turn_extension_init: settings.turn_extension_init,
+                ..StartThreadOptions::new(config)
+            },
+            CodexThreadSettingsOverrides {
+                collaboration_mode: Some(settings.collaboration_mode),
+                windows_sandbox_level: Some(windows_sandbox_level),
+                ..Default::default()
+            },
+        ))
     }
 
     /// Fork a legacy thread by snapshotting its full rollout history according to
@@ -1912,6 +2022,7 @@ impl ThreadManagerState {
         op: Op,
         parent_turn_id: Option<String>,
         root_turn_id: Option<String>,
+        message_delivery: Option<crate::agent_communication::MessageDelivery>,
     ) -> CodexResult<String> {
         let thread = self.get_thread(thread_id).await?;
         let residency_guard = if matches!(op, Op::InterAgentCommunication { .. }) {
@@ -1938,13 +2049,20 @@ impl ThreadManagerState {
                 parent_turn_id,
                 root_turn_id,
                 residency_guard,
+                message_delivery,
             )
             .await
     }
 
     /// Remove a thread from the manager by ID, returning it when present.
     pub(crate) async fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<CodexThread>> {
-        self.threads.write().await.remove(thread_id)
+        self.threads
+            .write()
+            .await
+            .remove(thread_id)
+            .inspect(|thread| {
+                thread.session.services.mcp_runtime.revoke_ema();
+            })
     }
 
     pub(crate) async fn effective_multi_agent_version_for_spawn(
@@ -2096,67 +2214,26 @@ impl ThreadManagerState {
         )
     }
 
-    /// Spawn a new thread with no history using a provided config.
-    pub(crate) async fn spawn_new_thread(
+    /// Start a newly spawned agent. Both history modes use the same options captured
+    /// from the spawning turn; only history ownership and persistence differ.
+    pub(crate) async fn spawn_child_thread(
         &self,
-        config: Config,
+        mut options: StartThreadOptions,
         agent_control: LocalAgentControl,
-    ) -> CodexResult<NewThread> {
-        Box::pin(self.spawn_new_thread_with_source(
-            config,
-            agent_control,
-            self.session_source.clone(),
-            /*history_mode*/ None,
-            /*dynamic_tools*/ Vec::new(),
-            /*parent_thread_id*/ None,
-            /*forked_from_thread_id*/ None,
-            /*thread_source*/ None,
-            /*metrics_service_name*/ None,
-            /*inherited_environments*/ None,
-            /*inherited_exec_policy*/ None,
-            /*environments*/ None,
-        ))
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn spawn_new_thread_with_source(
-        &self,
-        config: Config,
-        agent_control: LocalAgentControl,
-        session_source: SessionSource,
-        history_mode: Option<ThreadHistoryMode>,
-        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
         parent_thread_id: Option<ThreadId>,
-        forked_from_thread_id: Option<ThreadId>,
-        thread_source: Option<ThreadSource>,
-        metrics_service_name: Option<String>,
-        inherited_environments: Option<TurnEnvironmentSnapshot>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
-        environments: Option<Vec<TurnEnvironmentSelection>>,
     ) -> CodexResult<NewThread> {
-        let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
-        let options = StartThreadOptions {
-            history_mode,
-            session_source: Some(session_source),
-            thread_source,
-            metrics_service_name,
-            environments: environments.map(|selections| {
-                selections
-                    .into_iter()
-                    .map(TurnEnvironmentSelection::into_request)
-                    .collect()
-            }),
-            client_mcp_extensions,
-            dynamic_tools,
-            ..StartThreadOptions::new(config)
-        };
+        (options.client_mcp_extensions, options.prompt_cache_key) =
+            self.inherited_child_settings(parent_thread_id).await;
+        let forked = matches!(options.initial_history, InitialHistory::Forked(_));
         let mut request =
             ThreadSpawnRequest::new(options, Arc::clone(&self.auth_manager), agent_control);
         request.parent_thread_id = parent_thread_id;
-        request.forked_from_thread_id = forked_from_thread_id;
-        request.inherited_environments = inherited_environments;
         request.inherited_exec_policy = inherited_exec_policy;
+        if forked {
+            request.forked_from_thread_id = parent_thread_id;
+            request.fork_persistence = ForkPersistence::CopiedDeferred;
+        }
         Box::pin(self.spawn_thread(request)).await
     }
 
@@ -2166,6 +2243,7 @@ impl ThreadManagerState {
     ) -> CodexResult<NewThread> {
         let ResumeThreadWithHistoryOptions {
             config,
+            prompt_cache_key,
             initial_history,
             agent_control,
             session_source,
@@ -2176,12 +2254,13 @@ impl ThreadManagerState {
             inherited_exec_policy,
             client_mcp_extensions,
         } = options;
-        let client_mcp_extensions = match client_mcp_extensions {
-            Some(client_mcp_extensions) => client_mcp_extensions,
-            None => self.client_mcp_extensions_for_child(parent_thread_id).await,
-        };
+        let (parent_client_mcp_extensions, inherited_prompt_cache_key) =
+            self.inherited_child_settings(parent_thread_id).await;
+        let client_mcp_extensions = client_mcp_extensions.unwrap_or(parent_client_mcp_extensions);
+        let prompt_cache_key = prompt_cache_key.unwrap_or(inherited_prompt_cache_key);
         let thread_source = initial_history.get_resumed_thread_source();
         let options = StartThreadOptions {
+            prompt_cache_key,
             initial_history,
             session_source: Some(session_source),
             thread_source,
@@ -2203,63 +2282,41 @@ impl ThreadManagerState {
         Box::pin(self.spawn_thread(request)).await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn fork_thread_with_source(
-        &self,
-        config: Config,
-        initial_history: InitialHistory,
-        history_mode: Option<ThreadHistoryMode>,
-        agent_control: LocalAgentControl,
-        session_source: SessionSource,
-        thread_source: Option<ThreadSource>,
-        parent_thread_id: Option<ThreadId>,
-        forked_from_thread_id: Option<ThreadId>,
-        inherited_environments: Option<TurnEnvironmentSnapshot>,
-        inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
-        environments: Option<Vec<TurnEnvironmentSelection>>,
-        thread_extension_init: ExtensionDataInit,
-    ) -> CodexResult<NewThread> {
-        let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
-        let options = StartThreadOptions {
-            initial_history,
-            history_mode,
-            session_source: Some(session_source),
-            thread_source,
-            environments: environments.map(|selections| {
-                selections
-                    .into_iter()
-                    .map(TurnEnvironmentSelection::into_request)
-                    .collect()
-            }),
-            thread_extension_init,
-            client_mcp_extensions,
-            ..StartThreadOptions::new(config)
-        };
-        let mut request =
-            ThreadSpawnRequest::new(options, Arc::clone(&self.auth_manager), agent_control);
-        request.fork_persistence = ForkPersistence::CopiedDeferred;
-        request.parent_thread_id = parent_thread_id;
-        request.forked_from_thread_id = forked_from_thread_id;
-        request.inherited_environments = inherited_environments;
-        request.inherited_exec_policy = inherited_exec_policy;
-        Box::pin(self.spawn_thread(request)).await
-    }
-
-    async fn client_mcp_extensions_for_child(
+    async fn inherited_child_settings(
         &self,
         parent_thread_id: Option<ThreadId>,
-    ) -> ClientMcpExtensions {
+    ) -> (ClientMcpExtensions, PromptCacheKey) {
         let Some(parent_thread_id) = parent_thread_id else {
-            return ClientMcpExtensions::default();
+            return Default::default();
         };
         self.get_thread(parent_thread_id)
             .await
-            .map(|parent| parent.session.services.client_mcp_extensions.clone())
+            .map(|parent| {
+                (
+                    parent.session.services.client_mcp_extensions.clone(),
+                    parent
+                        .session
+                        .services
+                        .model_client
+                        .prompt_cache_key_policy(),
+                )
+            })
             .unwrap_or_default()
     }
 
     /// Spawn a new thread with optional history and register it with the manager.
     async fn spawn_thread(&self, mut request: ThreadSpawnRequest) -> CodexResult<NewThread> {
+        let cancellation = request
+            .options
+            .config
+            .config_layer_stack
+            .mcp_ema_cancellation()
+            .for_startup();
+        request.options.config.config_layer_stack = request
+            .options
+            .config
+            .config_layer_stack
+            .with_mcp_ema_cancellation(cancellation);
         let runtime = request.agent_control.runtime().clone();
         let membership = runtime.admit_start()?;
         let owns_startup = request.startup.is_none();
@@ -2285,15 +2342,33 @@ impl ThreadManagerState {
             inherited_exec_policy,
             user_shell_override,
         } = request;
+        let history_initialization = if matches!(
+            &options.initial_history,
+            InitialHistory::New | InitialHistory::Forked(_)
+        ) && let Some(source_thread_id) = forked_from_thread_id
+        {
+            if let Ok(source) = self.get_thread(source_thread_id).await
+                && source.agent_status().await != AgentStatus::Shutdown
+            {
+                HistoryInitialization::WarmFork
+            } else {
+                HistoryInitialization::ColdFork
+            }
+        } else {
+            HistoryInitialization::from_history(&options.initial_history)
+        };
         let StartThreadOptions {
             mut config,
+            prompt_cache_key,
             thread_instructions_provider,
             allow_provider_model_fallback,
             initial_history,
+            resume_preparation,
             internal_parent: _,
             history_mode,
             session_source,
             thread_source,
+            attached_thread,
             dynamic_tools,
             metrics_service_name,
             parent_trace,
@@ -2306,6 +2381,13 @@ impl ThreadManagerState {
             mut reserved_thread_id,
             disabled_plugin_ids,
         } = options;
+        if resume_preparation.is_some()
+            && (config.ephemeral || !matches!(&initial_history, InitialHistory::Resumed(_)))
+        {
+            return Err(CodexErr::InvalidRequest(
+                "thread store resume preparation requires a persisted resumed thread".to_string(),
+            ));
+        }
         let inherited_environments = captured_environments.or(inherited_environments);
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
         // Older callers and saved reviewers identify isolation through their source.
@@ -2383,6 +2465,7 @@ impl ThreadManagerState {
                     });
                 }
                 threads.remove(&resumed.conversation_id);
+                thread.session.services.mcp_runtime.revoke_ema();
             }
         }
         let agent_control = match (&self.agent_control_factory, agent_control) {
@@ -2508,13 +2591,18 @@ impl ThreadManagerState {
         let attachment_source =
             forked_from_thread_id.filter(|_| matches!(&initial_history, InitialHistory::Forked(_)));
         let spawn_result = Session::spawn(SessionSpawnArgs {
+            attached_thread,
             startup,
             config,
+            prompt_cache_key,
             allow_provider_model_fallback,
             instructions,
             installation_id: self.installation_id.clone(),
             auth_manager,
-            models_manager: self.cloned_models_manager(),
+            models_manager: self
+                .models_manager
+                .for_originator(&originator)
+                .unwrap_or_else(|| Arc::clone(&self.models_manager)),
             git_root_discovery: Arc::clone(&self.git_root_discovery),
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),
@@ -2523,6 +2611,8 @@ impl ThreadManagerState {
             code_mode_session_provider: Arc::clone(&self.code_mode_session_provider),
             extensions,
             conversation_history: initial_history,
+            resume_preparation,
+            history_initialization,
             disabled_plugin_ids,
             requested_history_mode: history_mode,
             fork_persistence,
@@ -2650,6 +2740,12 @@ impl ThreadManagerState {
             }
         };
 
+        let ema_cancellation = session
+            .get_config()
+            .await
+            .config_layer_stack
+            .mcp_ema_cancellation()
+            .clone();
         {
             let mut threads = self.threads.write().await;
             if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
@@ -2659,6 +2755,7 @@ impl ThreadManagerState {
                         .agent_control
                         .propagate_config_update(update);
                 }
+                ema_cancellation.publish();
                 let thread = Arc::new(CodexThread::new(
                     session,
                     io,
@@ -2867,7 +2964,7 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
     }
 }
 
-fn fork_history_from_snapshot(
+pub(crate) fn fork_history_from_snapshot(
     snapshot: ForkSnapshot,
     history: InitialHistory,
     interrupted_marker: InterruptedTurnHistoryMarker,

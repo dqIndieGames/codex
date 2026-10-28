@@ -10,6 +10,7 @@ use crate::protocol::ErrorEvent;
 use crate::protocol::MisalignmentErrorDetails;
 use crate::protocol::RateLimitReachedType;
 use crate::protocol::RateLimitSnapshot;
+use crate::protocol::TokenUsage;
 use crate::protocol::TruncationPolicy;
 use chrono::DateTime;
 use chrono::Datelike;
@@ -94,6 +95,16 @@ pub struct CodexErr {
     agent_context: Option<AgentErrorContext>,
 }
 
+/// A terminal response that stopped before the model finished, with any reported usage.
+/// Content-filter retries and explicit interruptions have separate handling.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("Incomplete response returned, reason: {reason}")]
+pub struct ResponseIncompleteError {
+    pub reason: String,
+    pub response_id: Option<String>,
+    pub token_usage: Option<TokenUsage>,
+}
+
 /// The semantic category and diagnostic payload for a [`CodexErr`].
 #[derive(Error, Debug, EnumDiscriminants)]
 #[strum_discriminants(name(CodexErrKind))]
@@ -119,6 +130,8 @@ pub enum CodexErrorDetails {
         "stream disconnected before completion: Incomplete response returned, reason: content_filter"
     )]
     ContentFilter,
+    #[error(transparent)]
+    ResponseIncomplete(Box<ResponseIncompleteError>),
     /// A retryable upstream rate limit received inside the response stream.
     #[error("rate limit exceeded: {0}")]
     RateLimitExceeded(String),
@@ -152,6 +165,11 @@ pub enum CodexErrorDetails {
     /// Invalid request.
     #[error("{0}")]
     InvalidRequest(String),
+    #[error("{message}")]
+    ModelNotFound {
+        message: String,
+        status: Option<StatusCode>,
+    },
     #[error("{message}")]
     InvalidPrompt { message: String },
     /// Multiple registered tools share the same effective name.
@@ -202,6 +220,9 @@ pub enum CodexErrorDetails {
     UnsupportedOperation(String),
     #[error("{0}")]
     RefreshTokenFailed(RefreshTokenFailedError),
+    /// Gateway credentials require user action before requests can resume.
+    #[error("{0}")]
+    GatewayLoginRequired(String),
     #[error("Fatal error: {0}")]
     Fatal(String),
     // -----------------------------------------------------------------
@@ -423,8 +444,11 @@ impl CodexErr {
             | CodexErrorDetails::Fatal(_)
             | CodexErrorDetails::InvalidImageRequest()
             | CodexErrorDetails::InvalidRequest(_)
+            | CodexErrorDetails::ResponseIncomplete(_)
+            | CodexErrorDetails::ModelNotFound { .. }
             | CodexErrorDetails::ToolCollision(_)
             | CodexErrorDetails::RefreshTokenFailed(_)
+            | CodexErrorDetails::GatewayLoginRequired(_)
             | CodexErrorDetails::UnsupportedOperation(_)
             | CodexErrorDetails::Sandbox(_)
             | CodexErrorDetails::LandlockSandboxExecutableNotProvided
@@ -462,9 +486,9 @@ impl CodexErr {
         }
     }
 
-    /// Local3 retries use a fixed ten-second delay regardless of server advice.
+    /// Preserve the server deadline; use ten seconds only without valid advice.
     pub fn retry_delay(&self, _retry_count: u64) -> Option<Duration> {
-        self.is_retryable().then_some(Duration::from_secs(10))
+        self.is_retryable().then(|| self.server_retry_delay().unwrap_or(Duration::from_secs(10)))
     }
 
     /// Returns the original server-advised instant for callers that pass the error on.
@@ -504,6 +528,7 @@ impl CodexErr {
             CodexErrorDetails::FlexUnavailable => CodexErrorInfo::FlexUnavailable,
             CodexErrorDetails::CyberPolicy { .. } => CodexErrorInfo::CyberPolicy,
             CodexErrorDetails::BioPolicy { .. } => CodexErrorInfo::BioPolicy,
+            CodexErrorDetails::ModelNotFound { .. } => CodexErrorInfo::ModelNotFound,
             CodexErrorDetails::InvalidPrompt { .. } => CodexErrorInfo::InvalidPrompt,
             CodexErrorDetails::MisalignmentPolicyViolation { .. } => {
                 CodexErrorInfo::MisalignmentPolicyViolation
@@ -554,6 +579,7 @@ impl CodexErr {
     pub fn http_status_code_value(&self) -> Option<u16> {
         let http_status_code = match &self.details {
             CodexErrorDetails::FlexUnavailable => Some(StatusCode::TOO_MANY_REQUESTS),
+            CodexErrorDetails::ModelNotFound { status, .. } => *status,
             CodexErrorDetails::RetryLimit(err) => Some(err.status),
             CodexErrorDetails::UnexpectedStatus(err) => Some(err.status),
             CodexErrorDetails::ConnectionFailed(err) => err.source.status(),
@@ -792,7 +818,9 @@ impl std::fmt::Display for UsageLimitReachedError {
                 | KnownPlan::Business
                 | KnownPlan::Ent26
                 | KnownPlan::EnterpriseCbpAutomation
-                | KnownPlan::EnterpriseCbpUsageBased,
+                | KnownPlan::EnterpriseCbpUsageBased
+                | KnownPlan::Sci
+                | KnownPlan::SciPlus,
             )) => {
                 format!(
                     "You’ve hit your usage limit. To get more access now, send a request to your admin{}",

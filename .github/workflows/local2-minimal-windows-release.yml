@@ -35,6 +35,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
+          toolchain: "1.99.1"
           targets: x86_64-pc-windows-msvc
 
       - name: Configure official sandboxed V8 artifacts

@@ -170,6 +170,8 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::ContentFilter => {
             "Incomplete response returned, reason: content_filter".to_string()
         }
+        ApiError::ResponseIncomplete(_) => "incomplete response".to_string(),
+        ApiError::ModelNotFound { .. } => "model not found".to_string(),
         ApiError::ContextWindowExceeded => "context window exceeded".to_string(),
         ApiError::QuotaExceeded => "quota exceeded".to_string(),
         ApiError::UsageNotIncluded => "usage not included".to_string(),

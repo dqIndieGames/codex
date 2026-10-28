@@ -2,7 +2,7 @@
 //! Only rate-limit codes derive retry delays from plaintext messages.
 
 use crate::error::ApiError;
-use crate::error::parse_flex_unavailable;
+use crate::error::parse_terminal_provider_error;
 use crate::responses_headers::json_headers_to_http_headers;
 use codex_http_client::RetryAfter;
 use codex_protocol::protocol::MisalignmentErrorDetails;
@@ -23,13 +23,15 @@ struct Error {
     misalignment: Option<Value>,
 }
 
-pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
+pub(super) fn parse_failed_response(response: Option<Value>, headers: Option<Value>) -> ApiError {
     let error = response.as_ref().and_then(|response| response.get("error"));
-    let retry_after_header = error
-        .and_then(|error| error.get("headers"))
-        .and_then(Value::as_object)
-        .and_then(|headers| RetryAfter::from_headers(&json_headers_to_http_headers(headers)));
-    if let Some(error) = error.and_then(parse_flex_unavailable) {
+    let retry_after_header = [
+        error.and_then(|error| error.get("headers")),
+        response.as_ref().and_then(|response| response.get("headers")),
+        headers.as_ref(),
+    ].into_iter().flatten().filter_map(Value::as_object)
+        .find_map(|headers| RetryAfter::from_headers(&json_headers_to_http_headers(headers)));
+    if let Some(error) = parse_terminal_provider_error(error, /*status*/ None) {
         return error;
     }
     let Some(error) = error.and_then(|error| serde_json::from_value::<Error>(error.clone()).ok())
@@ -87,7 +89,7 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
         Some("server_is_overloaded") => ApiError::ServerOverloaded {
             retry_after: retry_after_header,
         },
-        Some("rate_limit_exceeded" | "slow_down") => {
+        Some("rate_limit_exceeded" | "turn_rate_limit_exceeded" | "slow_down") => {
             let retry_after = retry_after_header
                 .or_else(|| try_parse_retry_delay(&error).and_then(RetryAfter::from_delay));
             ApiError::RateLimitExceeded {

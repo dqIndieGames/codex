@@ -1,6 +1,10 @@
 //! Replacement starts use server defaults and preserve the current task on failure.
 
 use super::*;
+use codex_app_server_protocol::SkillMetadata;
+use codex_app_server_protocol::SkillScope;
+use codex_app_server_protocol::SkillsListEntry;
+use codex_config::types::HistoryPersistence;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -131,6 +135,69 @@ async fn new_session_preserves_vim_line_yank() -> Result<()> {
 }
 
 #[tokio::test]
+async fn widget_replacement_preserves_mention_usage_with_history_disabled() -> Result<()> {
+    let (mut app, _events, _ops) = make_test_app_with_channels().await;
+    app.local_settings.history.persistence = HistoryPersistence::None;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let skills = SkillsListResponse {
+        data: vec![SkillsListEntry {
+            cwd: app.config.cwd.to_path_buf(),
+            skills: ["statsig", "status"]
+                .into_iter()
+                .map(|name| SkillMetadata {
+                    name: name.to_owned(),
+                    description: String::new(),
+                    short_description: None,
+                    interface: None,
+                    dependencies: None,
+                    path: app
+                        .config
+                        .cwd
+                        .to_path_buf()
+                        .join(name)
+                        .join("SKILL.md")
+                        .abs()
+                        .into(),
+                    scope: SkillScope::User,
+                    enabled: true,
+                    plugin_id: None,
+                })
+                .collect(),
+            errors: Vec::new(),
+        }],
+    };
+    let init = app.chatwidget_init_for_forked_or_resumed_thread(
+        &mut tui,
+        app.config.clone(),
+        /*initial_user_message*/ None,
+    );
+    app.replace_chat_widget(ChatWidget::new_with_app_event(init));
+    app.chat_widget.set_skills_from_response(&skills);
+    app.chat_widget.insert_str("$status");
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+
+    let init = app.chatwidget_init_for_forked_or_resumed_thread(
+        &mut tui,
+        app.config.clone(),
+        /*initial_user_message*/ None,
+    );
+    app.replace_chat_widget(ChatWidget::new_with_app_event(init));
+    app.chat_widget.set_skills_from_response(&skills);
+    app.chat_widget.insert_str("$stat");
+    insta::assert_snapshot!(normalize_snapshot_paths(render_bottom_popup(
+        &app.chat_widget,
+        /*width*/ 80
+    )));
+    assert!(
+        !app.local_settings
+            .codex_home
+            .join("mention_usage.json")
+            .exists()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn replacement_uses_server_defaults_and_preserves_explicit_launch_settings() -> Result<()> {
     for (managed_effort, explicit, expected_model, expected_effort) in [
         (None, "saved", "server-model", "high"),
@@ -152,7 +219,7 @@ async fn replacement_uses_server_defaults_and_preserves_explicit_launch_settings
             "medium",
         ),
     ] {
-        let (mut app, _events, _ops) = make_test_app_with_channels().await;
+        let (mut app, mut events, _ops) = make_test_app_with_channels().await;
         let server_home = tempdir()?;
         let client_home = tempdir()?;
         std::fs::write(
@@ -308,6 +375,16 @@ async fn replacement_uses_server_defaults_and_preserves_explicit_launch_settings
               server-model high · <PROJECT>
             ");
         }
+        if explicit.starts_with("profile_summary") {
+            // Opening the overview starts background RPCs. Let them finish before
+            // closing the client so the proxy is not writing to a closed socket.
+            loop {
+                let event = events.recv().await.expect("agents overview refresh");
+                if matches!(event, AppEvent::AgentsOverviewThreadsLoaded { .. }) {
+                    break;
+                }
+            }
+        }
         server.shutdown().await?;
         proxy.await??;
     }
@@ -399,6 +476,11 @@ async fn replacement_preserves_remote_launch_paths_and_older_servers() -> Result
             home.path().join("config.toml"),
             "model = \"configured-model\"\n",
         )?;
+        app.enqueue_primary_thread_session(
+            test_thread_session(ThreadId::new(), app.config.cwd.to_path_buf()),
+            Vec::new(),
+        )
+        .await?;
         let (server, requests, proxy) = start_recording_app_server_with_history(
             &app.config,
             capabilities,

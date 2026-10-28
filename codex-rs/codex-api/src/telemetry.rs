@@ -148,18 +148,14 @@ where
                 t.on_request_retry(attempt + 1, policy.max_attempts, status, err);
             }
         }
-        let can_continue_request_retry = !should_retry
-            || telemetry
-                .as_ref()
-                .is_none_or(|telemetry| telemetry.can_continue_request_retry());
-
         match result {
             Ok(resp) => return Ok(resp),
-            Err(_err) if should_retry => {
-                if !can_continue_request_retry {
-                    return Err(request_retry_interrupted_error(telemetry.as_ref()));
-                }
-                sleep_request_retry_delay(fixed_retry_delay(), telemetry.as_ref()).await?;
+            Err(err) if should_retry => {
+                let delay = match &err {
+                    TransportError::Http { retry_after: Some(advice), .. } => advice.remaining_delay(),
+                    _ => fixed_retry_delay(),
+                };
+                sleep_request_retry_delay(delay, telemetry.as_ref()).await?;
             }
             Err(err) => return Err(err),
         }
@@ -178,7 +174,7 @@ async fn sleep_request_retry_delay(
 
     let start = Instant::now();
     loop {
-        if telemetry.is_some_and(|telemetry| !telemetry.can_continue_request_retry()) {
+        if telemetry.is_some_and(|telemetry| !telemetry.can_continue_request_retry_wait()) {
             return Err(request_retry_interrupted_error(telemetry));
         }
 

@@ -88,6 +88,7 @@ impl FileSystemSandboxRunner {
         request: FsHelperRequest,
     ) -> Result<FsHelperPayload, JSONRPCErrorError> {
         let command = self.sandbox_command(sandbox)?;
+        crate::run_integrity_checks(&command).await;
         let request_json = serde_json::to_vec(&request).map_err(json_error)?;
         run_command(command, request_json).await
     }
@@ -182,7 +183,7 @@ impl FileSystemSandboxRunner {
             managed_network: None,
             additional_permissions: None,
         };
-        sandbox_manager
+        let mut request = sandbox_manager
             .transform_for_direct_spawn(SandboxDirectSpawnTransformRequest {
                 workspace_roots,
                 windows_sandbox_proxy_settings_mode:
@@ -205,7 +206,9 @@ impl FileSystemSandboxRunner {
                         .unwrap_or(WindowsSandboxLevel::Disabled),
                 },
             })
-            .map_err(|err| invalid_request(format!("failed to prepare fs sandbox: {err}")))
+            .map_err(|err| invalid_request(format!("failed to prepare fs sandbox: {err}")))?;
+        request.sandbox_override = sandbox_context.sandbox_override;
+        Ok(request)
     }
 }
 
@@ -370,10 +373,10 @@ fn helper_env_key_is_allowed(key: &str) -> bool {
         // CoreFoundation consults this before falling back to user lookup during helper startup.
         || (cfg!(target_os = "macos") && key == "__CF_USER_TEXT_ENCODING")
         || bazel_bwrap_env_key_is_allowed(key)
-        // MXC needs SystemDrive to resolve platform directories and LOCALAPPDATA
-        // to create the sandboxed helper process.
+        // MXC needs SystemDrive to resolve platform directories, and SystemRoot and
+        // LOCALAPPDATA to create the sandboxed helper process.
         || (cfg!(windows)
-            && ["PATH", "SystemDrive", "LOCALAPPDATA"]
+            && ["PATH", "SystemDrive", "SystemRoot", "LOCALAPPDATA"]
                 .iter()
                 .any(|allowed| key.eq_ignore_ascii_case(allowed)))
 }
@@ -567,6 +570,7 @@ mod windows_tests;
 
 #[cfg(test)]
 mod tests {
+    use codex_protocol::sandbox::SandboxOverride;
     use std::collections::HashMap;
     use std::ffi::OsString;
 
@@ -712,6 +716,7 @@ mod tests {
                 ("Path", r"C:\Windows\System32"),
                 ("LocalAppData", r"C:\Users\test\AppData\Local"),
                 ("SystemDrive", "C:"),
+                ("systemROOT", r"C:\Windows"),
                 ("PATH_INJECTION", "bad"),
                 ("OPENAI_API_KEY", "secret"),
             ]
@@ -727,6 +732,7 @@ mod tests {
                     r"C:\Users\test\AppData\Local".to_string()
                 ),
                 ("SystemDrive".to_string(), "C:".to_string()),
+                ("systemROOT".to_string(), r"C:\Windows".to_string()),
             ])
         );
     }
@@ -809,8 +815,9 @@ mod tests {
             FileSystemSpecialPath::Root,
             FileSystemAccessMode::Read,
         )]);
-        let sandbox_context =
+        let mut sandbox_context =
             sandbox_context_with_cwd(&policy, PathUri::from_abs_path(&selected_cwd));
+        sandbox_context.sandbox_override = SandboxOverride::EscalatedSandboxWithRestrictions;
         #[cfg(windows)]
         let sandbox_context = crate::FileSystemSandboxContext {
             windows_sandbox_selection: codex_file_system::WindowsSandboxSelection::RestrictedToken,
@@ -823,10 +830,15 @@ mod tests {
             .expect("sandbox command");
 
         assert_eq!(
-            (request.cwd, request.sandbox_policy_cwd),
+            (
+                request.cwd,
+                request.sandbox_policy_cwd,
+                request.sandbox_override
+            ),
             (
                 PathUri::from_abs_path(&root),
-                PathUri::from_abs_path(&selected_cwd)
+                PathUri::from_abs_path(&selected_cwd),
+                SandboxOverride::EscalatedSandboxWithRestrictions,
             )
         );
     }

@@ -7,6 +7,7 @@ use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
 use crate::config::Config;
 use crate::session::session::Session;
+use codex_features::Feature;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use codex_models_manager::manager::RefreshStrategy;
@@ -165,6 +166,10 @@ pub(crate) async fn build_latest_agent_resume_config(
 fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, String> {
     let base_config = turn.config.clone();
     let mut config = (*base_config).clone();
+    if config.features.enabled(Feature::SubagentDefaultContextLimits) {
+        config.model_context_window = None;
+        config.model_auto_compact_token_limit = None;
+    }
     // Preserve activation for history forks without freezing the parent's model-owned prompts.
     // Fresh child startup restores configured preferences from the retained snapshot.
     config.token_budget = turn.configured_token_budget.clone();

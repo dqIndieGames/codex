@@ -1,5 +1,5 @@
 use std::sync::LazyLock;
-use std::time::Instant;
+use std::time::Duration;
 
 use crate::facts::AppInvocation;
 use crate::facts::ArtifactOperation;
@@ -425,6 +425,7 @@ pub struct GuardianReviewEventParams {
     pub guardian_review_model_override: Option<String>,
     pub guardian_model_provider_id: Option<String>,
     pub had_prior_review_context: Option<bool>,
+    /// Configured overall review budget in milliseconds; zero means unlimited.
     pub review_timeout_ms: u64,
     pub tool_call_count: Option<u64>,
     pub time_to_first_token_ms: Option<u64>,
@@ -448,7 +449,6 @@ pub struct GuardianReviewTrackContext {
     reviewed_action: GuardianReviewedAction,
     review_timeout_ms: u64,
     pub started_at_ms: u64,
-    started_instant: Instant,
 }
 
 impl GuardianReviewTrackContext {
@@ -470,7 +470,6 @@ impl GuardianReviewTrackContext {
             reviewed_action,
             review_timeout_ms,
             started_at_ms: now_unix_millis(),
-            started_instant: Instant::now(),
         }
     }
 
@@ -478,7 +477,9 @@ impl GuardianReviewTrackContext {
         &self,
         result: GuardianReviewAnalyticsResult,
         completed_at_ms: u64,
+        elapsed: Duration,
     ) -> GuardianReviewEventParams {
+        let completion_latency_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         GuardianReviewEventParams {
             guardian_context_mode: result.guardian_context_mode,
             thread_id: self.thread_id.clone(),
@@ -509,7 +510,7 @@ impl GuardianReviewTrackContext {
             // TODO(rhan-oai): plumb nested Guardian review session tool-call counts.
             tool_call_count: None,
             time_to_first_token_ms: result.time_to_first_token_ms,
-            completion_latency_ms: Some(self.started_instant.elapsed().as_millis() as u64),
+            completion_latency_ms: Some(completion_latency_ms),
             started_at: self.started_at_ms / 1_000,
             completed_at: Some(completed_at_ms / 1_000),
             input_tokens: result.token_usage.as_ref().map(|usage| usage.input_tokens),
@@ -538,6 +539,9 @@ pub struct GuardianReviewAnalyticsResult {
     pub terminal_status: GuardianReviewTerminalStatus,
     pub failure_reason: Option<GuardianReviewFailureReason>,
     pub attempt_count: i64,
+    /// An allow was validated against changed parent/root authorization or review context.
+    /// Retained across attempts; this does not identify the cause of a later cancellation.
+    pub context_changed: bool,
     pub risk_level: Option<GuardianRiskLevel>,
     pub user_authorization: Option<GuardianUserAuthorization>,
     pub outcome: Option<GuardianAssessmentOutcome>,
@@ -564,6 +568,7 @@ impl GuardianReviewAnalyticsResult {
             terminal_status: GuardianReviewTerminalStatus::FailedClosed,
             failure_reason: None,
             attempt_count: 1,
+            context_changed: false,
             risk_level: None,
             user_authorization: None,
             outcome: None,
@@ -1027,6 +1032,7 @@ pub(crate) struct CodexCompactionEventParams {
     pub(crate) phase: CompactionPhase,
     pub(crate) strategy: CompactionStrategy,
     pub(crate) status: CompactionStatus,
+    pub(crate) voice_session_id: Option<String>,
     pub(crate) codex_error_kind: Option<CodexErrKind>,
     pub(crate) codex_error_http_status_code: Option<u16>,
     pub(crate) usage_limit_window_minutes: Option<u16>,
@@ -1396,6 +1402,7 @@ pub(crate) fn codex_compaction_event_params(
         phase: input.phase,
         strategy: input.strategy,
         status: input.status,
+        voice_session_id: None,
         codex_error_kind: input.codex_error_kind,
         codex_error_http_status_code: input.codex_error_http_status_code,
         usage_limit_window_minutes: input.usage_limit_window_minutes,
@@ -1482,6 +1489,8 @@ fn analytics_hook_event_name(event_name: HookEventName) -> &'static str {
         HookEventName::PostToolUse => "PostToolUse",
         HookEventName::PreCompact => "PreCompact",
         HookEventName::PostCompact => "PostCompact",
+        HookEventName::PreModelRequest => "PreModelRequest",
+        HookEventName::PostModelRequest => "PostModelRequest",
         HookEventName::SessionStart => "SessionStart",
         HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",

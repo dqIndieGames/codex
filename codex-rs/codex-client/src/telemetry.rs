@@ -40,6 +40,12 @@ pub trait RequestTelemetry: Send + Sync {
         true
     }
 
+    /// Recovery may rebuild a request only after its server-advised deadline.
+    /// Cancellation and configuration refresh still interrupt this wait.
+    fn can_continue_request_retry_wait(&self) -> bool {
+        self.can_continue_request_retry()
+    }
+
     /// Returns the full timeout for the next independent request attempt.
     /// The request layer queries this before every attempt, including the first,
     /// and converts an overdue future into a normal retryable timeout.

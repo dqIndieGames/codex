@@ -30,7 +30,6 @@ use std::sync::Weak;
 
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::models::AdditionalPermissionProfile;
-use codex_tools::UnifiedExecShellMode;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_path_uri::PathUri;
 use rand::Rng;
@@ -53,6 +52,7 @@ mod head_tail_buffer;
 mod oneshot;
 mod process;
 mod process_manager;
+pub(crate) use process_manager::exec_env_policy_from_shell_policy;
 mod process_state;
 mod shell_snapshot;
 mod stdin_approval;
@@ -62,10 +62,6 @@ pub(crate) fn set_deterministic_process_ids_for_tests(enabled: bool) {
 }
 
 pub(crate) use errors::UnifiedExecError;
-pub(crate) use process::NoopSpawnLifecycle;
-#[cfg(unix)]
-pub(crate) use process::SpawnLifecycle;
-pub(crate) use process::SpawnLifecycleHandle;
 pub(crate) use process::UnifiedExecProcess;
 pub(crate) use stdin_approval::TerminalPermissions;
 pub(crate) use stdin_approval::TerminalSandboxSource;
@@ -121,7 +117,6 @@ pub(crate) struct ExecCommandRequest {
     pub cwd: PathUri,
     pub sandbox_cwd: PathUri,
     pub turn_environment: TurnEnvironment,
-    pub shell_mode: UnifiedExecShellMode,
     pub network: Option<NetworkProxy>,
     pub tty: bool,
     pub sandbox_permissions: SandboxPermissions,
@@ -131,9 +126,18 @@ pub(crate) struct ExecCommandRequest {
     pub prefix_rule: Option<Vec<String>>,
 }
 
+/// The process and environment behind a terminal session ID at the time of lookup.
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalSession {
+    pub(crate) process_id: i32,
+    process: Arc<UnifiedExecProcess>,
+    call_id: String,
+    pub(crate) environment_id: String,
+}
+
 #[derive(Debug)]
 pub(crate) struct WriteStdinRequest<'a> {
-    pub process_id: i32,
+    pub terminal: &'a TerminalSession,
     pub input: &'a str,
     pub yield_time_ms: u64,
     pub max_output_tokens: Option<usize>,

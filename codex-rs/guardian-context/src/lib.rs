@@ -41,6 +41,7 @@ pub use transcript::MANUAL_APPROVAL_DEVELOPER_PREFIX;
 pub use transcript::TranscriptEntryLimits;
 pub use transcript::TranscriptRetentionConfig;
 pub use transcript::collect_transcript;
+pub use transcript::is_inherited_manual_approval;
 pub use truncation::truncate_text;
 
 mod verified_answers;
@@ -48,8 +49,10 @@ pub use verified_answers::RenderedVerifiedAnswers;
 pub use verified_answers::render_verified_answer;
 pub use verified_answers::render_verified_answers;
 
+mod retained_assistant_context;
 mod retained_instructions;
 mod sender_user_messages;
+pub use retained_instructions::RetainedInstructionItem;
 pub use retained_instructions::retained_assistant_message;
 
 mod action;
@@ -70,6 +73,8 @@ pub use budget::SECTION_COST_METRIC;
 pub use budget::SectionCost;
 pub use budget::effective_input_token_limit;
 pub use budget::estimate_input_tokens;
+pub use budget::estimate_input_tokens_from_serialized_len;
+pub use budget::request_token_bucket;
 pub use cursor::TranscriptCursor;
 pub use cursor::TranscriptMode;
 pub use cursor::TranscriptSelection;
@@ -96,6 +101,7 @@ mod trusted_skills;
 mod trusted_tool;
 pub use trusted_skills::TrustedSkills;
 pub use trusted_tool::TrustedTool;
+pub use trusted_tool::TrustedToolSource;
 mod reviews;
 pub use reviews::MAX_PREVIOUS_REVIEWS;
 pub use reviews::PreviousReview;
@@ -241,6 +247,8 @@ pub trait SectionContributor: Send + Sync {
 /// A section could not provide the evidence needed for a valid review context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SectionError {
+    /// One native agent-message ID identifies different authors, recipients or content.
+    ConflictingAgentMessage,
     /// Evidence required by this contributor for the current input is missing.
     MissingRequiredEvidence { section: &'static str },
     /// A section cannot be delivered by the requested consumer.
@@ -252,6 +260,9 @@ pub enum SectionError {
 impl std::fmt::Display for SectionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ConflictingAgentMessage => {
+                formatter.write_str("conflicting native agent messages share an ID")
+            }
             Self::MissingRequiredEvidence { section } => {
                 write!(formatter, "missing required evidence for section {section}")
             }

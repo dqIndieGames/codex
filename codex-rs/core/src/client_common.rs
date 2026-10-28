@@ -135,7 +135,7 @@ fn normalize_image_detail(
 
 pub struct ResponseStream {
     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
-    pub(crate) interrupt: Option<oneshot::Sender<()>>,
+    pub(crate) interrupt: Option<oneshot::Sender<codex_api::ResponseInterrupt>>,
     /// Signals the mapper task that the consumer stopped polling before the
     /// provider stream reached its own terminal event.
     pub(crate) consumer_dropped: CancellationToken,

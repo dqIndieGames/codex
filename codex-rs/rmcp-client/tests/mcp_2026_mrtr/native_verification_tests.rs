@@ -79,7 +79,7 @@ async fn call(client: &RmcpClient) -> anyhow::Result<Value> {
             .call_tool(
                 "verified_operation".into(),
                 Some(json!({"resource": "example"})),
-                Some(json!({"caller": "preserved"})),
+                |_| Ok(Some(json!({"caller": "preserved"}))),
                 Some(Duration::from_secs(/*secs*/ 5)),
             )
             .await?,
@@ -116,7 +116,10 @@ async fn native_mrtr_returns_validated_proof_or_cancellation_in_content() -> any
         (
             ElicitationAction::Accept,
             json!({"signature": "invalid"}),
-            json!({"action": "cancel"}),
+            json!({
+                "action": "cancel",
+                "_meta": {"openai/userVerificationReason": "invalidProof"},
+            }),
         ),
     ] {
         let server = MockServer::start().await;

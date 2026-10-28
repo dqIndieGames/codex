@@ -486,6 +486,7 @@ mod tests {
     async fn create_metadata_records_originator_without_project() {
         let thread_id = ThreadId::new();
         let sync = ThreadMetadataSync::for_create(&CreateThreadParams {
+            attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,
             session_id: thread_id.into(),
@@ -564,7 +565,7 @@ mod tests {
         let mut sync = resume_sync(
             thread_id,
             vec![
-                RolloutItem::SessionMeta(session_meta(thread_id)),
+                RolloutItem::SessionMeta(Box::new(session_meta(thread_id))),
                 RolloutItem::EventMsg(EventMsg::UserMessage(user_message("hello metadata"))),
             ],
         );
@@ -673,7 +674,7 @@ mod tests {
     fn metadata_irrelevant_items_coalesce_updated_at_touches() {
         let thread_id = ThreadId::new();
         let mut sync = resume_sync(thread_id, Vec::new());
-        let item = RolloutItem::Compacted(CompactedItem {
+        let item = RolloutItem::Compacted(Box::new(CompactedItem {
             message: "compacted".to_string(),
             replacement_history: None,
             retained_context: None,
@@ -686,7 +687,7 @@ mod tests {
             compaction_response_id: None,
             latest_token_usage_record: None,
             resume_metadata: None,
-        });
+        }));
 
         let first = sync
             .observe_appended_items(std::slice::from_ref(&item))
@@ -805,7 +806,7 @@ mod tests {
         let mut sync = resume_sync(
             thread_id,
             vec![
-                RolloutItem::SessionMeta(session_meta(thread_id)),
+                RolloutItem::SessionMeta(Box::new(session_meta(thread_id))),
                 RolloutItem::EventMsg(EventMsg::UserMessage(user_message("hello metadata"))),
             ],
         );
@@ -837,7 +838,7 @@ mod tests {
         let sync = resume_sync(
             thread_id,
             vec![
-                RolloutItem::SessionMeta(meta),
+                RolloutItem::SessionMeta(Box::new(meta)),
                 RolloutItem::EventMsg(EventMsg::UserMessage(user_message("hello metadata"))),
             ],
         );

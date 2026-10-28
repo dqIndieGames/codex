@@ -5,8 +5,7 @@
 
 use super::*;
 use crate::history_cell::HistoryRenderMode;
-use crate::history_cell::SessionHeaderHistoryCell;
-use crate::history_cell::SessionInfoCell;
+use crate::history_cell::is_session_history_prefix_cell;
 use crate::keymap::RuntimeKeymap;
 use crate::motion::MotionMode;
 use crate::transcript_view::TranscriptBookmark;
@@ -313,10 +312,7 @@ impl TranscriptOverlay {
         let index = self
             .cells
             .iter()
-            .rposition(|cell| {
-                cell.as_any().is::<SessionInfoCell>()
-                    || cell.as_any().is::<SessionHeaderHistoryCell>()
-            })
+            .rposition(|cell| is_session_history_prefix_cell(cell.as_ref()))
             .map_or(/*default*/ 0, |index| index + 1);
         let added = cells.len();
         self.cells.splice(index..index, cells);
@@ -452,32 +448,20 @@ impl TranscriptOverlay {
 
     fn apply_action(&mut self, tui: &mut tui::Tui, action: ViewAction) {
         self.notice = None;
-        let resume_following = matches!(action, ViewAction::CopyAndFollow(_));
-        let copy_on_select = matches!(action, ViewAction::CopyOnSelect(_));
-        match action {
-            ViewAction::Changed => {}
-            ViewAction::PrimarySelection(text) => self.view.publish_primary(tui, &text),
-            ViewAction::Copy(text)
-            | ViewAction::CopyOnSelect(text)
-            | ViewAction::CopyAndFollow(text) => {
-                let result = self
-                    .view
-                    .copy_selected_text(tui, &self.cells, &text, !copy_on_select);
-                if resume_following
-                    && matches!(result, Ok(crate::clipboard_copy::CopyStatus::Pending(_)))
-                {
-                    self.view.follow_pending_copy();
-                }
-                self.notice = Some(match result {
-                    Ok(status) => status.message("selection"),
-                    Err(error) => error,
-                });
-            }
-            ViewAction::OpenLink(url) => {
-                if let Err(error) = webbrowser::open(&url) {
-                    self.notice = Some(format!("Could not open link: {error}"));
-                }
-            }
+        if let Some((_, result)) = self.view.copy_action(
+            tui,
+            &self.cells,
+            &action,
+            crate::clipboard_copy::CopyFormat::Markdown,
+        ) {
+            self.notice = Some(match result {
+                Ok(status) => status.message("selection"),
+                Err(error) => error,
+            });
+        } else if let ViewAction::OpenLink(url) = action
+            && let Err(error) = webbrowser::open(&url)
+        {
+            self.notice = Some(format!("Could not open link: {error}"));
         }
     }
 

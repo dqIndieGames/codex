@@ -1,5 +1,6 @@
 //! Dashboard for inspecting and managing the TUI's retained daemon tasks.
 //! Search, rename, status filters and selection survive metadata refreshes.
+//! Rows retain their relative order while they remain in the same status group.
 
 #[path = "agent_center/mod.rs"]
 pub(super) mod command_center;
@@ -7,7 +8,7 @@ pub(super) mod command_center;
 #[path = "agents_overview_grouping.rs"]
 mod grouping;
 
-pub(super) use codex_config::types::AgentsOverviewGrouping;
+pub(super) use grouping::AgentsOverviewGrouping;
 use grouping::model_name;
 
 use super::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
@@ -56,6 +57,7 @@ use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -139,8 +141,16 @@ impl AgentsOverviewProjectGroup {
     }
 }
 
+pub(super) fn directory_group_key(cwd: &Path, worktrees_enabled: bool) -> PathBuf {
+    worktrees_enabled
+        .then(|| dunce::canonicalize(cwd).ok())
+        .flatten()
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
 #[derive(Default)]
 pub(super) struct AgentsOverviewViewState {
+    row_order: HashMap<ThreadId, (AgentsOverviewGroup, usize)>,
     scroll: usize,
     page_height: usize,
     status_filter: usize,
@@ -154,6 +164,8 @@ pub(super) struct AgentsOverviewViewState {
     pub(super) has_more: bool,
     show_more_selected: bool,
     pub(super) connection_notice: Option<&'static str>,
+    /// Browse only while the server holds its lifecycle lock.
+    pub(super) removal: Option<AgentsOverviewAction>,
     pub(super) server_version_notice: Option<String>,
     search: String,
     searching: bool,
@@ -183,6 +195,7 @@ pub(super) struct AgentsOverviewView {
     use_theme_colors: bool,
     pub(super) rows: Vec<AgentsOverviewRow>,
     project_groups: Vec<AgentsOverviewProjectGroup>,
+    directory_group_keys: Vec<PathBuf>,
     pub(super) pinned_thread_ranks: Option<HashMap<ThreadId, usize>>,
     pub(super) pin_action_pending: bool,
     selected: usize,
@@ -197,7 +210,7 @@ pub(super) struct AgentsOverviewView {
 
 impl AgentsOverviewView {
     pub(super) fn new(
-        rows: Vec<AgentsOverviewRow>,
+        mut rows: Vec<AgentsOverviewRow>,
         selected_thread_id: Option<ThreadId>,
         worktrees_enabled: bool,
         use_theme_colors: bool,
@@ -205,6 +218,24 @@ impl AgentsOverviewView {
         keymap: RuntimeKeymap,
         state: Arc<Mutex<AgentsOverviewViewState>>,
     ) -> Self {
+        {
+            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+            // The caller supplies recency order. Keep existing rows in place, and append
+            // new arrivals or status transitions in that order within their new group.
+            rows.sort_by_key(|row| {
+                let rank = state
+                    .row_order
+                    .get(&row.thread_id)
+                    .filter(|(group, _)| *group == row.group)
+                    .map_or(usize::MAX, |(_, rank)| *rank);
+                (row.group, rank)
+            });
+            state.row_order = rows
+                .iter()
+                .enumerate()
+                .map(|(rank, row)| (row.thread_id, (row.group, rank)))
+                .collect();
+        }
         let selected = state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -218,6 +249,10 @@ impl AgentsOverviewView {
         let project_groups = rows
             .iter()
             .map(|row| AgentsOverviewProjectGroup::for_thread(&row.thread, worktrees_enabled))
+            .collect();
+        let directory_group_keys = rows
+            .iter()
+            .map(|row| directory_group_key(row.thread.cwd.as_path(), worktrees_enabled))
             .collect();
         let center_shortcut_keys = crate::keymap::keymap_action_ids()
             .filter(|action| matches!(action.context, KeymapContext::List | KeymapContext::Agents))
@@ -255,6 +290,7 @@ impl AgentsOverviewView {
             use_theme_colors,
             rows,
             project_groups,
+            directory_group_keys,
             pinned_thread_ranks: None,
             pin_action_pending: false,
             selected,
@@ -568,6 +604,9 @@ impl BottomPaneView for AgentsOverviewView {
             self.reconcile_command_center_selection();
             return CancellationEvent::Handled;
         }
+        if state.removal.is_some() {
+            return CancellationEvent::Handled;
+        }
         CancellationEvent::NotHandled
     }
 
@@ -627,7 +666,9 @@ impl BottomPaneView for AgentsOverviewView {
             return;
         }
 
-        if (self.state().connection_notice.is_some() || self.state().creating_worktree)
+        if (self.state().connection_notice.is_some()
+            || self.state().creating_worktree
+            || self.state().removal.is_some())
             && self.keymap.action_for(key) != Some(ListAction::Cancel)
         {
             match self.keymap.action_for(key) {
@@ -635,6 +676,12 @@ impl BottomPaneView for AgentsOverviewView {
                 Some(ListAction::MoveDown) => self.move_selection(/*forward*/ true),
                 Some(action @ (ListAction::PageUp | ListAction::PageDown)) => {
                     self.page_selection(action)
+                }
+                Some(ListAction::JumpTop) => {
+                    self.selected = self.visible_indices().first().copied().unwrap_or(0);
+                }
+                Some(ListAction::JumpBottom) => {
+                    self.selected = self.visible_indices().last().copied().unwrap_or(0);
                 }
                 _ => {}
             }
@@ -648,12 +695,15 @@ impl BottomPaneView for AgentsOverviewView {
         if self.agents_keymap.toggle_grouping.is_pressed(key) {
             let mut state = self.state();
             state.grouping = match state.grouping {
-                AgentsOverviewGrouping::Project => AgentsOverviewGrouping::Status,
+                AgentsOverviewGrouping::Project => AgentsOverviewGrouping::Directory,
+                AgentsOverviewGrouping::Directory => AgentsOverviewGrouping::Status,
                 AgentsOverviewGrouping::Status => AgentsOverviewGrouping::Model,
                 AgentsOverviewGrouping::Model => AgentsOverviewGrouping::Project,
             };
-            self.app_event_tx
-                .send(AppEvent::PersistAgentsOverviewGrouping(state.grouping));
+            if let Some(grouping) = state.grouping.persisted() {
+                self.app_event_tx
+                    .send(AppEvent::PersistAgentsOverviewGrouping(grouping));
+            }
             return;
         }
         if self.agents_keymap.toggle_pin.is_pressed(key) {

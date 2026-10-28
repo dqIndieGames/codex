@@ -4,12 +4,28 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
-use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::Mutex;
+use crate::legacy_core::config::Config;
 
-static PREFIX: OnceLock<String> = OnceLock::new();
+static PREFIX: Mutex<String> = Mutex::new(String::new());
 
-pub(crate) fn initialize(codex_home: &Path, account: Option<&str>) -> io::Result<()> {
+pub(crate) fn initialize(config: &Config) -> io::Result<()> {
+    let provider = config.model_providers.get(&config.model_provider_id)
+        .unwrap_or(&config.model_provider);
+    let official = match provider.base_url.as_deref() {
+        Some(base_url) => url::Url::parse(base_url).ok().is_some_and(|url| {
+            matches!(url.scheme(), "https" | "wss")
+                && matches!(url.host_str(), Some("chatgpt.com" | "api.openai.com"))
+        }),
+        None => provider.requires_openai_auth && !provider.is_amazon_bedrock(),
+    };
+    if !official {
+        let initial = config.model_provider_id.chars().next().unwrap_or('?').to_ascii_lowercase();
+        *PREFIX.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = format!("[{initial}] ");
+        return Ok(());
+    }
+    let codex_home = &config.codex_home;
+    let account = config.auth_account.as_deref();
     let number = if let Some(account) = account {
         let directory = codex_home.join("accounts");
         std::fs::create_dir_all(&directory)?;
@@ -47,10 +63,10 @@ pub(crate) fn initialize(codex_home: &Path, account: Option<&str>) -> io::Result
     } else {
         1
     };
-    let _ = PREFIX.set(format!("[{number}] "));
+    *PREFIX.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = format!("[{number}] ");
     Ok(())
 }
 
-pub(crate) fn prefix() -> &'static str {
-    PREFIX.get().map(String::as_str).unwrap_or("")
+pub(crate) fn prefix() -> String {
+    PREFIX.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }

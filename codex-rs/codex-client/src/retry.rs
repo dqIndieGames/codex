@@ -43,8 +43,7 @@ pub fn fixed_retry_delay() -> Duration {
     FIXED_RETRY_DELAY
 }
 
-/// local3: every automatic retry waits a fixed 10s. Callers may still pass a
-/// base/attempt, but those values must not change the wait.
+/// Default wait when no valid server advice is available; no exponential backoff.
 pub fn backoff(_base: Duration, _attempt: u64) -> Duration {
     FIXED_RETRY_DELAY
 }
@@ -100,7 +99,10 @@ where
                     .should_retry(&err, attempt, policy.max_attempts) =>
             {
                 let retry_attempt = attempt + 1;
-                let delay = fixed_retry_delay();
+                let delay = match &err {
+                    TransportError::Http { retry_after: Some(advice), .. } => advice.remaining_delay(),
+                    _ => fixed_retry_delay(),
+                };
                 crate::record_retry!(retry_attempt, delay, RetryOperation::HttpRequest);
                 sleep(delay).await;
             }

@@ -127,29 +127,55 @@ async fn http_retry_deadline_survives_mapping_and_respects_terminal_errors() {
 }
 
 #[test]
-fn map_api_error_distinguishes_capacity_from_slow_down() {
-    for (code, expected) in [
-        ("server_is_overloaded", CodexErrorInfo::ServerOverloaded),
-        ("slow_down", CodexErrorInfo::RateLimitExceeded),
+fn map_http_error_classifies_provider_codes() {
+    use CodexErrorInfo::ModelNotFound;
+
+    for (status, code, expected, retryable) in [
         (
+            503,
+            "server_is_overloaded",
+            CodexErrorInfo::ServerOverloaded,
+            true,
+        ),
+        (503, "slow_down", CodexErrorInfo::RateLimitExceeded, true),
+        (
+            503,
             "unknown_error",
             CodexErrorInfo::HttpConnectionFailed {
                 http_status_code: Some(503),
             },
         ),
+        (400, "model_not_found", ModelNotFound, false),
+        (403, "model_not_found", ModelNotFound, false),
+        (404, "model_not_found", ModelNotFound, false),
+        (
+            404,
+            "resource_not_found",
+            CodexErrorInfo::HttpConnectionFailed {
+                http_status_code: Some(404),
+            },
+            true,
+        ),
     ] {
         let err = map_api_error(ApiError::Transport(TransportError::Http {
             retry_after: None,
-            status: http::StatusCode::SERVICE_UNAVAILABLE,
+            status: http::StatusCode::from_u16(status).unwrap(),
             url: None,
             headers: None,
             body: Some(
                 serde_json::json!({"error": {"code": code, "message": "retry later"}}).to_string(),
             ),
         }));
-        assert_eq!(err.to_codex_protocol_error(), expected);
-        // Checklist #3: capacity and slow-down both remain retryable.
-        assert!(err.is_retryable());
+        if expected == ModelNotFound {
+            assert_eq!(err.http_status_code_value(), Some(status));
+        }
+        assert_eq!(
+            (
+                err.to_codex_protocol_error(),
+                err.retry_delay(/*retry_count*/ 1).is_some()
+            ),
+            (expected, retryable)
+        );
     }
 }
 
