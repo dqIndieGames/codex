@@ -875,6 +875,7 @@ impl ModelClient {
     ) -> Result<RealtimeWebrtcCallStart> {
         // Create the media call over HTTP first, then retain matching auth so realtime can attach
         // the server-side control WebSocket to the call id from that HTTP response.
+        let mut provider_runtime = self.provider_runtime_receiver();
         let client_setup = self
             .current_client_setup(ClientRouting::ConfiguredProvider)
             .await?;
@@ -893,10 +894,14 @@ impl ModelClient {
             client_setup.redirect_policy,
         )?;
         let api_auth = client_setup.api_auth;
-        let response = ApiRealtimeCallClient::new(transport, api_provider, Arc::clone(&api_auth))
-            .create_with_session_and_headers(sdp, session_config, extra_headers)
-            .await
-            .map_err(|error| self.current_provider().map_api_error(error))?;
+        let client = ApiRealtimeCallClient::new(transport, api_provider, Arc::clone(&api_auth));
+        let response = tokio::select! {
+            biased;
+            _ = provider_runtime.changed() => return Err(CodexErr::TurnAborted),
+            response = client.create_with_session_and_headers(sdp, session_config, extra_headers) => {
+                response.map_err(|error| self.current_provider().map_api_error(error))?
+            }
+        };
         Ok(RealtimeWebrtcCallStart {
             sdp: response.sdp,
             call_id: response.call_id,
