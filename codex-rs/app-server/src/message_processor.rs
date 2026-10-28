@@ -424,7 +424,7 @@ impl MessageProcessor {
             analytics_events_client.clone(),
         );
         let windows_control = match crate::windows_control::WindowsAppServerControlPlane::start(
-            config.codex_home.clone(),
+            config.codex_home.to_path_buf(),
             Arc::clone(&thread_manager),
             config_processor.clone(),
         ) {
