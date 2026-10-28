@@ -52,6 +52,7 @@ use codex_protocol::mcp::RequestId as ProtocolRequestId;
 use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::debug;
 use tracing::info;
@@ -440,6 +441,32 @@ pub async fn review(
     }
 }
 
+// A realtime handshake can retry indefinitely. Keep stop/shutdown reachable
+// while preserving the order of other submissions until startup finishes.
+async fn await_realtime_start<T>(
+    sess: &Session,
+    rx_sub: &Receiver<Submission>,
+    pending: &mut VecDeque<Submission>,
+    start: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(start);
+    loop {
+        tokio::select! {
+            biased;
+            _ = sess.services.local_agent_runtime.shutdown.cancelled() => return None,
+            result = &mut start => return Some(result),
+            sub = rx_sub.recv() => {
+                let Ok(sub) = sub else { return None };
+                if matches!(&sub.op, Op::RealtimeConversationClose | Op::Shutdown) {
+                    pending.push_front(sub);
+                    return None;
+                }
+                pending.push_back(sub);
+            }
+        }
+    }
+}
+
 pub(super) async fn submission_loop(
     sess: Arc<Session>,
     config: Arc<Config>,
@@ -447,6 +474,7 @@ pub(super) async fn submission_loop(
 ) {
     // Session shutdown and tree shutdown both use the existing teardown handler.
     let mut shutdown_received = false;
+    let mut pending = VecDeque::new();
     let mut mailbox = sess.input_queue.mailbox_updates();
     if let Some(updates) = &mut mailbox {
         updates.mark_changed();
@@ -458,7 +486,12 @@ pub(super) async fn submission_loop(
                 shutdown_received = shutdown(&sess, super::new_submission_id()).await;
                 break;
             }
-            sub = rx_sub.recv() => match sub {
+            sub = async {
+                match pending.pop_front() {
+                    Some(sub) => Ok(sub),
+                    None => rx_sub.recv().await,
+                }
+            } => match sub {
                 Ok(sub) => sub,
                 Err(_) => break,
             },
@@ -509,8 +542,13 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::RealtimeConversationStart(params) => {
-                    if let Err(err) =
-                        handle_realtime_conversation_start(&sess, sub.id.clone(), params).await
+                    if let Some(Err(err)) = await_realtime_start(
+                        &sess,
+                        &rx_sub,
+                        &mut pending,
+                        handle_realtime_conversation_start(&sess, sub.id.clone(), params),
+                    )
+                    .await
                     {
                         sess.send_event_raw(Event {
                             id: sub.id.clone(),
@@ -525,8 +563,14 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::RealtimeConversationAttach { params, reply } => {
-                    let result =
-                        crate::realtime_conversation::handle_attach(&sess, sub.id, params).await;
+                    let result = await_realtime_start(
+                        &sess,
+                        &rx_sub,
+                        &mut pending,
+                        crate::realtime_conversation::handle_attach(&sess, sub.id, params),
+                    )
+                    .await
+                    .unwrap_or_else(|| Err(CodexErr::TurnAborted));
                     let _ = reply.send(result);
                     false
                 }

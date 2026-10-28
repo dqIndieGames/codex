@@ -74,8 +74,11 @@ def verify(binary, root, kind):
         rpc = Rpc(binary, fixture, home, root, settings=[])
         tid = rpc.start(home)
         transport = {'type': 'websocket'} if kind == 'websocket' else {'type': 'webrtc', 'sdp': 'v=0\r\ns=local3-fixture\r\n'}
-        rpc.call('thread/realtime/start', {'threadId': tid, 'outputModality': 'text',
-            'includeStartupContext': False, 'version': 'v2', 'transport': transport})
+        # Official WebRTC AVAS accepts v1/v3 audio; v2 text is WS-only.
+        rpc.call('thread/realtime/start', {'threadId': tid,
+            'outputModality': 'text' if kind == 'websocket' else 'audio',
+            'includeStartupContext': False, 'version': 'v2' if kind == 'websocket' else 'v1',
+            'transport': transport})
         rpc.wait(lambda v: v.get('method') == 'thread/realtime/started', timeout=30)
         wanted = ['websocket'] if kind == 'websocket' else ['call', 'sideband']
         deadline = time.monotonic() + 30
