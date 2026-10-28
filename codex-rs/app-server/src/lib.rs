@@ -151,6 +151,7 @@ mod turn_admission;
 mod turn_cost_worker;
 mod user_verification;
 mod user_verification_response;
+mod windows_control;
 
 pub use crate::code_mode_host::AppServerCodeModeHostArgs;
 pub use crate::code_mode_host::CodeModeHostTransport;
@@ -1378,7 +1379,7 @@ pub async fn run_main_with_transport_options(
                 ))
                 .await;
                 connection_cleanup_tasks.drain().await;
-                processor.clear_runtime_references();
+                processor.clear_runtime_references().await;
                 processor.drain_background_tasks().await;
                 processor.shutdown_threads().await;
             } else {

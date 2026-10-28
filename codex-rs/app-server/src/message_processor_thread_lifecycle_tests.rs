@@ -216,7 +216,7 @@ MCP_TEST_PID_FILE = {}
     std::fs::write(&barrier_file, "ready")?;
     drop(outgoing);
     let drained = timeout(Duration::from_secs(/*secs*/ 10), owner.rpc_gate.shutdown()).await;
-    processor.clear_runtime_references();
+    processor.clear_runtime_references().await;
     processor.shutdown_threads().await;
     drained.context("thread/start did not finish during test cleanup")?;
     result?;
@@ -504,7 +504,7 @@ async fn disconnected_v2_child_lifecycle(unload_delay_secs: u64, ephemeral: bool
     }
     .await;
     drop(outgoing);
-    processor.clear_runtime_references();
+    processor.clear_runtime_references().await;
     processor.shutdown_threads().await;
     server.shutdown().await;
     result

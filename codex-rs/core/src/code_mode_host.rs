@@ -90,6 +90,9 @@ struct HostConnection {
 impl HostConnection {
     fn spawn(host_program: &Path) -> io::Result<Self> {
         let mut command = Command::from(background_command(host_program));
+        if codex_code_mode::is_bundled_host(host_program) {
+            command.arg(codex_code_mode::BUNDLED_HOST_ARG);
+        }
         #[cfg(unix)]
         command.process_group(/*pgroup*/ 0);
         command

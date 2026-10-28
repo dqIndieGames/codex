@@ -117,7 +117,9 @@ def verify(binary, output, name, mode, advice, location, expected, failures=1, m
         waits = []
         assert len(fixture.failures) == failures, (name, fixture.failures)
         for index, failed in enumerate(fixture.failures):
-            next_at = min(r['at'] for r in fixture.requests if r['at'] > failed)
+            # Zero-delay requests can share a Windows monotonic clock tick.
+            # Request order, not a strict timestamp comparison, identifies the retry.
+            next_at = fixture.requests[index + 1]['at']
             wait = next_at - failed
             required = fixture.deadlines[index] if expected is None else expected
             assert required - .1 <= wait <= required + 4, (name, required, wait)

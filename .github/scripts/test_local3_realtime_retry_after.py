@@ -38,6 +38,9 @@ class RealtimeHandler(Handler):
                 ('Content-Type', 'application/sdp'), ('Location', '/v1/realtime/calls/rtc_fixture')])
 
     def do_GET(self):
+        # Responses warmup is separate and must not consume realtime failures.
+        if self.path.startswith('/v1/responses'):
+            return super().do_GET()
         if self.failure('sideband' if 'call_id' in self.path else 'websocket'):
             return
         accept = base64.b64encode(hashlib.sha1((self.headers['Sec-WebSocket-Key'] +
@@ -72,7 +75,7 @@ def verify(binary, root, kind):
         tid = rpc.start(home)
         transport = {'type': 'websocket'} if kind == 'websocket' else {'type': 'webrtc', 'sdp': 'v=0\r\ns=local3-fixture\r\n'}
         rpc.call('thread/realtime/start', {'threadId': tid, 'outputModality': 'text',
-            'includeStartupContext': False, 'version': 'v1', 'transport': transport})
+            'includeStartupContext': False, 'version': 'v2', 'transport': transport})
         rpc.wait(lambda v: v.get('method') == 'thread/realtime/started', timeout=30)
         wanted = ['websocket'] if kind == 'websocket' else ['call', 'sideband']
         deadline = time.monotonic() + 30
@@ -91,6 +94,8 @@ def verify(binary, root, kind):
         (root / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf8')
         print(json.dumps(report), flush=True)
     finally:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / 'attempts.json').write_text(json.dumps(fixture.attempts, indent=2), encoding='utf8')
         fixture.release.set()
         if rpc:
             rpc.stop()

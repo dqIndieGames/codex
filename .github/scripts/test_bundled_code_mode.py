@@ -32,7 +32,7 @@ class CodeModeFixture(Fixture):
                 "status": "completed", "output": [item]}}]
 
 
-def verify(binary, output=None):
+def verify(binary, output=None, grpc=False):
     server = CodeModeFixture()
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
@@ -45,6 +45,8 @@ def verify(binary, output=None):
             args = command(str(binary), server)
             args[args.index("-m") + 1] = "gpt-6.1-sol"
             args[-1:-1] = ["-c", "model_providers.fixture.supports_websockets=false"]
+            if grpc:
+                args[-1:-1] = ["-c", "features.code_mode_host_grpc=true"]
             result = subprocess.run(args, cwd=temp, env=env, capture_output=True,
                 text=True, encoding="utf-8", errors="replace", timeout=120,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -59,7 +61,7 @@ def verify(binary, output=None):
         assert "LOCAL3_NESTED_TOOL_OK" in server.tool_output, server.tool_output
         assert "Code Mode is unavailable" not in result.stdout + result.stderr
         assert "WS_RECOVERY_OK" in result.stdout
-        report = {"scenario": "single_exe_code_mode_and_nested_command", "passed": True}
+        report = {"scenario": "single_exe_code_mode_and_nested_command", "grpc": grpc, "passed": True}
         if output:
             (output / "result.json").write_text(json.dumps(report), encoding="utf-8")
         print(json.dumps(report), flush=True)
@@ -70,4 +72,5 @@ def verify(binary, output=None):
 
 
 if __name__ == "__main__":
-    verify(Path(sys.argv[1]).resolve(strict=True), Path(sys.argv[2]) if len(sys.argv) > 2 else None)
+    verify(Path(sys.argv[1]).resolve(strict=True), Path(sys.argv[2]) if len(sys.argv) > 2 else None,
+           grpc="--grpc" in sys.argv[3:])

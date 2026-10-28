@@ -126,7 +126,7 @@ struct ErrorResponse {
 
 impl WindowsAppServerControlPlane {
     #[cfg(not(windows))]
-    pub(crate) async fn start(
+    pub(crate) fn start(
         _codex_home: PathBuf,
         _thread_manager: Arc<ThreadManager>,
         _config_api: ConfigRequestProcessor,
@@ -135,7 +135,7 @@ impl WindowsAppServerControlPlane {
     }
 
     #[cfg(windows)]
-    pub(crate) async fn start(
+    pub(crate) fn start(
         codex_home: PathBuf,
         thread_manager: Arc<ThreadManager>,
         config_api: ConfigRequestProcessor,

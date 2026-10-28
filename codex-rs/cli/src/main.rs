@@ -1060,10 +1060,17 @@ fn main() -> anyhow::Result<()> {
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(codex_code_mode::BUNDLED_HOST_ARG))
     {
+        let listen = if std::env::args().nth(2).as_deref() == Some("--listen") {
+            std::env::args()
+                .nth(3)
+                .ok_or_else(|| anyhow::anyhow!("missing host listen URL"))?
+        } else {
+            "stdio://".to_string()
+        };
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
-            .block_on(codex_code_mode_host::run_stdio());
+            .block_on(codex_code_mode_host::run_main(&listen));
     }
     codex_code_mode::register_bundled_host(std::env::current_exe()?);
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();

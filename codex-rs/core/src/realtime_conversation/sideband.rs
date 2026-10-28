@@ -167,7 +167,7 @@ pub(super) fn spawn_webrtc_sideband_input_task(
 fn webrtc_sideband_session_ended(err: &ApiError) -> bool {
     matches!(
         err,
-        ApiError::Api { status, .. }
+        ApiError::Api { status, .. } | ApiError::Transport(codex_client::TransportError::Http { status, .. })
             if matches!(*status, StatusCode::NOT_FOUND | StatusCode::GONE)
     )
 }

@@ -41,6 +41,19 @@ pub fn register_bundled_host(program: PathBuf) {
     let _ = BUNDLED_HOST_PROGRAM.set(program);
 }
 
+pub fn default_host_program() -> PathBuf {
+    let installed = InstallContext::current().code_mode_host_program();
+    if installed.is_file() {
+        installed
+    } else {
+        BUNDLED_HOST_PROGRAM.get().cloned().unwrap_or(installed)
+    }
+}
+
+pub fn is_bundled_host(program: &std::path::Path) -> bool {
+    BUNDLED_HOST_PROGRAM.get().map(PathBuf::as_path) == Some(program)
+}
+
 pub(crate) type ShutdownResultReceiver = watch::Receiver<Option<Result<(), String>>>;
 
 /// Creates code-mode sessions backed by one lazily spawned process host.
@@ -66,13 +79,7 @@ impl ProcessOwnedCodeModeSessionProvider {
 
 impl Default for ProcessOwnedCodeModeSessionProvider {
     fn default() -> Self {
-        let installed = InstallContext::current().code_mode_host_program();
-        let program = if installed.is_file() {
-            installed
-        } else {
-            BUNDLED_HOST_PROGRAM.get().cloned().unwrap_or(installed)
-        };
-        Self::with_host_program(program)
+        Self::with_host_program(default_host_program())
     }
 }
 
@@ -247,9 +254,7 @@ pub struct ProcessOwnedCodeModeSession {
 impl ProcessOwnedCodeModeSession {
     pub fn new() -> Self {
         Self::with_host(
-            Arc::new(OwnedCodeModeHost::new(
-                InstallContext::current().code_mode_host_program(),
-            )),
+            Arc::new(OwnedCodeModeHost::new(default_host_program())),
             CodeModeSessionCellExecutionLimits::default(),
         )
     }

@@ -154,6 +154,7 @@ pub(crate) struct MessageProcessor {
     command_exec_processor: CommandExecRequestProcessor,
     process_exec_processor: ProcessExecRequestProcessor,
     config_processor: ConfigRequestProcessor,
+    windows_control: Mutex<Option<crate::windows_control::WindowsAppServerControlPlane>>,
     environment_processor: EnvironmentRequestProcessor,
     external_agent_config_processor: ExternalAgentConfigRequestProcessor,
     feedback_processor: FeedbackRequestProcessor,
@@ -422,6 +423,17 @@ impl MessageProcessor {
             Arc::clone(&model_catalog),
             analytics_events_client.clone(),
         );
+        let windows_control = match crate::windows_control::WindowsAppServerControlPlane::start(
+            config.codex_home.clone(),
+            Arc::clone(&thread_manager),
+            config_processor.clone(),
+        ) {
+            Ok(control) => Some(control),
+            Err(err) => {
+                tracing::warn!("failed to start Windows app-server control plane: {err}");
+                None
+            }
+        };
         let on_effective_plugins_changed =
             crate::effective_plugin_change::effective_plugins_changed_callback(
                 auth_manager.clone(),
@@ -613,6 +625,7 @@ impl MessageProcessor {
             command_exec_processor,
             process_exec_processor,
             config_processor,
+            windows_control: Mutex::new(windows_control),
             environment_processor,
             external_agent_config_processor,
             feedback_processor,
@@ -634,7 +647,13 @@ impl MessageProcessor {
         }
     }
 
-    pub(crate) fn clear_runtime_references(&self) {
+    pub(crate) async fn clear_runtime_references(&self) {
+        let windows_control = self.windows_control.lock().await.take();
+        if let Some(control) = windows_control
+            && let Err(err) = control.shutdown().await
+        {
+            tracing::warn!("failed to stop Windows app-server control plane: {err}");
+        }
         self.account_processor.clear_external_auth();
         self.apps_processor.shutdown();
         self.models_refresh_worker.shutdown();

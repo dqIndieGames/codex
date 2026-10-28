@@ -25010,6 +25010,13 @@
           "modelProvider": {
             "type": "string"
           },
+          "modelProviderIsOfficial": {
+            "description": "Whether the active provider resolves to an official OpenAI route.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "personality": {
             "anyOf": [
               {

@@ -1395,10 +1395,20 @@ fn map_realtime_websocket_connect_error(err: WsError) -> ApiError {
         return ApiError::Transport(codex_http_client::TransportError::Policy(denied));
     }
     match err {
-        WsError::Http(response) => ApiError::Api {
-            status: response.status(),
-            message: "realtime websocket handshake failed".to_string(),
-        },
+        WsError::Http(response) => {
+            let headers = response.headers().clone();
+            let retry_after = codex_http_client::RetryAfter::from_headers(&headers);
+            ApiError::Transport(TransportError::Http {
+                status: response.status(),
+                url: None,
+                headers: Some(headers),
+                body: response
+                    .body()
+                    .as_ref()
+                    .and_then(|bytes| String::from_utf8(bytes.clone()).ok()),
+                retry_after,
+            })
+        }
         err => ApiError::Stream(format!("failed to connect realtime websocket: {err}")),
     }
 }
