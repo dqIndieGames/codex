@@ -123,6 +123,14 @@ pub(crate) fn capture_prepared(items: &mut [ResponseItem], state: &mut ImageLadd
 }
 
 fn encode(entry: &ImageLadderImage, tier: u8) -> io::Result<(Vec<u8>, &'static str, u32, u32)> {
+    let cache_key = format!("{}-v2-{tier}.image", entry.source_digest);
+    if let Some(directory) = &entry.cache_dir
+        && directory.join(&cache_key).is_file() {
+        let bytes = std::fs::read(directory.join(&cache_key))?;
+        let decoded = image::load_from_memory(&bytes).map_err(io::Error::other)?;
+        let mime = if image::guess_format(&bytes).map_err(io::Error::other)? == image::ImageFormat::Jpeg { "image/jpeg" } else { "image/png" };
+        return Ok((bytes, mime, decoded.width(), decoded.height()));
+    }
     let bytes = content(entry, true)?;
     let mut decoder = image::ImageReader::new(Cursor::new(&*bytes))
         .with_guessed_format()?.into_decoder().map_err(io::Error::other)?;
@@ -153,6 +161,7 @@ fn encode(entry: &ImageLadderImage, tier: u8) -> io::Result<(Vec<u8>, &'static s
         encoder.encode(&decoded.to_rgb8(), width, height, image::ExtendedColorType::Rgb8).map_err(io::Error::other)?;
         "image/jpeg"
     };
+    if let Some(directory) = &entry.cache_dir { write_object(directory, &cache_key, &output)?; }
     Ok((output, mime, width, height))
 }
 
@@ -220,7 +229,6 @@ pub(crate) fn advance(
             let encoded = placeholder_url.split_once(',').expect("fixed PNG data URL").1;
             let placeholder = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(io::Error::other)?;
             for retention in state.retention.max(5)..=6 {
-                state.retention = retention;
                 for key in &ordered {
                     let entry = state.images.get_mut(key).expect("discovered image");
                     if entry.protected || entry.tier >= 5 || entry.attempted != 15
@@ -230,7 +238,7 @@ pub(crate) fn advance(
                     // With no authoritative request budget, stage six evicts one image per round.
                     if retention == 6 { break }
                 }
-                if !changed.is_empty() { break }
+                if !changed.is_empty() { state.retention = retention; break }
             }
             if !changed.is_empty() { break }
         }

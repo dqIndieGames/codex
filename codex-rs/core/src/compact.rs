@@ -356,7 +356,7 @@ async fn run_compact_task_inner_impl(
                 break response;
             }
             Err(err)
-                if !e.is_response_failed() && matches!(
+                if matches!(
                     err.details(),
                     CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
                 ) =>
@@ -364,7 +364,7 @@ async fn run_compact_task_inner_impl(
                 return Err(err);
             }
             Err(e)
-                if matches!(
+                if !e.is_response_failed() && matches!(
                     e.details(),
                     CodexErrorDetails::SessionBudgetExceeded
                         | CodexErrorDetails::ResponseIncomplete(_)

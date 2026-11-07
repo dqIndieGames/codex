@@ -51,6 +51,10 @@ pub(crate) fn parse_failed_response_cause(response: Option<Value>, headers: Opti
     };
 
     let parsed = match error.code.as_deref() {
+        Some(code @ ("request_too_large" | "request_body_too_large" | "payload_too_large" | "image_too_large"
+            | "image_dimensions_exceeded" | "image_resolution_exceeded" | "image_pixel_limit_exceeded")) => ApiError::InvalidRequest {
+            message: format!("{code}: {}", error.message.unwrap_or_default()),
+        },
         Some("context_length_exceeded") => ApiError::ContextWindowExceeded,
         Some(
             "insufficient_quota"

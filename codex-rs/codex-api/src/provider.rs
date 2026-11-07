@@ -45,6 +45,10 @@ pub fn should_retry_request_error(
 
     match err {
         TransportError::Http { status, body, .. } => {
+            if route.is_responses() && body.as_deref().and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok()).is_some_and(|value| {
+                let error = &value["error"];
+                crate::api_bridge::image_recovery_fields(error["code"].as_str(), error["message"].as_str()).is_some()
+            }) { return false; }
             // Let the model retry loop rebuild an oversized Responses request with its
             // image ladder; retrying this immutable HTTP body cannot shrink it.
             if route.is_responses()

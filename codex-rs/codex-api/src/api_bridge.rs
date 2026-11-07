@@ -105,12 +105,17 @@ fn image_recovery_hint(error: &ApiError) -> Option<codex_protocol::error::ImageR
             }
             (None, Some(message.as_str()))
         }
-        ApiError::InvalidRequest { message } => (None, Some(message.as_str())),
+        ApiError::InvalidRequest { message } | ApiError::Retryable { message, .. } => (None, Some(message.as_str())),
         ApiError::Stream(message) if message == "idle timeout sending websocket request" => {
             return Some(ImageRecoveryHint::UploadTimeout);
         }
         _ => return None,
     };
+    image_recovery_fields(code, message)
+}
+
+pub(crate) fn image_recovery_fields(code: Option<&str>, message: Option<&str>) -> Option<codex_protocol::error::ImageRecoveryHint> {
+    use codex_protocol::error::ImageRecoveryHint;
     match code {
         Some("request_too_large" | "request_body_too_large" | "payload_too_large" | "image_too_large") => {
             return Some(ImageRecoveryHint::BodyTooLarge);
@@ -124,10 +129,12 @@ fn image_recovery_hint(error: &ApiError) -> Option<codex_protocol::error::ImageR
     // Inspect only the provider's error field, never an echoed request or user content.
     let message = message?.trim().to_ascii_lowercase();
     if ["payload too large", "request entity too large", "request body too large",
-        "image file too large", "image bytes exceed", "uploaded content too large"]
+        "image file too large", "image bytes exceed", "uploaded content too large",
+        "request_too_large:", "request_body_too_large:", "payload_too_large:", "image_too_large:"]
         .iter().any(|prefix| message.starts_with(prefix)) {
         Some(ImageRecoveryHint::BodyTooLarge)
-    } else if ["image dimensions exceed", "image resolution exceeds", "image pixel count exceeds"]
+    } else if ["image dimensions exceed", "image resolution exceeds", "image pixel count exceeds",
+        "image_dimensions_exceeded:", "image_resolution_exceeded:", "image_pixel_limit_exceeded:"]
         .iter().any(|prefix| message.starts_with(prefix)) {
         Some(ImageRecoveryHint::Dimensions)
     } else {
