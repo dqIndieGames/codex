@@ -164,7 +164,7 @@ fn safe_endpoint_from_url(url: Option<&str>) -> Option<String> {
 
 pub fn telemetry_api_error_message(error: &ApiError) -> String {
     match error {
-        ApiError::WithRetryAfter { error, .. } => telemetry_api_error_message(error),
+        ApiError::ResponseFailed(error) | ApiError::WithRetryAfter { error, .. } => telemetry_api_error_message(error),
         ApiError::Transport(transport) => telemetry_transport_error_message(transport),
         ApiError::Api { status, .. } => format!("api error {}", status.as_u16()),
         ApiError::Stream(err) => err.to_string(),
@@ -179,13 +179,14 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::Retryable { .. } => "retryable error".to_string(),
         ApiError::RateLimitExceeded { .. } => "rate limit exceeded".to_string(),
         ApiError::RateLimit(_) => "rate limit".to_string(),
-        ApiError::InvalidRequest { .. } | ApiError::InvalidPrompt { .. } => {
+        ApiError::InvalidRequest { .. } | ApiError::InvalidAudioInput { .. } | ApiError::InvalidPrompt { .. } => {
             "invalid request".to_string()
         }
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
         ApiError::BioPolicy { .. } => "bio policy".to_string(),
         ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
         ApiError::ServerOverloaded { .. } => "server overloaded".to_string(),
+        ApiError::PolicyCapacityUnavailable { .. } => "policy-restricted capacity unavailable".to_string(),
         ApiError::FlexUnavailable => "flex capacity unavailable".to_string(),
     }
 }

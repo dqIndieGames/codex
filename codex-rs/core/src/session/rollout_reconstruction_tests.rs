@@ -293,6 +293,7 @@ async fn images_shrunk_replay_downgrades_older_images_and_keeps_rolled_back_hist
         })
         .collect();
     first_turn_items.push(RolloutItem::ImagesShrunk(ImagesShrunkItem {
+        version: None, images: Vec::new(), retention: None,
         tier: 1,
         changed: Some(2),
     }));
@@ -346,6 +347,7 @@ async fn images_shrunk_marker_does_not_count_as_a_rollback_turn() {
         vec![
             RolloutItem::ResponseItem(user_message("turn 2 user").into()),
             RolloutItem::ImagesShrunk(ImagesShrunkItem {
+                version: None, images: Vec::new(), retention: None,
                 tier: 1,
                 changed: Some(1),
             }),
@@ -1729,6 +1731,8 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions(
                     compaction_response_id: None,
                     latest_token_usage_record: None,
                     resume_metadata: current.then(|| codex_history::CompactionResumeMetadata {
+                        image_ladder: None,
+                        dynamic_tools: None,
                         multi_agent_version: None,
                         last_started_turn_id: Some(format!("wake-{window_number}")),
                         turn_attribution: None,

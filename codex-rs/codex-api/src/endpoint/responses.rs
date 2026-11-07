@@ -103,6 +103,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
                 .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?
         };
 
+        crate::requests::responses::record_image_request_size(&request.input, body.as_bytes().len(), "http");
         let mut headers = extra_headers;
         if let Some(ref thread_id) = thread_id {
             insert_header(&mut headers, "x-client-request-id", thread_id);

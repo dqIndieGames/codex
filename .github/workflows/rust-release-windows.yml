@@ -44,7 +44,7 @@ on:
         required: false
 
 env:
-  WINDOWS_BINARIES: "codex codex-code-mode-host codex-responses-api-proxy codex-windows-sandbox-setup codex-windows-sandbox-service codex-command-runner codex-app-server"
+  WINDOWS_BINARIES: "codex codex-code-mode-host codex-exec-server codex-responses-api-proxy codex-windows-sandbox-setup codex-windows-sandbox-service codex-command-runner codex-app-server"
 
 jobs:
   resolve-windows-targets:
@@ -67,16 +67,16 @@ jobs:
 
           case "$target" in
             x86_64-pc-windows-msvc)
-              binary_matrix='{"include":[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"primary","binaries":"codex codex-code-mode-host codex-responses-api-proxy","runs_on":"windows-latest"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"helpers","binaries":"codex-windows-sandbox-setup codex-command-runner","runs_on":"windows-latest"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"app-server","binaries":"codex-app-server","runs_on":"windows-latest"}]}'
-              release_matrix='{"include":[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","runs_on":"windows-latest"}]}'
+              binary_matrix='{"include":[{"build-system":"cargo","runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"primary","binaries":"codex codex-code-mode-host codex-responses-api-proxy","runs_on":"windows-latest"},{"build-system":"cargo","runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"helpers","binaries":"codex-windows-sandbox-setup codex-command-runner","runs_on":"windows-latest"},{"build-system":"cargo","runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"app-server","binaries":"codex-app-server","runs_on":"windows-latest"}]}'
+              release_matrix='{"include":[{"build-system":"cargo","runner":"windows-latest","target":"x86_64-pc-windows-msvc","runs_on":"windows-latest"}]}'
               ;;
             aarch64-pc-windows-msvc)
-              binary_matrix='{"include":[{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"primary","binaries":"codex codex-code-mode-host codex-responses-api-proxy","runs_on":"windows-11-arm"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"helpers","binaries":"codex-windows-sandbox-setup codex-command-runner","runs_on":"windows-11-arm"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"app-server","binaries":"codex-app-server","runs_on":"windows-11-arm"}]}'
-              release_matrix='{"include":[{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","runs_on":"windows-11-arm"}]}'
+              binary_matrix='{"include":[{"build-system":"cargo","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"primary","binaries":"codex codex-code-mode-host codex-responses-api-proxy","runs_on":"windows-11-arm"},{"build-system":"cargo","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"helpers","binaries":"codex-windows-sandbox-setup codex-command-runner","runs_on":"windows-11-arm"},{"build-system":"cargo","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"app-server","binaries":"codex-app-server","runs_on":"windows-11-arm"}]}'
+              release_matrix='{"include":[{"build-system":"cargo","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","runs_on":"windows-11-arm"}]}'
               ;;
             all)
-              binary_matrix='{"include":[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"primary","binaries":"codex codex-code-mode-host codex-responses-api-proxy","runs_on":"windows-latest"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"primary","binaries":"codex codex-code-mode-host codex-responses-api-proxy","runs_on":"windows-11-arm"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"helpers","binaries":"codex-windows-sandbox-setup codex-command-runner","runs_on":"windows-latest"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"helpers","binaries":"codex-windows-sandbox-setup codex-command-runner","runs_on":"windows-11-arm"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"app-server","binaries":"codex-app-server","runs_on":"windows-latest"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"app-server","binaries":"codex-app-server","runs_on":"windows-11-arm"}]}'
-              release_matrix='{"include":[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","runs_on":"windows-latest"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","runs_on":"windows-11-arm"}]}'
+              binary_matrix='{"include":[{"build-system":"cargo","runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"primary","binaries":"codex codex-code-mode-host codex-responses-api-proxy","runs_on":"windows-latest"},{"build-system":"cargo","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"primary","binaries":"codex codex-code-mode-host codex-responses-api-proxy","runs_on":"windows-11-arm"},{"build-system":"cargo","runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"helpers","binaries":"codex-windows-sandbox-setup codex-command-runner","runs_on":"windows-latest"},{"build-system":"cargo","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"helpers","binaries":"codex-windows-sandbox-setup codex-command-runner","runs_on":"windows-11-arm"},{"build-system":"cargo","runner":"windows-latest","target":"x86_64-pc-windows-msvc","bundle":"app-server","binaries":"codex-app-server","runs_on":"windows-latest"},{"build-system":"cargo","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","bundle":"app-server","binaries":"codex-app-server","runs_on":"windows-11-arm"}]}'
+              release_matrix='{"include":[{"build-system":"cargo","runner":"windows-latest","target":"x86_64-pc-windows-msvc","runs_on":"windows-latest"},{"build-system":"cargo","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","runs_on":"windows-11-arm"}]}'
               ;;
             *)
               echo "Unsupported target: $target" >&2
@@ -127,7 +127,7 @@ jobs:
           Write-Host "Disk usage:"
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize Name, @{Name='Size(GB)';Expression={[math]::Round(($_.Used + $_.Free) / 1GB, 1)}}, @{Name='Free(GB)';Expression={[math]::Round($_.Free / 1GB, 1)}}
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ matrix.build-system == 'cargo' && matrix.target || '' }}
 
@@ -280,7 +280,8 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
           VOICE_ARCH: ${{ matrix.arch }}
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          # Use local Bazel while BuildBuddy credentials are unavailable.
+          BUILDBUDDY_API_KEY: ""
         run: |
           (cd codex-rs && cargo update --workspace)
           python .github/scripts/watch_voice_bazel.py "$(cygpath -w "$BASH")" ./.github/scripts/run-bazel-ci.sh \
@@ -337,7 +338,6 @@ jobs:
       - resolve-windows-targets
       - build-windows-binaries
     name: Build Windows symbols - ${{ matrix.target }} - ${{ matrix.build-system }}
-    continue-on-error: ${{ matrix.build-system == 'bazel' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -395,7 +395,6 @@ jobs:
       - build-windows-binaries
       - build-windows-voice
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.build-system }}
-    continue-on-error: ${{ matrix.build-system == 'bazel' }}
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 120
     permissions:
@@ -592,6 +591,26 @@ jobs:
             --target "$target" --bundle app-server \
             --entrypoint-dir "$CARGO_TARGET_DIR/$target/release" \
             --archive-dir "dist/$target"
+
+      - name: Verify packaged executor signatures and bytes
+        shell: pwsh
+        run: |
+          $target = "${{ matrix.target }}"
+          $source = Join-Path $env:CARGO_TARGET_DIR "$target/release/codex-exec-server.exe"
+          foreach ($stem in @("codex-package", "codex-app-server-package")) {
+            $package = Join-Path $env:RUNNER_TEMP "verify-executor-$stem-$target"
+            New-Item -ItemType Directory -Path $package | Out-Null
+            tar -xzf "dist/$target/$stem-$target.tar.gz" -C $package
+            if ($LASTEXITCODE -ne 0) { throw "Cannot extract executor package" }
+            $binary = Join-Path $package "bin/codex-exec-server.exe"
+            if ((Get-FileHash $binary).Hash -ne (Get-FileHash $source).Hash) {
+              throw "Packaged executor differs from the signed input"
+            }
+            $signature = Get-AuthenticodeSignature $binary
+            if ($signature.Status -ne "Valid" -or $null -eq $signature.TimeStamperCertificate) {
+              throw "Invalid or untimestamped executor signature"
+            }
+          }
 
       - name: Verify packaged Windows voice closure
         shell: pwsh

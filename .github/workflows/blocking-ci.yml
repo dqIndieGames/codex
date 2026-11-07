@@ -11,36 +11,43 @@ jobs:
   # Keep reusable workflow calls alphabetized. The `required` job below is the
   # version-controlled list that the main-branch ruleset should require.
   bazel:
+    if: github.repository == 'openai/codex'
     name: Bazel
     uses: ./.github/workflows/bazel.yml
     secrets: inherit
 
   blob-size-policy:
+    if: github.repository == 'openai/codex'
     name: Blob size policy
     uses: ./.github/workflows/blob-size-policy.yml
     secrets: inherit
 
   cargo-deny:
+    if: github.repository == 'openai/codex'
     name: cargo-deny
     uses: ./.github/workflows/cargo-deny.yml
     secrets: inherit
 
   codespell:
+    if: github.repository == 'openai/codex'
     name: Codespell
     uses: ./.github/workflows/codespell.yml
     secrets: inherit
 
   repo-checks:
+    if: github.repository == 'openai/codex'
     name: repo-checks
     uses: ./.github/workflows/repo-checks.yml
     secrets: inherit
 
   rust-ci:
+    if: github.repository == 'openai/codex'
     name: rust-ci
     uses: ./.github/workflows/rust-ci.yml
     secrets: inherit
 
   sdk:
+    if: github.repository == 'openai/codex'
     name: sdk
     uses: ./.github/workflows/sdk.yml
     secrets: inherit
@@ -49,9 +56,10 @@ jobs:
     name: CI required
     # Without `always()`, GitHub skips this job after a failed dependency and a
     # required check can appear successful instead of reporting the failure.
-    if: ${{ always() }}
+    if: ${{ always() && github.repository == 'openai/codex' }}
+    # Bazel is advisory while the BuildBuddy key is revoked. Restore its dependency
+    # once the suite can run without BuildBuddy.
     needs:
-      - bazel
       - blob-size-policy
       - cargo-deny
       - codespell

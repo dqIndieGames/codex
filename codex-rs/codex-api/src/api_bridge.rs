@@ -44,13 +44,19 @@ fn retryable_stream(message: String) -> CodexErr {
 }
 
 fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
+    if let ApiError::ResponseFailed(error) = err {
+        return map_api_error_with_mode(*error, mode).with_response_failed();
+    }
+    let image_recovery = image_recovery_hint(&err);
     let retry_after = match &err {
         ApiError::WithRetryAfter { retry_after, .. } => Some(*retry_after),
         ApiError::Retryable { retry_after, .. }
         | ApiError::RateLimitExceeded { retry_after, .. }
         | ApiError::ServerOverloaded { retry_after }
+        | ApiError::PolicyCapacityUnavailable { retry_after }
         | ApiError::Transport(TransportError::Http { retry_after, .. }) => *retry_after,
-        ApiError::Transport(_)
+        ApiError::ResponseFailed(_)
+        | ApiError::Transport(_)
         | ApiError::Api { .. }
         | ApiError::Stream(_)
         | ApiError::ContentFilter
@@ -61,21 +67,77 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
         | ApiError::FlexUnavailable
         | ApiError::RateLimit(_)
         | ApiError::InvalidRequest { .. }
+        | ApiError::InvalidAudioInput { .. }
         | ApiError::ModelNotFound { .. }
         | ApiError::InvalidPrompt { .. }
         | ApiError::CyberPolicy { .. }
         | ApiError::BioPolicy { .. }
         | ApiError::MisalignmentPolicyViolation { .. } => None,
     };
-    let error = map_api_error_details(err, mode);
+    let mut error = map_api_error_details(err, mode);
+    if image_recovery.is_some() {
+        error = error.with_image_recovery(image_recovery);
+    }
     match retry_after {
         Some(retry_after) => error.with_retry_after(retry_after),
         None => error,
     }
 }
 
+fn image_recovery_hint(error: &ApiError) -> Option<codex_protocol::error::ImageRecoveryHint> {
+    use codex_protocol::error::ImageRecoveryHint;
+    let parsed;
+    let (code, message) = match error {
+        ApiError::ResponseFailed(inner) | ApiError::WithRetryAfter { error: inner, .. } => {
+            return image_recovery_hint(inner);
+        }
+        ApiError::Transport(TransportError::Http { status, body, .. }) => {
+            if *status == http::StatusCode::PAYLOAD_TOO_LARGE {
+                return Some(ImageRecoveryHint::BodyTooLarge);
+            }
+            parsed = serde_json::from_str::<Value>(body.as_deref()?).ok()?;
+            let cause = parsed.get("error")?;
+            (cause.get("code").and_then(Value::as_str), cause.get("message").and_then(Value::as_str))
+        }
+        ApiError::Api { status, message } => {
+            if *status == http::StatusCode::PAYLOAD_TOO_LARGE {
+                return Some(ImageRecoveryHint::BodyTooLarge);
+            }
+            (None, Some(message.as_str()))
+        }
+        ApiError::InvalidRequest { message } => (None, Some(message.as_str())),
+        ApiError::Stream(message) if message == "idle timeout sending websocket request" => {
+            return Some(ImageRecoveryHint::UploadTimeout);
+        }
+        _ => return None,
+    };
+    match code {
+        Some("request_too_large" | "request_body_too_large" | "payload_too_large" | "image_too_large") => {
+            return Some(ImageRecoveryHint::BodyTooLarge);
+        }
+        Some("image_dimensions_exceeded" | "image_resolution_exceeded" | "image_pixel_limit_exceeded") => {
+            return Some(ImageRecoveryHint::Dimensions);
+        }
+        Some("context_length_exceeded") => return None,
+        _ => {}
+    }
+    // Inspect only the provider's error field, never an echoed request or user content.
+    let message = message?.trim().to_ascii_lowercase();
+    if ["payload too large", "request entity too large", "request body too large",
+        "image file too large", "image bytes exceed", "uploaded content too large"]
+        .iter().any(|prefix| message.starts_with(prefix)) {
+        Some(ImageRecoveryHint::BodyTooLarge)
+    } else if ["image dimensions exceed", "image resolution exceeds", "image pixel count exceeds"]
+        .iter().any(|prefix| message.starts_with(prefix)) {
+        Some(ImageRecoveryHint::Dimensions)
+    } else {
+        None
+    }
+}
+
 fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
     match err {
+        ApiError::ResponseFailed(error) => map_api_error_with_mode(*error, mode).with_response_failed(),
         ApiError::WithRetryAfter { error, .. } => map_api_error_with_mode(*error, mode),
         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
@@ -96,6 +158,9 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
             CodexErr::new(CodexErrorDetails::ResponseIncomplete(incomplete))
         }
         ApiError::ServerOverloaded { .. } => CodexErr::ServerOverloaded,
+        ApiError::PolicyCapacityUnavailable { .. } => {
+            CodexErr::new(CodexErrorDetails::PolicyCapacityUnavailable)
+        }
         ApiError::FlexUnavailable => CodexErr::new(CodexErrorDetails::FlexUnavailable),
         ApiError::Api { status, message } => {
             let user_message = api_error_user_message(status, &message);
@@ -114,6 +179,9 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
             HttpErrorMode::Default => CodexErr::InvalidRequest(message),
             HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => retryable_stream(message),
         },
+        ApiError::InvalidAudioInput { message } => {
+            CodexErr::new(CodexErrorDetails::InvalidAudioInput { message })
+        }
         ApiError::ModelNotFound { message, status } => {
             CodexErr::new(CodexErrorDetails::ModelNotFound { message, status })
         }
@@ -156,6 +224,9 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                     && let Some(error) = provider_error
                 {
                     match error.get("code").and_then(Value::as_str) {
+                        Some("policy_capacity_unavailable") => {
+                            return CodexErr::new(CodexErrorDetails::PolicyCapacityUnavailable);
+                        }
                         Some("server_is_overloaded") => return CodexErr::ServerOverloaded,
                         Some("slow_down" | "rate_limit_exceeded" | "turn_rate_limit_exceeded") => {
                             return CodexErr::new(CodexErrorDetails::RateLimitExceeded(

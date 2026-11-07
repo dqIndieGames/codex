@@ -39,10 +39,12 @@ pub fn apply_rollout_item(
         | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
         RolloutItem::Compacted(_) => {}
         RolloutItem::WorldState(_) => {}
-        RolloutItem::RetainedContext(_) | RolloutItem::SecurityRiskScore(_) => {}
-        RolloutItem::RealtimeItem(_)
-        | RolloutItem::ImagesShrunk(_)
-        | RolloutItem::TokenUsageRecord(_) => {}
+        RolloutItem::ImagesShrunk(_)
+        | RolloutItem::DynamicToolsUpdated { .. }
+        | RolloutItem::RetainedContext(_)
+        | RolloutItem::SecurityRiskScore(_) => {}
+        RolloutItem::RealtimeItem(_) => {}
+        RolloutItem::TokenUsageRecord(_) => {}
     }
     if metadata.model_provider.is_empty() {
         metadata.model_provider = default_provider.to_string();
@@ -75,6 +77,7 @@ pub fn rollout_item_affects_thread_metadata(item: &RolloutItem) -> bool {
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::ImagesShrunk(_)
         | RolloutItem::RetainedContext(_)
+        | RolloutItem::DynamicToolsUpdated { .. }
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::WorldState(_) => false,

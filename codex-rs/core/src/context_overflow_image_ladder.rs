@@ -36,10 +36,10 @@ pub(crate) struct ImageLadderReport {
 }
 
 #[derive(Clone, Copy)]
-struct ImageSlot {
-    item_idx: usize,
-    content_idx: usize,
-    in_tool_output: bool,
+pub(crate) struct ImageSlot {
+    pub(crate) item_idx: usize,
+    pub(crate) content_idx: usize,
+    pub(crate) in_tool_output: bool,
 }
 
 pub(crate) fn apply_next_image_ladder_tier(
@@ -107,15 +107,15 @@ pub(crate) fn repair_legacy_placeholders(items: &mut [ResponseItem]) {
     }
 }
 
-fn tiny_png_data_url() -> String {
+pub(crate) fn tiny_png_data_url() -> String {
     format!("data:image/png;base64,{TINY_PNG_BASE64}")
 }
 
-fn is_placeholder_image(image: &ImageReference) -> bool {
+pub(crate) fn is_placeholder_image(image: &ImageReference) -> bool {
     matches!(image, ImageReference::Inline { image_url } if image_url == &tiny_png_data_url())
 }
 
-fn collect_slots(items: &[ResponseItem]) -> Vec<ImageSlot> {
+pub(crate) fn collect_slots(items: &[ResponseItem]) -> Vec<ImageSlot> {
     let mut slots = Vec::new();
     for (item_idx, item) in items.iter().enumerate() {
         match item {
@@ -154,7 +154,7 @@ fn collect_slots(items: &[ResponseItem]) -> Vec<ImageSlot> {
     slots
 }
 
-fn image_parts_mut<'a>(
+pub(crate) fn image_parts_mut<'a>(
     items: &'a mut [ResponseItem],
     slot: ImageSlot,
 ) -> Option<(&'a mut ImageReference, &'a mut Option<ImageDetail>)> {

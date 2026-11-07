@@ -270,6 +270,7 @@ async fn run_compact_task_inner_impl(
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<String> {
+    sess.ensure_image_recovery_ready().await?;
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
@@ -310,7 +311,11 @@ async fn run_compact_task_inner_impl(
         // Clone is required because of the loop
         let mut turn_input = history
             .clone()
-            .for_prompt(&turn_context.model_info().input_modalities);
+            .for_prompt(
+                &turn_context.model_info().input_modalities,
+                sess.services.image_store.as_ref(),
+            )
+            .await;
         sess.services
             .executed_tool_calls
             .attach_to_compaction_prompt(&mut turn_input);
@@ -351,7 +356,7 @@ async fn run_compact_task_inner_impl(
                 break response;
             }
             Err(err)
-                if matches!(
+                if !e.is_response_failed() && matches!(
                     err.details(),
                     CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
                 ) =>
@@ -367,13 +372,21 @@ async fn run_compact_task_inner_impl(
             {
                 return Err(e);
             }
+            Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
+                retry_state.observe_image_failure(&e);
+                if turn_input_len > 1 && retry_state.retries < max_retries {
+                    retry_state.retries += 1;
+                    history.remove_first_item();
+                    continue;
+                }
+                sess.set_total_tokens_full(turn_context.as_ref()).await;
+                return Err(e);
+            }
             Err(e) => {
-                if let Some(tier) = retry_state.prepare_compaction_retry(
+                if let Some(record) = retry_state.prepare_compaction_retry(
                     max_retries, &e, &sess, &turn_context,
                 ).await {
-                    history.with_raw_items_mut(|items| {
-                        crate::context_overflow_image_ladder::apply_image_ladder_tier(items, tier);
-                    });
+                    history.with_raw_items_mut(|items| crate::image_ladder_v2::apply_record(items, &record))?;
                 }
                 if let Err(e) = handle_response_stream_error(
                     &mut retry_state,
@@ -829,8 +842,7 @@ async fn drain_to_completed(
     _phase: CompactionPhase,
     force_http: bool,
 ) -> CodexResult<CompactionResponse> {
-    sess.set_server_reasoning_included(turn_context.model_info().use_responses_lite)
-        .await;
+    let mut includes_reasoning = turn_context.model_info().use_responses_lite;
     let mut stream = client_session
         .stream_with_transport(
             prompt,
@@ -862,7 +874,7 @@ async fn drain_to_completed(
             // Keep each attempt isolated until the response completes successfully.
             Ok(ResponseEvent::OutputItemDone(item)) => output.push(item),
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
-                sess.set_server_reasoning_included(included).await;
+                includes_reasoning = included;
             }
             Ok(ResponseEvent::RateLimits(snapshot)) => {
                 sess.update_rate_limits(turn_context, snapshot).await;
@@ -884,8 +896,12 @@ async fn drain_to_completed(
                     usage_metadata.as_ref(),
                 )
                 .await;
-                sess.update_token_usage_info(turn_context, token_usage.as_ref())
-                    .await?;
+                sess.update_token_usage_info(
+                    turn_context,
+                    token_usage.as_ref(),
+                    includes_reasoning,
+                )
+                .await?;
                 return Ok(CompactionResponse {
                     response_id,
                     output,

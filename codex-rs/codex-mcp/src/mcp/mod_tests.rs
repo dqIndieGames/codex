@@ -130,6 +130,7 @@ async fn status_snapshot_only_downgrades_oauth_and_ema_authentication_failures()
         error: "OAuth refresh token was rejected".to_string(),
         is_authentication_required: true,
         is_ema_authentication_required: false,
+        shutdown: None,
     };
     let mut manager = McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true);
     let mut auth_status_entries = HashMap::new();
@@ -147,6 +148,7 @@ async fn status_snapshot_only_downgrades_oauth_and_ema_authentication_failures()
                 error: "provider temporarily unavailable".to_string(),
                 is_authentication_required: false,
                 is_ema_authentication_required: false,
+                shutdown: None,
             }),
         ),
         (
@@ -233,9 +235,11 @@ pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
         codex_linux_sandbox_exe: None,
         use_legacy_landlock: false,
         apps_enabled: false,
+        apps_early_resource_discovery: false,
         prefix_mcp_tool_names: true,
         non_prefixed_mcp_tool_servers: Vec::new(),
         protocol_mode: McpProtocolMode::Legacy,
+        discover_local_stdio: false,
         mcp_tool_list_changed: true,
         host_owned_apps_protocol_mode: McpProtocolMode::Legacy,
         client_elicitation_capability: ElicitationCapability::default(),

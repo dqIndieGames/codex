@@ -287,6 +287,7 @@ async fn run_remote_compaction_request_v2(
     responses_metadata: &CodexResponsesMetadata,
     transport: CompactionRequestTransport<'_>,
 ) -> CodexResult<RemoteCompactionV2Output> {
+    sess.ensure_image_recovery_ready().await?;
     let turn_context = &step_context.turn;
     let client_session = match transport {
         CompactionRequestTransport::Background(turn_state, auth_owner_generation) => {
@@ -355,10 +356,10 @@ async fn run_remote_compaction_request_v2(
         match result {
             Ok(compaction_output) => return Ok(compaction_output),
             Err(err) => {
-                if let Some(tier) = retry_state.prepare_compaction_retry(
+                if let Some(record) = retry_state.prepare_compaction_retry(
                     max_retries, &err, sess, turn_context,
                 ).await {
-                    crate::context_overflow_image_ladder::apply_image_ladder_tier(&mut prompt.input, tier);
+                    crate::image_ladder_v2::apply_record(&mut prompt.input, &record)?;
                 }
                 handle_response_stream_error(
                     &mut retry_state,
@@ -838,6 +839,7 @@ mod tests {
         }
         drop(tx_event);
         ResponseStream {
+            routing_affinity: None,
             rx_event,
             interrupt: None,
             consumer_dropped: CancellationToken::new(),
@@ -1248,6 +1250,7 @@ mod tests {
         let stream = response_stream(vec![Err(CodexErr::new(
             CodexErrorDetails::ResponseIncomplete(Box::new(
                 codex_protocol::error::ResponseIncompleteError {
+                    partial_output: vec![],
                     reason: "max_output_tokens".to_string(),
                     response_id: Some("resp-background".to_string()),
                     token_usage: Some(TokenUsage {

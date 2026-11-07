@@ -91,15 +91,27 @@ pub enum SandboxErr {
 
 pub struct CodexErr {
     details: CodexErrorDetails,
+    response_failed: bool,
+    image_recovery: Option<ImageRecoveryHint>,
     retry_after: Option<RetryAfter>,
     agent_context: Option<AgentErrorContext>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageRecoveryHint {
+    BodyTooLarge,
+    Dimensions,
+    UploadTimeout,
+}
+
 /// A terminal response that stopped before the model finished, with any reported usage.
 /// Content-filter retries and explicit interruptions have separate handling.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(derive_more::Debug, Error, PartialEq, Eq)]
 #[error("Incomplete response returned, reason: {reason}")]
 pub struct ResponseIncompleteError {
+    /// Provider output items explicitly marked incomplete, retained for failed inference traces.
+    #[debug(skip)]
+    pub partial_output: Vec<serde_json::Value>,
     pub reason: String,
     pub response_id: Option<String>,
     pub token_usage: Option<TokenUsage>,
@@ -166,6 +178,8 @@ pub enum CodexErrorDetails {
     #[error("{0}")]
     InvalidRequest(String),
     #[error("{message}")]
+    InvalidAudioInput { message: String },
+    #[error("{message}")]
     ModelNotFound {
         message: String,
         status: Option<StatusCode>,
@@ -182,6 +196,9 @@ pub enum CodexErrorDetails {
     UsageLimitReached(UsageLimitReachedError),
     #[error("Selected model is at capacity. Please try a different model.")]
     ServerOverloaded,
+    /// Policy-restricted capacity follows the same retry advice as ordinary overloads.
+    #[error("Policy-restricted capacity is unavailable. Please try again later.")]
+    PolicyCapacityUnavailable,
     #[error("Flex capacity unavailable.")]
     FlexUnavailable,
     #[error("{message}")]
@@ -281,6 +298,8 @@ impl From<CodexErrorDetails> for CodexErr {
     fn from(details: CodexErrorDetails) -> Self {
         Self {
             details,
+            response_failed: false,
+            image_recovery: None,
             retry_after: None,
             agent_context: None,
         }
@@ -346,6 +365,8 @@ macro_rules! codex_err_unit_constructors {
             #[allow(non_upper_case_globals)]
             pub const $variant: Self = Self {
                 details: CodexErrorDetails::$variant,
+                response_failed: false,
+                image_recovery: None,
                 retry_after: None,
                 agent_context: None,
             };
@@ -428,6 +449,24 @@ impl CodexErr {
         &self.details
     }
 
+    pub fn with_response_failed(mut self) -> Self {
+        self.response_failed = true;
+        self
+    }
+
+    pub fn is_response_failed(&self) -> bool {
+        self.response_failed
+    }
+
+    pub fn with_image_recovery(mut self, hint: Option<ImageRecoveryHint>) -> Self {
+        self.image_recovery = hint;
+        self
+    }
+
+    pub fn image_recovery_hint(&self) -> Option<ImageRecoveryHint> {
+        self.image_recovery
+    }
+
     pub fn is_retry_time_budget_interrupted(&self) -> bool {
         matches!(
             self.details(),
@@ -444,6 +483,7 @@ impl CodexErr {
             | CodexErrorDetails::Fatal(_)
             | CodexErrorDetails::InvalidImageRequest()
             | CodexErrorDetails::InvalidRequest(_)
+            | CodexErrorDetails::InvalidAudioInput { .. }
             | CodexErrorDetails::ResponseIncomplete(_)
             | CodexErrorDetails::ModelNotFound { .. }
             | CodexErrorDetails::ToolCollision(_)
@@ -472,6 +512,7 @@ impl CodexErr {
             | CodexErrorDetails::TokioJoin(_)
             | CodexErrorDetails::UsageLimitReached(_)
             | CodexErrorDetails::ServerOverloaded
+            | CodexErrorDetails::PolicyCapacityUnavailable
             | CodexErrorDetails::ContextWindowExceeded
             | CodexErrorDetails::UsageNotIncluded
             | CodexErrorDetails::QuotaExceeded
@@ -525,6 +566,9 @@ impl CodexErr {
             | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::UsageNotIncluded => CodexErrorInfo::UsageLimitExceeded,
             CodexErrorDetails::ServerOverloaded => CodexErrorInfo::ServerOverloaded,
+            CodexErrorDetails::PolicyCapacityUnavailable => {
+                CodexErrorInfo::PolicyCapacityUnavailable
+            }
             CodexErrorDetails::FlexUnavailable => CodexErrorInfo::FlexUnavailable,
             CodexErrorDetails::CyberPolicy { .. } => CodexErrorInfo::CyberPolicy,
             CodexErrorDetails::BioPolicy { .. } => CodexErrorInfo::BioPolicy,
@@ -550,7 +594,8 @@ impl CodexErr {
             CodexErrorDetails::SessionConfiguredNotFirstEvent
             | CodexErrorDetails::InternalServerError
             | CodexErrorDetails::InternalAgentDied => CodexErrorInfo::InternalServerError,
-            CodexErrorDetails::UnsupportedOperation(_)
+            CodexErrorDetails::InvalidAudioInput { .. }
+            | CodexErrorDetails::UnsupportedOperation(_)
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. } => CodexErrorInfo::BadRequest,
             CodexErrorDetails::Sandbox(_) => CodexErrorInfo::SandboxError,

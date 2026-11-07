@@ -1,7 +1,6 @@
 use super::*;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
-use crate::context_overflow_image_ladder::apply_image_ladder_tier;
 use codex_history::ResponseItemEnvelope;
 use codex_history::TurnAttribution;
 use codex_protocol::protocol::SessionContextWindow;
@@ -13,6 +12,8 @@ use uuid::Uuid;
 // the resume/fork hydration metadata derived from the same replay.
 #[derive(Debug, PartialEq)]
 pub(crate) struct RolloutReconstruction {
+    pub(crate) image_ladder: codex_history::ImageLadderState,
+    pub(crate) image_recovery_error: Option<String>,
     pub(super) history: Vec<ResponseItemEnvelope>,
     pub(crate) retained_context: codex_history::RetainedContext,
     pub(super) guardian_history: Option<codex_history::GuardianHistoryCheckpoint>,
@@ -243,7 +244,8 @@ impl ContextManager {
             .rev()
             .filter_map(|item| match item {
                 RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some(event.turn_id.as_str()),
-                RolloutItem::SessionMeta(_)
+                RolloutItem::DynamicToolsUpdated { .. }
+                | RolloutItem::SessionMeta(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -441,6 +443,7 @@ impl ContextManager {
                     active_segment.counts_as_user_turn = true;
                 }
                 RolloutItem::EventMsg(_)
+                | RolloutItem::DynamicToolsUpdated { .. }
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::ImagesShrunk(_)
@@ -508,6 +511,11 @@ impl ContextManager {
         }
         let rollout_suffix =
             history_checkpoint.map_or(rollout_items, |checkpoint| checkpoint.suffix);
+        let mut image_ladder = history_checkpoint
+            .and_then(|checkpoint| checkpoint.compacted.resume_metadata.as_ref())
+            .and_then(|metadata| metadata.image_ladder.clone())
+            .unwrap_or_default();
+        let mut image_recovery_error = None;
         for item in rollout_suffix {
             match item {
                 RolloutItem::RetainedContext(event) => {
@@ -522,18 +530,19 @@ impl ContextManager {
                 }
                 RolloutItem::InterAgentCommunicationMetadata { .. } => {}
                 RolloutItem::ImagesShrunk(images_shrunk) => {
-                    // Re-derive the shrunken images from the recorded tier so
-                    // "keep the last N images" is evaluated against the history
-                    // that survived any intervening rollback.
-                    //
-                    // Image preparation is deliberately not re-run here: it is a
-                    // send-time step that rewrites unprocessable images into text
-                    // placeholders, which must not happen while rebuilding stored
-                    // history. The tiers only change `detail` or swap in a known
-                    // placeholder URL, so nothing needs re-encoding.
+                    // V2 replays exact image identities; unversioned markers retain legacy semantics.
                     history.with_raw_items_mut(|items| {
-                        apply_image_ladder_tier(items, images_shrunk.tier);
+                        if let Err(error) = crate::image_ladder_v2::apply_record(items, images_shrunk) {
+                            tracing::warn!(kind = ?error.kind(), "image recovery replay is missing content; history retained");
+                            image_recovery_error = Some("图片恢复缺少已记录的发送副本或原始内容；已停止发送，避免恢复更大的原图。请恢复图片缓存或重新提供原图。".to_owned());
+                        }
                     });
+                    if images_shrunk.version == Some(2) {
+                        image_ladder.retention = images_shrunk.retention.unwrap_or(image_ladder.retention);
+                        for image in &images_shrunk.images {
+                            image_ladder.images.insert(image.id.clone(), image.clone());
+                        }
+                    }
                 }
                 RolloutItem::Compacted(compacted) => {
                     // Reverse replay already chose the newest surviving compaction. Any newer
@@ -563,6 +572,7 @@ impl ContextManager {
                 }
                 RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
                     history.drop_last_n_user_turns(rollback.num_turns);
+                    image_ladder.images.retain(|_, image| history.raw_items().any(|item| item.id().is_some_and(|id| id.as_str() == image.item_id)));
                 }
                 RolloutItem::EventMsg(_)
                 | RolloutItem::TurnContext(_)
@@ -570,6 +580,7 @@ impl ContextManager {
                 | RolloutItem::WorldState(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::TokenUsageRecord(_)
+                | RolloutItem::DynamicToolsUpdated { .. }
                 | RolloutItem::SessionMeta(_) => {}
             }
         }
@@ -603,7 +614,8 @@ impl ContextManager {
                     };
                     baseline.apply_merge_patch(&world_state.state);
                 }
-                RolloutItem::SessionMeta(_)
+                RolloutItem::DynamicToolsUpdated { .. }
+                | RolloutItem::SessionMeta(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -629,6 +641,8 @@ impl ContextManager {
             crate::context_overflow_image_ladder::repair_legacy_placeholders(items);
         });
         RolloutReconstruction {
+            image_ladder,
+            image_recovery_error,
             retained_context: history.retained_context().clone(),
             guardian_history: history.guardian_history_checkpoint(),
             last_started_turn_id,

@@ -24,6 +24,10 @@ struct Error {
 }
 
 pub(crate) fn parse_failed_response(response: Option<Value>, headers: Option<Value>) -> ApiError {
+    ApiError::ResponseFailed(Box::new(parse_failed_response_cause(response, headers)))
+}
+
+pub(crate) fn parse_failed_response_cause(response: Option<Value>, headers: Option<Value>) -> ApiError {
     let error = response.as_ref().and_then(|response| response.get("error"));
     let retry_after_header = [
         error.and_then(|error| error.get("headers")),
@@ -85,6 +89,9 @@ pub(crate) fn parse_failed_response(response: Option<Value>, headers: Option<Val
             message: error
                 .message
                 .unwrap_or_else(|| "Invalid request.".to_string()),
+        },
+        Some("policy_capacity_unavailable") => ApiError::PolicyCapacityUnavailable {
+            retry_after: retry_after_header,
         },
         Some("server_is_overloaded") => ApiError::ServerOverloaded {
             retry_after: retry_after_header,

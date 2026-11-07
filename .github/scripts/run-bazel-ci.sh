@@ -414,6 +414,9 @@ else
     --bes_backend=
     --bes_results_url=
   )
+  if [[ "${bazel_args[0]}" == "test" ]]; then
+    bazel_run_args+=("--test_env=INSTA_UPDATE=no")
+  fi
 fi
 if (( ${#post_config_bazel_args[@]} > 0 )); then
   bazel_run_args+=("${post_config_bazel_args[@]}")

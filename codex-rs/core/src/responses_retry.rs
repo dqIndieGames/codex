@@ -41,6 +41,20 @@ impl Default for ResponsesStreamRetryState {
 }
 
 impl ResponsesStreamRetryState {
+    pub(crate) fn observe_image_failure(&mut self, err: &CodexErr) -> bool {
+        if !is_request_size_error(err) {
+            self.compaction_size_failures = 0;
+            return false;
+        }
+        self.compaction_size_failures += 1;
+        if self.compaction_size_failures == 3 {
+            self.compaction_size_failures = 0;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Decide image recovery before the shared retry wait. The returned tier must
     /// also be applied to the compaction caller's snapshot so stale images are never resent.
     pub(crate) async fn prepare_compaction_retry(
@@ -49,26 +63,22 @@ impl ResponsesStreamRetryState {
         err: &CodexErr,
         sess: &Session,
         turn_context: &TurnContext,
-    ) -> Option<u8> {
+    ) -> Option<codex_history::ImagesShrunkItem> {
+        let image_round_due = self.observe_image_failure(err);
         if self.retries >= max_retries || matches!(err.details(),
             CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
-                | CodexErrorDetails::SessionBudgetExceeded) {
+                | CodexErrorDetails::SessionBudgetExceeded | CodexErrorDetails::ContextWindowExceeded) {
             return None;
         }
         if matches!(err.details(), CodexErrorDetails::Stream(message)
             if message == crate::client::PROVIDER_RUNTIME_REFRESHED) {
             return None;
         }
-        // A WebSocket 1009 switches to HTTP instead; only size errors count toward the ladder.
-        if !is_request_size_error(err) {
-            return None;
-        }
-        self.compaction_size_failures = self.compaction_size_failures.saturating_add(1);
-        if self.compaction_size_failures % 3 == 0 {
-            if let Some(report) = sess.apply_context_overflow_image_ladder(&turn_context.sub_id).await {
-                let tier = report.tier;
+        if image_round_due {
+            if let Some(report) = sess.apply_context_overflow_image_ladder(turn_context,
+                err.image_recovery_hint() == Some(codex_protocol::error::ImageRecoveryHint::Dimensions)).await {
                 sess.notify_stream_error(turn_context, report.message, CodexErr::ContextWindowExceeded).await;
-                return Some(tier);
+                return Some(report.record);
             }
         }
         None
@@ -77,8 +87,9 @@ impl ResponsesStreamRetryState {
 
 /// Context-window overflow or HTTP 413: rebuilding the request with smaller images can help.
 pub(crate) fn is_request_size_error(err: &CodexErr) -> bool {
-    matches!(err.details(), CodexErrorDetails::ContextWindowExceeded)
-        || err.http_status_code_value() == Some(413)
+    !is_websocket_message_too_big(err)
+        && (err.is_response_failed() || err.image_recovery_hint().is_some()
+            || err.http_status_code_value() == Some(413))
 }
 
 /// The server closed the WebSocket because one message exceeded its size limit.
@@ -96,6 +107,7 @@ pub(crate) struct ExhaustedResponseRetry {
 
 /// Returns `Ok(())` when the caller should retry the request loop, or the original error when
 /// it is terminal or the retry budget is exhausted.
+#[tracing::instrument(level = "trace", skip_all, fields(request = ?request))]
 pub(crate) async fn handle_response_stream_error(
     retry_state: &mut ResponsesStreamRetryState,
     max_retries: u64,
@@ -124,6 +136,7 @@ pub(crate) async fn handle_response_stream_error(
         CodexErrorDetails::Interrupted
             | CodexErrorDetails::TurnAborted
             | CodexErrorDetails::SessionBudgetExceeded
+            | CodexErrorDetails::ContextWindowExceeded
     ) {
         return Err(err);
     }

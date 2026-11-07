@@ -305,6 +305,7 @@ async fn sample_preserves_context_and_keeps_source_unchanged(
             expected_turn_id: completed.turn.id.clone(),
             prompt: "Continue identically".to_string(),
             effort: Some(ReasoningEffort::Medium),
+            interrupt_on_cancel: Some(true),
             thread_source: Some(ThreadSource::Feature("composer_predictions".to_string())),
             turn_trigger: Some("composer_predictions".to_string()),
             responsesapi_client_metadata: Some(HashMap::from([
@@ -563,6 +564,7 @@ async fn sample_skips_inherited_stop_hooks() -> Result<()> {
     let list_id = client
         .send_hooks_list_request(HooksListParams {
             cwds: vec![home.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let hooks: HooksListResponse = client.read_response(list_id).await?;

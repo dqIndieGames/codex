@@ -1,6 +1,7 @@
 pub(crate) mod responses;
 mod responses_error;
 pub(crate) use responses_error::parse_failed_response;
+pub(crate) use responses_error::parse_failed_response_cause;
 
 pub(crate) use responses::ResponsesStreamEvent;
 pub(crate) use responses::process_responses_event;

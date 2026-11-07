@@ -1,11 +1,13 @@
 //! Session-wide mutable state.
 
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::BaseInstructionsProvenance;
 #[cfg(test)]
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use super::AdditionalContextStore;
 use super::auto_compact_window::AutoCompactWindow;
@@ -68,6 +70,8 @@ impl ReasoningEffortPin {
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
     pub(crate) session_configuration: SessionConfiguration,
+    /// Catalog to carry across compaction, independent of an explicit resume override.
+    pub(crate) persisted_dynamic_tools: Arc<[DynamicToolSpec]>,
     /// Plugin selection of the last admitted task; settings updates take effect on the next task.
     pub(crate) active_disabled_plugin_ids: Vec<String>,
     /// Persisted origin of the session base instructions, when known.
@@ -77,7 +81,6 @@ pub(crate) struct SessionState {
     pub(crate) history_reset: CancellationToken,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
-    pub(crate) server_reasoning_included: bool,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
     pub(crate) additional_context: AdditionalContextStore,
     /// Settings used by the latest regular user turn, used for turn-to-turn
@@ -106,10 +109,8 @@ pub(crate) struct SessionState {
     pending_first_turn_checklist_candidate_source: Option<codex_hooks::SessionStartSource>,
     pending_first_turn_checklist_source: Option<codex_hooks::SessionStartSource>,
     next_turn_is_first: bool,
-    /// Turn the context-overflow image ladder progress below belongs to.
-    image_ladder_turn_key: Option<String>,
-    /// Highest image-ladder tier already applied within that turn.
-    image_ladder_tier: u8,
+    pub(crate) image_ladder: codex_history::ImageLadderState,
+    pub(crate) image_recovery_error: Option<String>,
     initial_settings_pending: bool,
 }
 
@@ -131,13 +132,13 @@ impl SessionState {
     ) -> Self {
         Self {
             active_disabled_plugin_ids: Vec::new(),
+            persisted_dynamic_tools: Arc::clone(&session_configuration.dynamic_tools),
             session_configuration,
             base_instructions_provenance: None,
             history,
             history_reset: CancellationToken::new(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
-            server_reasoning_included: false,
             mcp_dependency_prompted: HashSet::new(),
             additional_context: AdditionalContextStore::default(),
             previous_turn_settings: None,
@@ -155,8 +156,8 @@ impl SessionState {
             pending_first_turn_checklist_candidate_source: None,
             pending_first_turn_checklist_source: None,
             next_turn_is_first: true,
-            image_ladder_turn_key: None,
-            image_ladder_tier: 0,
+            image_ladder: codex_history::ImageLadderState::default(),
+            image_recovery_error: None,
             initial_settings_pending: true,
         }
     }
@@ -301,8 +302,15 @@ impl SessionState {
         &mut self,
         usage: &TokenUsage,
         model_context_window: Option<i64>,
+        includes_reasoning: bool,
+        input_item_count: usize,
     ) {
-        self.history.update_token_info(usage, model_context_window);
+        self.history.update_token_info(
+            usage,
+            model_context_window,
+            includes_reasoning,
+            input_item_count,
+        );
     }
 
     pub(crate) fn ensure_auto_compact_window_server_prefill_from_usage(
@@ -349,23 +357,6 @@ impl SessionState {
         self.auto_compact_window.advance()
     }
 
-    /// Highest context-overflow image ladder tier already applied within
-    /// `turn_key`. A new turn restarts the ladder at tier 0 so every turn gets
-    /// the full downgrade-then-evict progression instead of inheriting the
-    /// previous turn's exhausted tier.
-    pub(crate) fn image_ladder_tier(&self, turn_key: &str) -> u8 {
-        if self.image_ladder_turn_key.as_deref() == Some(turn_key) {
-            self.image_ladder_tier
-        } else {
-            0
-        }
-    }
-
-    pub(crate) fn set_image_ladder_tier(&mut self, turn_key: &str, tier: u8) {
-        self.image_ladder_turn_key = Some(turn_key.to_string());
-        self.image_ladder_tier = tier;
-    }
-
     pub(crate) fn request_new_context_window(&mut self) {
         self.auto_compact_window.request_new_context_window();
     }
@@ -401,17 +392,8 @@ impl SessionState {
         self.history.set_token_usage_full(context_window);
     }
 
-    pub(crate) fn get_total_token_usage(&self, server_reasoning_included: bool) -> i64 {
-        self.history
-            .get_total_token_usage(server_reasoning_included)
-    }
-
-    pub(crate) fn set_server_reasoning_included(&mut self, included: bool) {
-        self.server_reasoning_included = included;
-    }
-
-    pub(crate) fn server_reasoning_included(&self) -> bool {
-        self.server_reasoning_included
+    pub(crate) fn get_total_token_usage(&self) -> i64 {
+        self.history.get_total_token_usage()
     }
 
     pub(crate) fn record_mcp_dependency_prompted<I>(&mut self, names: I)

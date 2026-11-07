@@ -1059,6 +1059,7 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
             }
             RolloutItem::RetainedContext(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::SecurityRiskScore(_) => {
                 // Not included in `head`; skip.
             }
@@ -1140,6 +1141,7 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::ImagesShrunk(_)
                 | RolloutItem::RetainedContext(_)
+                | RolloutItem::DynamicToolsUpdated { .. }
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::EventMsg(_) => {}
             }
@@ -1235,6 +1237,7 @@ pub async fn read_session_meta_line(path: &Path) -> io::Result<SessionMetaLine> 
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::ImagesShrunk(_)
             | RolloutItem::RetainedContext(_)
+            | RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_) => {}
         }

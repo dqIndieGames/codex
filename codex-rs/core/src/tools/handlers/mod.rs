@@ -4,6 +4,7 @@ mod current_time;
 mod dynamic;
 pub(crate) mod extension_tools;
 mod get_context_remaining;
+pub(crate) mod image_context;
 pub(crate) mod get_context_remaining_spec;
 mod list_available_plugins_to_install;
 pub(crate) mod list_available_plugins_to_install_spec;
@@ -71,6 +72,7 @@ pub use mcp_resource::ListMcpResourcesHandler;
 pub use mcp_resource::ReadMcpResourceHandler;
 pub use new_context_window::NewContextWindowHandler;
 pub use plan::PlanHandler;
+pub(crate) use request_permissions::PreparedPermissionRequest;
 pub use request_permissions::RequestPermissionsHandler;
 pub use request_plugin_install::RequestPluginInstallHandler;
 pub use request_user_input::RequestUserInputHandler;
@@ -161,8 +163,8 @@ where
 }
 
 #[derive(Deserialize)]
-struct ToolEnvironmentArgs {
-    environment_id: Option<String>,
+pub(crate) struct ToolEnvironmentArgs {
+    pub(crate) environment_id: Option<String>,
 }
 
 fn function_tool_environment<T: serde::de::DeserializeOwned>(
@@ -196,7 +198,7 @@ fn selected_executor<'a>(
     }
 }
 
-fn resolve_tool_environment<'a>(
+pub(crate) fn resolve_tool_environment<'a>(
     environments: &'a TurnEnvironmentSnapshot,
     environment_id: Option<&str>,
 ) -> Result<&'a TurnEnvironment, FunctionCallError> {
@@ -283,7 +285,8 @@ pub(crate) fn normalize_and_validate_additional_permissions(
     }
 }
 
-pub(super) struct EffectiveAdditionalPermissions {
+#[derive(Debug)]
+pub(crate) struct EffectiveAdditionalPermissions {
     pub sandbox_permissions: SandboxPermissions,
     pub additional_permissions: Option<AdditionalPermissionProfile>,
     pub permissions_preapproved: bool,
