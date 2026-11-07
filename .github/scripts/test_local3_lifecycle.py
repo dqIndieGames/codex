@@ -29,7 +29,8 @@ class Rpc:
         settings = args[args.index('-c'):-1] if settings is None else settings
         self.stderr = (output / 'app-server.stderr.txt').open('w', encoding='utf-8')
         self.log = (output / 'rpc.jsonl').open('w', encoding='utf-8')
-        self.process = subprocess.Popen([binary, 'app-server', *settings, *extra],
+        self.process = subprocess.Popen([binary, '--dangerously-bypass-hook-trust',
+            '--dangerously-bypass-approvals-and-sandbox', 'app-server', *settings, *extra],
             cwd=home, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
             text=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
         self.queue = queue.Queue()
@@ -55,6 +56,7 @@ class Rpc:
         self.process.stdin.flush()
 
     def wait(self, predicate, timeout=100):
+        timeout = min(timeout, float(os.environ.get('LOCAL3_CHECK_REMAINING_SECONDS', timeout)))
         deadline = time.monotonic() + timeout
         while True:
             for i, value in enumerate(self.pending):
@@ -105,7 +107,16 @@ class Rpc:
 
 def verify(binary, root):
     root.mkdir(parents=True, exist_ok=True)
-    fixture = Fixture('healthy')
+    class LifecycleFixture(Fixture):
+        fail_next = False
+        def events(self, payload, compact=False):
+            if self.fail_next:
+                self.fail_next = False
+                return [{'type': 'response.failed', 'response': {'error': {
+                    'code': 'server_error', 'message': 'PRIVATE_FAILURE_FIXTURE',
+                    'headers': {'Retry-After': '0'}}}}]
+            return super().events(payload, compact)
+    fixture = LifecycleFixture('healthy')
     worker = threading.Thread(target=fixture.serve_forever, daemon=True)
     worker.start()
     home = root / 'home'
@@ -115,6 +126,7 @@ def verify(binary, root):
         thread_id = rpc.start(home)
         rpc.turn(thread_id, '你好')
         first = rpc.call('thread/read', {'threadId': thread_id, 'includeTurns': True})
+        fixture.fail_next = True
         rpc.turn(thread_id, '你好')
         second = rpc.call('thread/read', {'threadId': thread_id, 'includeTurns': True})
         def texts(value):
@@ -133,9 +145,13 @@ def verify(binary, root):
         assert len(texts(restored)) > len(texts(second)), 'resume must retain and extend history'
         assert not re.search(r'(?m)^\s*1\. ', texts(restored)[-1])
         assert not any('Reconnecting...' in t for t in texts(restored))
+        assert 'PRIVATE_FAILURE_FIXTURE' not in json.dumps(restored)
+        for path in home.glob('sessions/**/*.jsonl'):
+            contents = path.read_text(encoding='utf-8')
+            assert 'PRIVATE_FAILURE_FIXTURE' not in contents and 'Reconnecting...' not in contents
         (root / 'thread-id.txt').write_text(thread_id, encoding='utf-8')
         report = {'passed': True, 'first_hello_21': True, 'second_no_repeat': True,
-                  'resume': True, 'thread_id': thread_id}
+                  'resume': True, 'failure_history_isolation': True, 'thread_id': thread_id}
         (root / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         print(json.dumps(report), flush=True)
     finally:

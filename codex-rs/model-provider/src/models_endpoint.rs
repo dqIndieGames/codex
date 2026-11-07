@@ -126,8 +126,11 @@ impl OpenAiModelsEndpoint {
         http_client_factory: HttpClientFactory,
     ) -> CoreResult<ModelsEndpointResponse> {
         let provider_info = self.provider_info.clone();
-        let auth_manager = self.auth_manager.clone();
-        let runtime_auth = self.runtime_auth.clone();
+        let (auth_manager, runtime_auth) = if provider_info.experimental_bearer_token_is_non_empty() {
+            (None, None)
+        } else {
+            (self.auth_manager.clone(), self.runtime_auth.clone())
+        };
         // A timed-out catalog fetch must not discard a rotated refresh token before
         // it is saved. Keep credential refresh and registration owned until they finish.
         let (auth, selected_runtime_auth) = tokio::spawn(async move {

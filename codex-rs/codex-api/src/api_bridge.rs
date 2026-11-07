@@ -142,6 +142,15 @@ pub(crate) fn image_recovery_fields(code: Option<&str>, message: Option<&str>) -
     }
 }
 
+pub(crate) fn context_overflow_fields(code: Option<&str>, message: Option<&str>) -> bool {
+    code == Some("context_length_exceeded") || message.is_some_and(|message| {
+        let message = message.trim().to_ascii_lowercase();
+        message.starts_with("this model's maximum context length is ")
+            || message.starts_with("maximum context length exceeded")
+            || message.starts_with("context token limit exceeded")
+    })
+}
+
 fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
     match err {
         ApiError::ResponseFailed(error) => map_api_error_with_mode(*error, mode).with_response_failed(),
@@ -222,8 +231,8 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                 }
 
                 if status == http::StatusCode::BAD_REQUEST
-                    && serde_json::from_str::<Value>(&body_text).ok().is_some_and(|value|
-                        value["error"]["code"] == "context_length_exceeded") {
+                    && provider_error.is_some_and(|error|
+                        context_overflow_fields(error["code"].as_str(), error["message"].as_str())) {
                     return CodexErr::ContextWindowExceeded;
                 }
 

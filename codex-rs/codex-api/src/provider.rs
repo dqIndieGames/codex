@@ -55,7 +55,7 @@ pub fn should_retry_request_error(
                 && (*status == StatusCode::PAYLOAD_TOO_LARGE
                     || (*status == StatusCode::BAD_REQUEST && body.as_deref().is_some_and(|body| {
                         serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|value|
-                            value["error"]["code"] == "context_length_exceeded")
+                            crate::api_bridge::context_overflow_fields(value["error"]["code"].as_str(), value["error"]["message"].as_str()))
                     }))) {
                 return false;
             }

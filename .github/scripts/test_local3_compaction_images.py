@@ -1,167 +1,210 @@
-"""Manual compaction/image recovery using the checklist §§3.4, 3.6 and 6 as truth.
-
-Checks original-image preservation on disk, image changes after counted size
-failures, a WS 1009 switching straight to HTTP without shrinking images, and
-the session staying on HTTP for later sampling and compaction.
+"""L0 checklist 6.1/6.4; L1 originals unchanged, strict reduction, exact resume/fork.
+Only run via the cumulative release budget, using a downloaded exe.
 """
 import base64
 import hashlib
 import io
 import json
-import struct
-import zlib
-from pathlib import Path
-import sys
+import random
 import threading
 import time
-
-from PIL import Image
-
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
 from test_local3_lifecycle import Rpc
 from test_websocket_recovery import Fixture
-
-
-class SamplingSizeFixture(Fixture):
-    def events(self, payload, compact=False):
-        # Checklist §6.1: unrelated failures break a run of consecutive sampling overflows.
-        sequence = ('context_length_exceeded', 'server_error', 'context_length_exceeded',
-                    'context_length_exceeded', 'context_length_exceeded')
-        if len(self.failures) < len(sequence):
-            code = sequence[len(self.failures)]
-            self.failures.append(time.monotonic())
-            return [{'type': 'response.failed', 'response': {'id': 'failed-fixture',
-                     'status': 'failed', 'error': {'code': code, 'message': 'fixture failure'}}}]
-        return super().events(payload, compact)
-
+from _groundtruth.local3_retry_contract import IMAGE_FAILURES_PER_ROUND as COUNT
+from _groundtruth.local3_retry_contract import IMAGE_KEEP_RECENT, IMAGE_LONG_EDGES, IMAGE_PLACEHOLDER_SIZE
 
 def images(payload):
     result = []
     def walk(value):
         if isinstance(value, dict):
-            if value.get('type') == 'input_image':
-                result.append((value.get('image_url'), value.get('detail')))
-            for child in value.values():
-                walk(child)
+            if value.get('type') == 'input_image': result.append((value.get('image_url'), value.get('detail')))
+            for child in value.values(): walk(child)
         elif isinstance(value, list):
-            for child in value:
-                walk(child)
+            for child in value: walk(child)
     walk(payload.get('input', []))
     return result
 
+def tool_output(payload, call_id):
+    for item in reversed(payload.get('input', [])):
+        if item.get('type') == 'function_call_output' and item.get('call_id') == call_id:
+            output = item['output']
+            if isinstance(output, list): output = '\n'.join(p.get('text', '') for p in output)
+            return json.loads(output)
+    return None
 
-def verify(binary, root, scenario):
+class ImageFixture(Fixture):
+    def __init__(self, root):
+        super().__init__('images-v2')
+        self.root, self.phase, self.generation = root, 'list', 0
+        self.remaining, self.failure_index = 0, 0
+        self.image_ids, self.last_images = [], []
+        self.snapshots, self.tool_sent = set(), True
+
+    def record(self, transport, payload, user_agent=None):
+        compact = 'COMPACT_FIXTURE' in json.dumps(payload) or any(i.get('type') == 'compaction_trigger' for i in payload.get('input', []))
+        summaries = []
+        urls = images(payload)
+        for index, (url, _) in enumerate(urls):
+            assert url and url.startswith('data:'), 'no omitted image or unexpected file reference'
+            data = base64.b64decode(url.split(',', 1)[1])
+            picture = Image.open(io.BytesIO(data)); picture.load()
+            sha = hashlib.sha256(data).hexdigest()
+            alpha = picture.getchannel('A').getextrema() if 'A' in picture.getbands() else None
+            summaries.append({'sha256': sha, 'bytes': len(data), 'size': list(picture.size), 'format': picture.format,
+                              'alpha': alpha})
+            if index in (0, 1, len(urls)-1) and sha not in self.snapshots:
+                (self.root / f'sent-{index}-{sha[:12]}.{picture.format.lower()}').write_bytes(data)
+                self.snapshots.add(sha)
+        self.last_images = summaries
+        self.requests.append({'transport': transport, 'compact': compact, 'at': time.monotonic(),
+            'json_bytes': len(json.dumps(payload).encode()), 'images': summaries,
+            'user_agent': user_agent, 'phase': self.phase, 'failure_index': self.failure_index})
+        return compact
+
+    def http_error(self, payload, compact):
+        if self.phase == 'fail' and self.remaining and self.failure_index % COUNT == 0:
+            self.failure_index += 1; self.remaining -= 1
+            return 413, {'error': {'message': 'Payload Too Large'}}
+        return None
+
+    def call_events(self, arguments, suffix):
+        item = {'type': 'function_call', 'name': 'image_context', 'call_id': suffix, 'arguments': json.dumps(arguments)}
+        return [{'type': 'response.created', 'response': {'id': suffix}},
+            {'type': 'response.output_item.done', 'output_index': 0, 'item': item},
+            {'type': 'response.completed', 'response': {'id': suffix, 'status': 'completed', 'output': [item]}}]
+
+    def events(self, payload, compact=False):
+        if self.phase == 'list':
+            self.phase = 'release'
+            return self.call_events({'action': 'list'}, f'list_{self.generation}')
+        if self.phase == 'release':
+            result = tool_output(payload, f'list_{self.generation}')
+            assert result and result['images'], 'image_context must return real identities'
+            self.image_ids = [entry['image_id'] for entry in result['images']]
+            release = [entry['image_id'] for entry in result['images'] if entry['tier'] < 5 and entry['image_id'] != self.image_ids[1]]
+            self.phase = 'armed'
+            return self.call_events({'action': 'release', 'image_ids': release,
+                'analysis_complete': True, 'details_required': False}, f'release_{self.generation}')
+        if self.phase == 'armed':
+            assert tool_output(payload, f'release_{self.generation}'), 'release acknowledged'
+            self.phase = 'ready'
+        if self.phase == 'fail' and self.remaining:
+            self.failure_index += 1; self.remaining -= 1
+            error = {'code': 'turn_rate_limit_exceeded', 'message': 'fixture', 'headers': {'Retry-After': '0'}}
+            response = {'status': 'failed', 'error': error} if self.failure_index % COUNT else {'status': 'failed'}
+            return [{'type': 'response.failed', 'response': response, 'headers': {'Retry-After': '0'}}]
+        return super().events(payload, compact)
+
+    def arm(self, failures):
+        self.phase, self.remaining, self.failure_index = 'fail', failures, 0
+
+def verify(binary, root):
     root.mkdir(parents=True, exist_ok=True)
-    fixture = SamplingSizeFixture(scenario) if scenario == 'sampling-context' else Fixture(scenario)
-    # Manual compaction: keep the setup turn small and avoid an unrelated tool.
-    fixture.tool_sent = True
-    worker = threading.Thread(target=fixture.serve_forever, daemon=True)
-    worker.start()
+    server = ImageFixture(root)
+    worker = threading.Thread(target=server.serve_forever, daemon=True); worker.start()
     rpc = None
     try:
+        originals = []
+        font = ImageFont.truetype(r'C:\Windows\Fonts\consola.ttf', 40)
+        for index in range(IMAGE_KEEP_RECENT + 3):
+            picture = Image.frombytes('RGB', (1440, 900), random.Random(index).randbytes(1440*900*3))
+            draw = ImageDraw.Draw(picture)
+            draw.rectangle((30, 30, 1410, 380), fill=(245, 245, 245))
+            draw.text((60, 60), f'Image {index+1} | Code: x = 1280 / 768\nValue: 1234567890   q95 q85 q75\nFine lines and comparison text', font=font, fill=(20, 20, 20))
+            draw.line((60, 330, 1350, 330), fill=(20, 20, 20), width=1)
+            draw.rectangle((100, 430, 670, 820), fill=(80, 160, 220))
+            draw.ellipse((530, 460, 610, 540), fill=(255, 220, 90))
+            draw.polygon([(100, 800), (310, 520), (440, 680), (570, 560), (670, 800)], fill=(35, 100, 60))
+            path = root / f'original-{index}.png'; picture.save(path, compress_level=0)
+            originals.append((path, hashlib.sha256(path.read_bytes()).hexdigest()))
         home = root / 'home'
-        http = 'http413' in scenario
-        extra = ['-c', 'model_providers.fixture.supports_websockets=false',
-                 '-c', 'model_providers.fixture.request_max_retries=100000'] if http else []
-        rpc = Rpc(binary, fixture, home, root, extra)
+        extra = ['-c', 'model_providers.fixture.supports_websockets=false', '-c', 'model_providers.fixture.request_max_retries=5']
+        rpc = Rpc(binary, server, home, root / 'rpc', extra)
         tid = rpc.start(home)
-        def chunk(kind, data):
-            return struct.pack('!I', len(data)) + kind + data + struct.pack('!I', zlib.crc32(kind + data))
-        # Large enough for original -> high to change the actual transmitted pixels,
-        # including Responses Lite where the detail marker is omitted on the wire.
-        side = 2048
-        png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!IIBBBBB', side, side, 8, 2, 0, 0, 0))
-               + chunk(b'IDAT', zlib.compress((b'\0' + bytes([40, 120, 200]) * side) * side)) + chunk(b'IEND', b''))
-        image_file = root / 'original.png'
-        image_file.write_bytes(png)
-        original_hash = hashlib.sha256(png).hexdigest()
-        inputs = [{'type': 'localImage', 'path': str(image_file), 'detail': 'original'} for _ in range(7)]
-        rpc.turn(tid, 'Remember these images.', inputs)
-        if scenario == 'sampling-http413':
-            attempts = fixture.requests
-            (root / 'requests.json').write_text(json.dumps(attempts, indent=2), encoding='utf-8')
-            original = images(attempts[0]['payload'])
-            # Checklist 6.1: sampling counts HTTP 413 with context overflow; the third one shrinks images.
-            assert len(attempts) == 4 and all(r['transport'] == 'http' for r in attempts)
-            assert all(images(r['payload']) == original for r in attempts[:3]), 'do not shrink before three 413s'
-            assert images(attempts[3]['payload']) != original, 'shrink after three consecutive 413s'
-            report = {'passed': True, 'scenario': scenario, 'consecutive_413_counter': True}
-            (root / 'result.json').write_text(json.dumps(report), encoding='utf-8')
-            print(json.dumps(report), flush=True)
-            return
-        if scenario == 'sampling-context':
-            attempts = fixture.requests
-            (root / 'requests.json').write_text(json.dumps(attempts, indent=2), encoding='utf-8')
-            original = images(attempts[0]['payload'])
-            # Checklist 3.4: any three consecutive WS failures switch the session to HTTP.
-            assert [r['transport'] for r in attempts] == ['ws'] * 3 + ['http'] * 3
-            assert all(images(r['payload']) == original for r in attempts[:-1]), 'do not shrink before three consecutive overflows'
-            assert images(attempts[-1]['payload']) != original, 'shrink after three consecutive overflows'
-            report = {'passed': True, 'scenario': scenario, 'consecutive_overflow_counter': True}
-            (root / 'result.json').write_text(json.dumps(report), encoding='utf-8')
-            print(json.dumps(report), flush=True)
-            return
-        initial_images = images(fixture.requests[-1]['payload'])
-        start = len(fixture.requests)
-        rpc.call('thread/compact/start', {'threadId': tid})
-        completed = rpc.wait(lambda v: v.get('method') == 'turn/completed', timeout=180)
-        assert completed['params']['turn']['status'] == 'completed', completed
-        attempts = [r for r in fixture.requests[start:] if r['compact']]
-        (root / 'requests.json').write_text(json.dumps(fixture.requests, indent=2), encoding='utf-8')
-        assert len(attempts) >= 2, 'must exercise retry'
-        original, retried = images(attempts[0]['payload']), images(attempts[3 if http else 1]['payload'])
-        if not original and attempts[0]['payload'].get('previous_response_id'):
-            # An incremental request refers to the images already sent in the setup turn.
-            original = initial_images
-        assert len(original) == len(retried) == len(inputs), 'retain ordered image slots'
-        if http:
-            assert original != retried, 'next attempt after threshold must use changed images'
-            assert len(attempts) == 13, 'four tiers trigger after size failures 3/6/9/12'
-            assert all(r['transport'] == 'http' for r in attempts)
-            for threshold in (3, 6, 9, 12):
-                assert images(attempts[threshold - 1]['payload']) != images(attempts[threshold]['payload'])
-            for tier, keep in ((9, 5), (12, 1)):
-                for url, _ in images(attempts[tier]['payload'])[:-keep]:
-                    data = base64.b64decode(url.split(',', 1)[1])
-                    decoded = Image.open(io.BytesIO(data))
-                    decoded.load()
-                    assert decoded.format == 'PNG' and decoded.size == (1, 1), 'valid fully decoded placeholder'
-        else:
-            # Checklist 3.4/6.1: a WS 1009 switches straight to HTTP and never shrinks images by itself.
-            assert attempts[0]['transport'] == 'ws', 'first compaction attempt uses configured WS'
-            assert all(r['transport'] == 'http' for r in attempts[1:]), '1009 must not retry over WS'
-            assert retried == original, '1009 alone must not change images'
-        rpc.turn(tid, 'Continue with a short reply.')
-        # HTTP-configured sessions stay on HTTP; WS sessions keep HTTP after the 1009 fallback.
-        session_transport = 'http'
-        assert fixture.requests[-1]['transport'] == session_transport
-        start = len(fixture.requests)
-        rpc.call('thread/compact/start', {'threadId': tid})
-        rpc.wait(lambda v: v.get('method') == 'turn/completed')
-        assert fixture.requests[start]['transport'] == session_transport, 'next compaction stays on HTTP'
-        assert hashlib.sha256(image_file.read_bytes()).hexdigest() == original_hash, 'disk image must stay unchanged'
-        shrunk_events = []
-        for file in home.glob('sessions/**/*.jsonl'):
-            for line in file.read_text(encoding='utf-8').splitlines():
-                record = json.loads(line)
-                if record.get('type') == 'images_shrunk':
-                    shrunk_events.append(record)
-        if http:
-            assert shrunk_events, 'image change must be persisted for resume/fork'
-        else:
-            assert not shrunk_events, '1009 alone must not record an image change'
-        report = {'passed': True, 'scenario': scenario, 'transports': [r['transport'] for r in attempts],
-                  'images_changed': http, 'persisted': bool(shrunk_events), 'disk_original_unchanged': True,
-                  'next_compaction_transport': session_transport}
-        (root / 'requests.json').write_text(json.dumps(fixture.requests, indent=2), encoding='utf-8')
+        rpc.turn(tid, 'Analyze these images; retain image 2 as the required reference.', [
+            {'type': 'localImage', 'path': str(path), 'detail': 'original'} for path, _ in originals])
+        server.arm(COUNT*6); start = len(server.requests)
+        rpc.turn(tid, 'Continue using the recorded image dependencies.')
+        attempts = server.requests[start:]
+        assert len(attempts) == COUNT*6+1, 'one count per remote failure'
+        for round_index in range(6):
+            before = attempts[round_index*COUNT]['images']
+            assert all(x['images'] == before for x in attempts[round_index*COUNT:(round_index+1)*COUNT]), 'no early downgrade'
+            after = attempts[(round_index+1)*COUNT]['images']
+            assert sum(x['bytes'] for x in after) < sum(x['bytes'] for x in before)
+            assert len(after) == len(before)
+            assert after[1] == attempts[0]['images'][1], 'protect old reference while other images have room'
+        for tier, edge in IMAGE_LONG_EDGES.items():
+            assert all(max(x['size']) <= edge for i, x in enumerate(attempts[tier*COUNT]['images']) if i != 1)
+        fifth = attempts[5*COUNT]['images']
+        retained = {i for i, x in enumerate(fifth) if tuple(x['size']) != IMAGE_PLACEHOLDER_SIZE}
+        expected = set(range(len(originals)-IMAGE_KEEP_RECENT, len(originals))) | {1}
+        assert retained == expected, (retained, expected)
+        sixth = attempts[6*COUNT]['images']
+        assert sum(tuple(x['size']) == IMAGE_PLACEHOLDER_SIZE for x in sixth) == len(originals)-len(expected)+1
+        rpc.stop(); rpc = Rpc(binary, server, home, root / 'resumed', extra)
+        server.phase = 'ready'
+        rpc.call('thread/resume', {'threadId': tid}); rpc.turn(tid, 'Continue with the same image context.')
+        assert server.last_images == sixth, 'resume exact image state'
+        fork = rpc.call('thread/fork', {'threadId': tid})['thread']['id']
+        rpc.turn(fork, 'Continue without restoring degraded images.')
+        assert server.last_images == sixth, 'fork exact image state'
+        transparent = Image.new('RGBA', (1440, 900), (0, 0, 0, 0))
+        drawing = ImageDraw.Draw(transparent)
+        drawing.rectangle((100, 100, 1300, 800), fill=(40, 160, 220, 128))
+        drawing.text((150, 200), 'Alpha 128 | Reference 12345', font=font, fill=(255, 255, 255, 255))
+        alpha_path = root / 'original-transparent.png'
+        transparent.save(alpha_path, compress_level=0)
+        originals.append((alpha_path, hashlib.sha256(alpha_path.read_bytes()).hexdigest()))
+        server.phase = 'list'; server.generation += 1
+        rpc.turn(tid, 'Analyze this new batch then release when no longer required.', [
+            {'type': 'localImage', 'path': str(originals[0][0]), 'detail': 'original'},
+            {'type': 'localImage', 'path': str(alpha_path), 'detail': 'original'}])
+        new_before = server.last_images[-1]
+        server.arm(COUNT); rpc.turn(tid, 'Continue after adding the new batch.')
+        assert server.last_images[-1]['bytes'] < new_before['bytes']
+        assert tuple(server.last_images[-1]['size']) != IMAGE_PLACEHOLDER_SIZE, 'new image cannot jump to placeholder'
+        assert server.last_images[-1]['alpha'] == new_before['alpha'], 'lossless stage preserves alpha range'
+        # 共享六档只跑一次；两个独立摘要入口各取三次失败后的真实请求证据。
+        prior = server.last_images
+        compact_evidence = []
+        for provider_name in ('Local image fixture', 'OpenAI'):
+            rpc.stop()
+            rpc = Rpc(binary, server, home, root / ('compact-local' if provider_name != 'OpenAI' else 'compact-v2'),
+                      [*extra, '-c', f'model_providers.fixture.name={json.dumps(provider_name)}'])
+            compact_thread = rpc.call('thread/fork', {'threadId': tid})['thread']['id']
+            server.arm(COUNT)
+            start = len(server.requests)
+            rpc.call('thread/compact/start', {'threadId': compact_thread})
+            completed = rpc.wait(lambda event: event.get('method') == 'turn/completed')
+            assert completed['params']['turn']['status'] == 'completed', completed
+            attempts = server.requests[start:]
+            assert len(attempts) == COUNT + 1 and all(r['compact'] for r in attempts)
+            assert attempts[0]['images'] == prior, 'compact must start with the persisted processed images'
+            assert all(r['images'] == prior for r in attempts[:COUNT])
+            assert sum(x['bytes'] for x in attempts[-1]['images']) < sum(x['bytes'] for x in prior)
+            compact_evidence.append(provider_name)
+        assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in originals)
+        markers = []
+        for path in home.rglob('rollout-*.jsonl'):
+            for line in path.read_text(encoding='utf-8').splitlines():
+                item = json.loads(line)
+                if item.get('type') == 'images_shrunk':
+                    assert 'base64,' not in line
+                    markers.append(item)
+        assert markers, 'durable image changes'
+        report = {'passed': True, 'six_stages': True, 'protection': True, 'resume': True, 'fork': True,
+                  'new_image_after_top': True, 'originals_unchanged': True, 'compact_entries': compact_evidence,
+                  'visual_status': 'pending actual inspection'}
         (root / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         print(json.dumps(report), flush=True)
     finally:
-        if rpc:
-            rpc.stop()
-        fixture.shutdown()
-        fixture.server_close()
-        worker.join(5)
-
+        (root / 'requests.json').write_text(json.dumps(server.requests, indent=2), encoding='utf-8')
+        if rpc: rpc.stop()
+        server.shutdown(); server.server_close(); worker.join(2)
 
 if __name__ == '__main__':
-    verify(str(Path(sys.argv[1]).resolve(strict=True)), Path(sys.argv[2]).resolve(), sys.argv[3])
+    import sys
+    verify(str(Path(sys.argv[1]).resolve(strict=True)), Path(sys.argv[2]).resolve())

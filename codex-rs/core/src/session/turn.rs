@@ -2015,7 +2015,9 @@ async fn run_sampling_request(
         if image_round_due {
             if let Some(report) = sess
                 .apply_context_overflow_image_ladder(&turn_context, dimensions_only)
-                .await
+                .or_cancel(&preempt)
+                .or_cancel(&cancellation_token)
+                .await??
             {
                 sess.notify_stream_error(&turn_context, report.message, CodexErr::ContextWindowExceeded)
                     .await;

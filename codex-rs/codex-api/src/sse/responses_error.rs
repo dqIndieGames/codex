@@ -50,6 +50,9 @@ pub(crate) fn parse_failed_response_cause(response: Option<Value>, headers: Opti
         };
     };
 
+    if crate::api_bridge::context_overflow_fields(error.code.as_deref(), error.message.as_deref()) {
+        return ApiError::ContextWindowExceeded.with_retry_after(retry_after_header);
+    }
     let parsed = match error.code.as_deref() {
         Some(code @ ("request_too_large" | "request_body_too_large" | "payload_too_large" | "image_too_large"
             | "image_dimensions_exceeded" | "image_resolution_exceeded" | "image_pixel_limit_exceeded")) => ApiError::InvalidRequest {

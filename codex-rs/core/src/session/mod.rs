@@ -5378,7 +5378,9 @@ impl Session {
             let mut images = Vec::new();
             for item in state.history.raw_items() {
                 if let Some(item_id) = item.id() {
-                    for image in ladder.images.values().filter(|image| image.item_id == item_id.as_str()) {
+                    let mut batch: Vec<_> = ladder.images.values().filter(|image| image.item_id == item_id.as_str()).collect();
+                    batch.sort_by_key(|image| image.content_index);
+                    for image in batch {
                         images.push(serde_json::json!({
                             "image_id": image.id, "batch_id": image.item_id,
                             "content_index": image.content_index, "protected": image.protected,
@@ -6015,7 +6017,27 @@ impl Session {
         message: impl Into<String>,
         codex_error: CodexErr,
     ) {
-        let additional_details = codex_error.to_string();
+        // Retry diagnostics must not echo provider bodies, arbitrary messages, or credential URLs.
+        let kind: &'static str = codex_protocol::error::CodexErrKind::from(&codex_error).into();
+        let mut additional_details = match codex_error.http_status_code_value() {
+            Some(code) => format!("HTTP {code} {}, retrying", http::StatusCode::from_u16(code)
+                .ok().and_then(|status| status.canonical_reason()).unwrap_or("Request Failed")),
+            None if codex_error.is_retry_time_budget_interrupted() => format!(
+                "Model event wait timed out (configured limit: {} ms), retrying",
+                self.services.model_client.current_provider().info().stream_idle_timeout().as_millis()),
+            None if matches!(codex_error.details(), CodexErrorDetails::Stream(_)) => {
+                "Stream request failed; cause unknown, retrying".to_owned()
+            }
+            None => format!("{}, retrying", kind.replace('_', " ")),
+        };
+        if codex_error.is_response_failed() { additional_details.push_str("; response.failed"); }
+        if let Some(hint) = codex_error.image_recovery_hint() {
+            additional_details.push_str(match hint {
+                codex_protocol::error::ImageRecoveryHint::BodyTooLarge => "; request/image bytes exceed the limit",
+                codex_protocol::error::ImageRecoveryHint::Dimensions => "; image dimensions exceed the limit",
+                codex_protocol::error::ImageRecoveryHint::UploadTimeout => "; request upload timed out",
+            });
+        }
         let codex_error_info = CodexErrorInfo::ResponseStreamDisconnected {
             http_status_code: codex_error.http_status_code_value(),
         };

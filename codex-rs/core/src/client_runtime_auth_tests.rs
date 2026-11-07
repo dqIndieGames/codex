@@ -70,10 +70,10 @@ async fn selected_runtime_transport_stays_revoked(mode: RuntimeAuthMode) {
     ));
     let mut client = test_model_client(SessionSource::Exec);
     client.http_client_factory = factory;
-    Arc::get_mut(&mut client.state).unwrap().provider = create_model_provider(
+    client.state.provider.store(Arc::new(ModelProviderHandle { provider: create_model_provider(
         ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri()))),
         Some(manager),
-    );
+    ) }));
     let client = client.with_runtime_auth(runtime, mode).unwrap();
     let setup = client
         .current_client_setup(ClientRouting::Workspace)
@@ -158,16 +158,16 @@ async fn realtime_keeps_provider_auth_until_runtime_integration(
         format!("{}/register", registration.uri()).parse().unwrap(),
     ));
     if runtime_provider {
-        let info = client.state.provider.info().clone();
-        Arc::get_mut(&mut client.state).unwrap().provider =
+        let info = client.current_provider().info().clone();
+        client.state.provider.store(Arc::new(ModelProviderHandle { provider:
             codex_model_provider::ProviderAuthContext {
                 credentials: manager,
                 runtime_auth: Some((Arc::clone(&runtime), mode)),
             }
-            .model_provider(info);
+            .model_provider(info) }));
     }
     let client = client.with_runtime_auth(runtime, mode).unwrap();
-    let sideband = client
+    let (sideband, _) = client
         .realtime_sideband_headers(http::HeaderMap::new())
         .await
         .unwrap();
@@ -187,7 +187,7 @@ async fn realtime_keeps_provider_auth_until_runtime_integration(
         .expect(1)
         .mount(&server)
         .await;
-    let mut provider = client.state.provider.api_provider().await.unwrap();
+    let mut provider = client.current_provider().api_provider().await.unwrap();
     provider.base_url = server.uri();
     let call = client
         .create_realtime_call_with_headers(

@@ -682,8 +682,13 @@ impl ContextManager {
         let mut raw: Vec<ResponseItem> = envelopes.iter().map(|envelope| envelope.item.clone()).collect();
         let result = f(&mut raw);
         debug_assert_eq!(raw.len(), envelopes.len());
+        let changed = envelopes.iter().zip(&raw).any(|(envelope, item)| &envelope.item != item);
         for (envelope, item) in envelopes.iter_mut().zip(raw) {
             envelope.item = item;
+        }
+        if changed {
+            // A speculative compaction captured before image replacement cannot install stale images.
+            self.history_version = self.history_version.saturating_add(1);
         }
         result
     }

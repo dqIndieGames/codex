@@ -32,6 +32,7 @@ class Fixture(ThreadingHTTPServer):
         self.failures = []
         self.tool_sent = False
         self.handshake_ready = False
+        self.http_continuation_sent = False
         self.lock = threading.Lock()
 
     def record(self, transport, payload, user_agent=None):
@@ -55,6 +56,12 @@ class Fixture(ThreadingHTTPServer):
                        "arguments": json.dumps({"cmd": "echo WS_TOOL_ONCE",
                                                 "max_output_tokens": 30})}]
             tokens = 21000 if self.scenario.startswith("compact") else 10
+            text = None
+        elif self.scenario == 'tool' and self.failures and not self.http_continuation_sent:
+            self.http_continuation_sent = True
+            output = [{'type': 'function_call', 'name': 'update_plan',
+                       'call_id': 'call_http_continuation',
+                       'arguments': json.dumps({'plan': [{'step': 'Marker completed', 'status': 'completed'}]})}]
             text = None
         else:
             text = "WS_RECOVERY_OK"
@@ -178,6 +185,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         payload = json.loads(self.read_exact(int(self.headers["Content-Length"])))
         compact = self.server.record("http", payload, self.headers.get("User-Agent"))
+        custom_error = getattr(self.server, 'http_error', lambda *_: None)(payload, compact)
+        if custom_error is not None:
+            status, error = custom_error
+            body = json.dumps(error).encode()
+            self.send_response(status)
+            self.send_header('Retry-After', '0')
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            return
         sampling_413 = self.server.scenario == "sampling-http413"
         limit = 3 if sampling_413 else 12
         if ((compact or sampling_413) and "http413" in self.server.scenario
@@ -221,7 +240,8 @@ def command(binary, fixture):
     # call prints a literal marker. Do not depend on machine sandbox setup or
     # permit product-policy rejection to masquerade as a completed tool.
     args = [binary, "exec", "--ignore-user-config", "--ephemeral",
-            "--skip-git-repo-check", "--sandbox", "danger-full-access", "--json", "-m", "gpt-5.5"]
+            "--skip-git-repo-check", "--dangerously-bypass-hook-trust",
+            "--dangerously-bypass-approvals-and-sandbox", "--json", "-m", "gpt-5.5"]
     for key, value in config.items():
         args.extend(["-c", f"{key}={json.dumps(value)}"])
     args.append("Run the read-only marker command once if requested, then reply with WS_RECOVERY_OK.")
@@ -301,7 +321,11 @@ def verify(binary, scenario, output_dir=None):
                        for item in r["payload"].get("input", [])
                        if item.get("type") == "function_call_output"]
             assert outputs, "completed tool result must reach compaction"
-            assert all(item.get("call_id") == "call_marker_once" for item in outputs)
+            assert all(item.get("call_id") in ("call_marker_once", "call_http_continuation") for item in outputs)
+            if scenario == 'tool':
+                assert any(item.get('call_id') == 'call_http_continuation'
+                           for request in http[1:] for item in request['payload'].get('input', [])), \
+                    'the request after successful HTTP recovery must stay on HTTP'
             events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
             commands = [e for e in events if e.get("type") == "item.completed"
                         and e.get("item", {}).get("type") == "command_execution"]

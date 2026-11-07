@@ -150,6 +150,7 @@ pub(crate) async fn handle_response_stream_error(
         let retry_count = retry_state.retries;
         retry_state.display_retries = retry_state.display_retries.saturating_add(1);
         maybe_activate_route_recovery(client_session, retry_state.display_retries);
+        let mut switched_to_http = false;
         if attempt_used_websocket {
             retry_state.websocket_failures = retry_state.websocket_failures.saturating_add(1);
             let message_too_big = is_websocket_message_too_big(&err);
@@ -159,6 +160,7 @@ pub(crate) async fn handle_response_stream_error(
                 || retry_state.websocket_failures >= WEBSOCKET_HTTP_FALLBACK_THRESHOLD)
                 && client_session.try_switch_fallback_transport()
             {
+                switched_to_http = true;
                 debug!(
                     turn_id = %turn_context.sub_id,
                     message_too_big,
@@ -175,9 +177,13 @@ pub(crate) async fn handle_response_stream_error(
             max_retries,
             delay,
         );
+        let mut message = retry_status_message(&err, retry_state.display_retries);
+        if switched_to_http {
+            message.push_str("; switched to HTTP for this session");
+        }
         sess.notify_stream_error(
             turn_context,
-            retry_status_message(&err, retry_state.display_retries),
+            message,
             err,
         )
         .await;
@@ -204,12 +210,8 @@ fn maybe_activate_route_recovery(client_session: &mut ModelClientSession, retry_
     }
 }
 
-fn retry_status_message(err: &CodexErr, retry_count: u64) -> String {
-    if err.is_retry_time_budget_interrupted() {
-        err.to_string()
-    } else {
-        format!("Reconnecting... {retry_count} (auto retry)")
-    }
+fn retry_status_message(_err: &CodexErr, retry_count: u64) -> String {
+    format!("Reconnecting... {retry_count} (auto retry)")
 }
 
 fn log_retry(

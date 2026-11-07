@@ -1187,11 +1187,11 @@ impl RealtimeWebsocketClient {
         );
         request.headers_mut().extend(headers);
         if let Some(auth) = &self.auth {
-            request.headers_mut().extend(
-                auth.resolve_auth_headers()
-                    .await
-                    .map_err(TransportError::from)?,
-            );
+            let headers = std::mem::take(request.headers_mut());
+            *request.headers_mut() = auth
+                .apply_auth_headers(headers)
+                .await
+                .map_err(TransportError::from)?;
         }
 
         info!("connecting realtime websocket: {ws_url}");

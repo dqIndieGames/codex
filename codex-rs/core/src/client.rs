@@ -1764,6 +1764,16 @@ impl<'a> ResponsesHttpExecutor<'a> {
         Self { client, recovery_generation: 0, request_retry_notifier: None }
     }
 
+    /// Background compaction has its own routing token and must not touch foreground sockets.
+    pub(crate) async fn recover_background_route(&mut self, turn_state: &mut Arc<OnceLock<String>>) -> Result<()> {
+        let setup = self.client.current_client_setup(ClientRouting::Workspace).await?;
+        if !is_chatgpt_codex_base_url(&setup.api_provider.base_url) {
+            self.recovery_generation = self.recovery_generation.saturating_add(1);
+            *turn_state = Arc::new(OnceLock::new());
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Builds shared Responses API transport options and request-body options.
     ///

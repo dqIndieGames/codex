@@ -298,24 +298,57 @@ async fn run_remote_compaction_request_v2(
                 .await;
             let trace = InferenceTraceContext::disabled();
             // Replay the routing token without letting this request change foreground routing.
-            let turn_state = Arc::new(turn_state.map(OnceLock::from).unwrap_or_default());
-            let http_executor = ResponsesHttpExecutor::new(&sess.services.model_client);
-            let stream = tokio::select! {
+            let mut turn_state = Arc::new(turn_state.map(OnceLock::from).unwrap_or_default());
+            let mut http_executor = ResponsesHttpExecutor::new(&sess.services.model_client);
+            let mut retry_state = ResponsesStreamRetryState::default();
+            let max_retries = turn_context.provider.info().stream_retry_budget().unwrap_or(u64::MAX);
+            let mut runtime = sess.services.model_client.provider_runtime_receiver();
+            loop {
+            let result = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
-                stream = http_executor.stream_responses_http(
-                    &turn_state, auth_owner_generation, /*event_sender*/ None, prompt, &settings.model_info, &step_context.session_telemetry, effort,
+                _ = runtime.changed() => return Err(CodexErr::TurnAborted),
+                result = async {
+                    let stream = http_executor.stream_responses_http(
+                    &turn_state, auth_owner_generation, /*event_sender*/ None, prompt, &settings.model_info, &step_context.session_telemetry, effort.clone(),
                     settings.reasoning_summary, settings.service_tier.clone(), responses_metadata,
                     &trace,
-                ) => stream?,
+                    ).await?;
+                    collect_compaction_output(sess, turn_context, stream,
+                        CompactionRequestKind::Background(&cancellation)).await
+                } => result,
             };
-            return collect_compaction_output(
-                sess,
-                turn_context,
-                stream,
-                CompactionRequestKind::Background(&cancellation),
-            )
-            .await;
+            let error = match result { Ok(output) => return Ok(output), Err(error) => error };
+            let retry_at = error.retry_after().map(|advice| advice.deadline())
+                .unwrap_or_else(|| tokio::time::Instant::now() + crate::util::fixed_retry_delay());
+            if retry_state.retries >= max_retries || matches!(error.details(),
+                CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
+                | CodexErrorDetails::SessionBudgetExceeded | CodexErrorDetails::ContextWindowExceeded) {
+                return Err(error);
+            }
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
+                _ = runtime.changed() => return Err(CodexErr::TurnAborted),
+                record = retry_state.prepare_compaction_retry(max_retries, &error, sess, turn_context) => {
+                    if let Some(record) = record {
+                        crate::image_ladder_v2::apply_record(&mut prompt.input, &record)?;
+                    }
+                },
+            }
+            retry_state.retries = retry_state.retries.saturating_add(1);
+            if retry_state.retries % 3 == 0 {
+                http_executor.recover_background_route(&mut turn_state).await?;
+            }
+            sess.notify_stream_error(turn_context,
+                format!("Reconnecting... {} (auto retry)", retry_state.retries), error).await;
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
+                _ = runtime.changed() => return Err(CodexErr::TurnAborted),
+                _ = tokio::time::sleep_until(retry_at) => {},
+            }
+            }
         }
         CompactionRequestTransport::Foreground(client_session) => client_session,
     };

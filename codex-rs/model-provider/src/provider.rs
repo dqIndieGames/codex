@@ -492,7 +492,7 @@ impl ConfiguredModelProvider {
         let auth_manager = auth_manager_for_provider(auth_manager, &info);
         let runtime_for_destination = |destination: Option<&str>| {
             runtime_auth.clone().filter(|_| {
-                destination.is_none_or(|url| {
+                !info.experimental_bearer_token_is_non_empty() && destination.is_none_or(|url| {
                     codex_http_client::classify_openai_api_url(url)
                         != codex_http_client::OpenAiDestination::Other
                 })
