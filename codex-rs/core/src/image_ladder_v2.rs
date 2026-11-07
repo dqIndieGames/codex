@@ -66,7 +66,7 @@ fn content(entry: &ImageLadderImage, original: bool) -> io::Result<Arc<[u8]>> {
     Ok(bytes.into())
 }
 
-/// Register entire batches as protected. Sending or receiving another image never releases one.
+/// Register images by message identity and content order; new images start at their own first stage.
 pub(crate) fn discover(
     items: &mut [ResponseItem],
     state: &mut ImageLadderState,
@@ -96,7 +96,6 @@ pub(crate) fn discover(
             source_digest: key.clone(), source_mime: mime.to_owned(),
             result_digest: key, result_mime: mime.to_owned(),
             cache_dir: cache_dir.map(Path::to_path_buf), attempted: 0, tier: 0,
-            protected: true, minimum_long_edge: 1280,
             source_width: decoded.width(), source_height: decoded.height(),
             result_width: decoded.width(), result_height: decoded.height(), result_bytes: bytes.len(),
             source_content: memory.clone(), result_content: memory,
@@ -192,19 +191,15 @@ pub(crate) fn advance(
         }
     }
     let mut changed = Vec::new();
-    // Old images exhaust their available recovery first. Protected batches are considered only then.
-    for protected in [false, true] {
+    // History order is arrival order, including content order within the same message.
+    {
         for key in &ordered {
             let entry = state.images.get_mut(key).expect("discovered image");
-            if entry.protected != protected || entry.tier >= 5 { continue }
+            if entry.tier >= 5 { continue }
             for tier in 1..=4u8 {
                 let bit = 1 << (tier - 1);
                 if entry.attempted & bit != 0 { continue }
                 if dimensions_only && tier <= 2 { entry.attempted |= bit; continue }
-                let limit = match tier { 3 => 1280, 4 => 768, _ => u32::MAX };
-                if entry.protected && limit < entry.minimum_long_edge.min(entry.source_width.max(entry.source_height)) {
-                    continue;
-                }
                 // No-op sentinels survive restarts without appending fake image-change records.
                 let no_op_key = format!("{}-{}-v2-{tier}.noop", entry.source_digest, entry.result_digest);
                 if entry.cache_dir.as_ref().is_some_and(|dir| dir.join(&no_op_key).is_file()) {
@@ -222,8 +217,7 @@ pub(crate) fn advance(
                 break;
             }
         }
-        if !changed.is_empty() { break }
-        if !protected {
+        if changed.is_empty() {
             let recent: HashSet<_> = ordered.iter().rev().filter(|key| state.images[*key].tier < 5).take(5).cloned().collect();
             let placeholder_url = tiny_png_data_url();
             let encoded = placeholder_url.split_once(',').expect("fixed PNG data URL").1;
@@ -231,7 +225,7 @@ pub(crate) fn advance(
             for retention in state.retention.max(5)..=6 {
                 for key in &ordered {
                     let entry = state.images.get_mut(key).expect("discovered image");
-                    if entry.protected || entry.tier >= 5 || entry.attempted != 15
+                    if entry.tier >= 5 || entry.attempted != 15
                         || (retention == 5 && recent.contains(key)) || entry.result_bytes <= placeholder.len() { continue }
                     adopt(entry, placeholder.clone(), "image/png", 1, 1, retention)?;
                     changed.push(entry.clone());
@@ -240,7 +234,6 @@ pub(crate) fn advance(
                 }
                 if !changed.is_empty() { state.retention = retention; break }
             }
-            if !changed.is_empty() { break }
         }
     }
     if changed.is_empty() { return Ok(None) }
@@ -252,7 +245,7 @@ pub(crate) fn advance(
     apply_record(items, &record)?;
     let (image_bytes, real, placeholders) = request_image_stats(items);
     Ok(Some(RecoveryReport {
-        message: format!("图片处理第 {tier} 档：图片 {image_bytes} 字节，真图 {real} 张，占位 {placeholders} 张；保留受保护图片。"),
+        message: format!("图片处理第 {tier} 档：图片 {image_bytes} 字节，真图 {real} 张，占位 {placeholders} 张；按加入会话顺序处理。"),
         record,
     }))
 }

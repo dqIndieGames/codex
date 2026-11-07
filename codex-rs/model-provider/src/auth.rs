@@ -357,6 +357,7 @@ pub(crate) async fn resolve_provider_auth_for_scope(
         return Ok(ResolvedProviderAuth {
             auth: resolve_provider_auth_with_manager(auth_manager, auth, provider)?,
             agent_identity_telemetry: Some(agent_identity_telemetry(agent_identity_auth)),
+            runtime: None,
         });
     }
 

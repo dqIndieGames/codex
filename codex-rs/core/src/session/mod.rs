@@ -5347,62 +5347,6 @@ impl Session {
         }
     }
 
-    pub(crate) async fn update_image_dependencies(
-        &self,
-        action: &str,
-        image_ids: &[String],
-        minimum_long_edge: Option<u32>,
-    ) -> std::io::Result<serde_json::Value> {
-        let config = self.get_config().await;
-        let cache_dir = (!config.ephemeral).then(|| config.codex_home.join("cache").join("local3-images-v2"));
-        let (record, result) = {
-            let mut state = self.state.lock().await;
-            let mut ladder = state.image_ladder.clone();
-            state.history.with_raw_items_mut(|items| crate::image_ladder_v2::discover(items, &mut ladder, cache_dir.as_deref()))?;
-            if image_ids.iter().any(|id| !ladder.images.contains_key(id)) {
-                return Err(std::io::Error::other("Unknown image ID; call image_context list first"));
-            }
-            let mut changed = Vec::new();
-            if action != "list" {
-                for id in image_ids {
-                    let image = ladder.images.get_mut(id).expect("validated image ID");
-                    let previous = image.clone();
-                    if action == "protect" && image.tier >= 5 {
-                        return Err(std::io::Error::other("This image is already a placeholder; view the original again before using its details"));
-                    }
-                    image.protected = action == "protect";
-                    if let Some(minimum) = minimum_long_edge { image.minimum_long_edge = minimum; }
-                    if *image != previous { changed.push(image.clone()); }
-                }
-            }
-            let mut images = Vec::new();
-            for item in state.history.raw_items() {
-                if let Some(item_id) = item.id() {
-                    let mut batch: Vec<_> = ladder.images.values().filter(|image| image.item_id == item_id.as_str()).collect();
-                    batch.sort_by_key(|image| image.content_index);
-                    for image in batch {
-                        images.push(serde_json::json!({
-                            "image_id": image.id, "batch_id": image.item_id,
-                            "content_index": image.content_index, "protected": image.protected,
-                            "tier": image.tier, "width": image.result_width, "height": image.result_height,
-                            "minimum_long_edge": image.minimum_long_edge,
-                        }));
-                    }
-                }
-            }
-            let record = (!changed.is_empty()).then(|| ImagesShrunkItem {
-                version: Some(2), tier: 0, changed: Some(0), images: changed, retention: Some(ladder.retention),
-            });
-            state.image_ladder = ladder;
-            (record, serde_json::json!({"images": images}))
-        };
-        if let Some(record) = record {
-            self.persist_rollout_items(&[RolloutItem::ImagesShrunk(record)]).await;
-            let _ = self.flush_rollout().await;
-        }
-        Ok(result)
-    }
-
     pub(crate) async fn apply_context_overflow_image_ladder(
         &self,
         turn_context: &TurnContext,

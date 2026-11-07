@@ -1438,9 +1438,6 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add(TestSyncHandler);
     }
 
-    if context.model_info.input_modalities.contains(&codex_protocol::openai_models::InputModality::Image) {
-        registry.add(crate::tools::handlers::image_context::ImageContextHandler);
-    }
     if features.enabled(Feature::ViewImage) {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
         registry.add(ViewImageHandler::new(ViewImageToolOptions {

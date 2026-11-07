@@ -274,8 +274,6 @@ pub struct ImageLadderImage {
     pub cache_dir: Option<std::path::PathBuf>,
     pub attempted: u8,
     pub tier: u8,
-    pub protected: bool,
-    pub minimum_long_edge: u32,
     pub source_width: u32,
     pub source_height: u32,
     pub result_width: u32,
@@ -292,7 +290,7 @@ impl std::fmt::Debug for ImageLadderImage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("ImageLadderImage")
             .field("id", &self.id).field("tier", &self.tier)
-            .field("protected", &self.protected).field("result_bytes", &self.result_bytes)
+            .field("result_bytes", &self.result_bytes)
             .finish_non_exhaustive()
     }
 }

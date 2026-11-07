@@ -4,7 +4,6 @@ mod current_time;
 mod dynamic;
 pub(crate) mod extension_tools;
 mod get_context_remaining;
-pub(crate) mod image_context;
 pub(crate) mod get_context_remaining_spec;
 mod list_available_plugins_to_install;
 pub(crate) mod list_available_plugins_to_install_spec;
