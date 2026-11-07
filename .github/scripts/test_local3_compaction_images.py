@@ -41,6 +41,7 @@ class ImageFixture(Fixture):
         self.remaining, self.failure_index = 0, 0
         self.image_ids, self.last_images = [], []
         self.snapshots, self.tool_sent = set(), True
+        self.failure_plan = []
 
     def record(self, transport, payload, user_agent=None):
         compact = 'COMPACT_FIXTURE' in json.dumps(payload) or any(i.get('type') == 'compaction_trigger' for i in payload.get('input', []))
@@ -64,6 +65,9 @@ class ImageFixture(Fixture):
         return compact
 
     def http_error(self, payload, compact):
+        if self.failure_plan and 'http' in self.failure_plan[0]:
+            failure = self.failure_plan.pop(0)
+            return failure['http'], {'error': failure['error']}
         if self.phase == 'fail' and self.remaining and self.failure_index % COUNT == 0:
             self.failure_index += 1; self.remaining -= 1
             return 413, {'error': {'message': 'Payload Too Large'}}
@@ -76,6 +80,8 @@ class ImageFixture(Fixture):
             {'type': 'response.completed', 'response': {'id': suffix, 'status': 'completed', 'output': [item]}}]
 
     def events(self, payload, compact=False):
+        if self.failure_plan:
+            return [self.failure_plan.pop(0)]
         if self.phase == 'list':
             self.phase = 'release'
             return self.call_events({'action': 'list'}, f'list_{self.generation}')
@@ -125,6 +131,43 @@ def verify(binary, root):
         tid = rpc.start(home)
         rpc.turn(tid, 'Analyze these images; retain image 2 as the required reference.', [
             {'type': 'localImage', 'path': str(path), 'detail': 'original'} for path, _ in originals])
+        initial_images = server.last_images
+        boundary_thread = rpc.call('thread/fork', {'threadId': tid})['thread']['id']
+        def failed(code='server_error'):
+            return {'type': 'response.failed', 'response': {'error': {
+                'code': code, 'message': 'fixture', 'headers': {'Retry-After': '0'}}}}
+        ordinary = {'type': 'error', 'error': {'code': 'rate_limit_exceeded',
+                    'message': 'fixture', 'headers': {'Retry-After': '0'}}, 'status': 429}
+        sequence = [failed(), failed(), ordinary, failed(), failed()]
+        server.failure_plan = sequence.copy()
+        start = len(server.requests)
+        rpc.turn(boundary_thread, 'Check the failure counting boundary.')
+        assert len(server.requests[start:]) == len(sequence) + 1
+        assert all(r['images'] == initial_images for r in server.requests[start:]), 'ordinary error resets image streak'
+        for code in ('request_body_too_large', 'image_dimensions_exceeded'):
+            image_thread = rpc.call('thread/fork', {'threadId': tid})['thread']['id']
+            server.failure_plan = [{'http': 400, 'error': {'code': code, 'message': 'fixture'}} for _ in range(COUNT)]
+            start = len(server.requests)
+            rpc.turn(image_thread, 'Continue after the explicit image limit.')
+            attempts = server.requests[start:]
+            assert len(attempts) == COUNT + 1
+            assert all(r['images'] == initial_images for r in attempts[:COUNT])
+            assert sum(x['bytes'] for x in attempts[-1]['images']) < sum(x['bytes'] for x in initial_images)
+            if code == 'image_dimensions_exceeded':
+                assert all(max(x['size']) <= IMAGE_LONG_EDGES[3] for i, x in enumerate(attempts[-1]['images']) if i != 1)
+        # 两种上下文封装都应交回官方，不增加尝试以凑三次，不改变图片。
+        for event in (
+            {'http': 400, 'error': {'code': 'context_length_exceeded', 'message': 'context limit'}},
+            failed('context_length_exceeded'),
+        ):
+            context_thread = rpc.call('thread/fork', {'threadId': tid})['thread']['id']
+            server.failure_plan = [event]
+            start = len(server.requests)
+            turn = rpc.call('turn/start', {'threadId': context_thread, 'input': [{'type': 'text', 'text': 'Continue.'}]})['turn']['id']
+            completed = rpc.wait(lambda e: e.get('method') == 'turn/completed' and e['params']['turn']['id'] == turn)
+            assert completed['params']['turn']['status'] != 'completed'
+            assert len(server.requests[start:]) == 1 and server.last_images == initial_images
+        server.phase = 'ready'
         server.arm(COUNT*6); start = len(server.requests)
         rpc.turn(tid, 'Continue using the recorded image dependencies.')
         attempts = server.requests[start:]
@@ -138,6 +181,9 @@ def verify(binary, root):
             assert after[1] == attempts[0]['images'][1], 'protect old reference while other images have room'
         for tier, edge in IMAGE_LONG_EDGES.items():
             assert all(max(x['size']) <= edge for i, x in enumerate(attempts[tier*COUNT]['images']) if i != 1)
+        assert all(x['format'] == 'PNG' for x in attempts[COUNT]['images'])
+        assert all(x['format'] == 'JPEG' for i, x in enumerate(attempts[2*COUNT]['images']) if i != 1)
+        assert all(x['size'] == initial_images[i]['size'] for i, x in enumerate(attempts[2*COUNT]['images']))
         fifth = attempts[5*COUNT]['images']
         retained = {i for i, x in enumerate(fifth) if tuple(x['size']) != IMAGE_PLACEHOLDER_SIZE}
         expected = set(range(len(originals)-IMAGE_KEEP_RECENT, len(originals))) | {1}

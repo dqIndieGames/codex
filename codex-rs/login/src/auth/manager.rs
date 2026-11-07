@@ -3392,7 +3392,7 @@ impl AuthManager {
         if !before.as_ref().is_some_and(same_identity) {
             return;
         }
-        let Some(new_auth) = self.load_auth().await else {
+        let Ok(Some(new_auth)) = self.load_auth(before.as_ref()).await else {
             // A missing or partially written file must not discard usable cached credentials.
             return;
         };
