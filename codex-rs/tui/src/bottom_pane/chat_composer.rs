@@ -14,6 +14,9 @@
 //! search, or blocking view. The app reads clipboard text asynchronously and delivers a normal
 //! paste only while the same thread, draft, and cursor remain eligible. Intervening input or focus
 //! loss cancels the pending paste; a late clipboard result cannot overwrite newer input.
+//! Windows question shortcuts use the same asynchronous worker, with a question identity
+//! and editor snapshot in addition to the displayed thread. Modal and async question
+//! owners flush buffered typing before that snapshot and receive text through normal paste.
 //! The live voice strip renders after effort ignition, followed by the Astra sparkle when eligible.
 //! Owned transcripts keep persistent status below the composer and hints on a separate final row.
 //! Shortcut help expands above the composer, with its close hint replacing the final shortcuts row

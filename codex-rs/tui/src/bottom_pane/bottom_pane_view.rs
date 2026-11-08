@@ -6,6 +6,7 @@ use crate::keymap::KeymapContextSet;
 use crate::render::renderable::Renderable;
 use crate::terminal_program_status::ProgramStatusKind;
 use codex_app_server_protocol::ToolRequestUserInputParams;
+use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use std::time::Instant;
 
@@ -157,6 +158,17 @@ pub(crate) trait BottomPaneView: Renderable {
     fn handle_paste(&mut self, _pasted: String) -> bool {
         false
     }
+
+    /// Identity and editor snapshot used to reject stale asynchronous clipboard reads.
+    fn clipboard_paste_target(
+        &self,
+        _shortcut: Option<KeyCode>,
+    ) -> Option<super::ClipboardPasteTarget> {
+        None
+    }
+
+    /// Commit buffered typing before the app snapshots a clipboard destination.
+    fn prepare_clipboard_paste(&mut self) {}
 
     /// Flush any pending paste-burst state. Return true if state changed.
     ///

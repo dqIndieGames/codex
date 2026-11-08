@@ -11,6 +11,7 @@ use crate::clipboard_copy::worker::CopyResult;
 pub(crate) enum KeyEventAction {
     None,
     CopyLastResponse(Arc<str>),
+    PasteText { shortcut: KeyCode },
     PasteImage { text_fallback: Option<KeyCode> },
 }
 
@@ -102,6 +103,18 @@ impl ChatWidget {
         }
         if self.handle_startup_submission_key(key_event) {
             return KeyEventAction::None;
+        }
+        if cfg!(windows)
+            && key_event.kind == KeyEventKind::Press
+            && (key_hint::ctrl(KeyCode::Char('v')).is_press(key_event)
+                || key_hint::shift(KeyCode::Insert).is_press(key_event))
+            && matches!(
+                self.clipboard_paste_target(Some(key_event.code)),
+                Some(crate::bottom_pane::ClipboardPasteTarget::Question { .. })
+            )
+        {
+            self.bottom_pane.prepare_composer_clipboard_paste();
+            return KeyEventAction::PasteText { shortcut: key_event.code };
         }
         if self.handle_question_key(key_event) {
             return KeyEventAction::None;

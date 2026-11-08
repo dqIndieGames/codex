@@ -3401,7 +3401,20 @@ impl AuthManager {
         {
             return;
         }
+        let policy_revision = self.application_network_policy().revision();
         self.set_cached_auth(Some(new_auth));
+        // The official owner check deliberately invalidates policy for API keys whose
+        // owner cannot be identified. Reload through the configuration owner, never
+        // retain an old policy or treat missing identity as proof of the same owner.
+        drop(_refresh_guard);
+        if self.application_network_policy().revision() != policy_revision
+            && let Some(owner) = self.workspace_routing_resolver.get().and_then(Weak::upgrade)
+            && owner.refresh_file_auth_policy().await.is_err()
+        {
+            // Policy remains unavailable on failure; the next request reports that
+            // denial without exposing credential/config-server response contents.
+            tracing::debug!("application policy reload after file auth change failed");
+        }
     }
 
     fn has_refreshable_external_auth(&self) -> bool {

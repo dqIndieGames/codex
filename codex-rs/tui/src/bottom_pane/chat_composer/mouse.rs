@@ -17,6 +17,11 @@ use crossterm::event::MouseEventKind;
 /// The input that will receive clipboard text, independent of a search preview.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ClipboardPasteTarget {
+    Question {
+        request_id: String,
+        question_id: String,
+        editor: Box<ClipboardPasteTarget>,
+    },
     Draft(String, super::super::textarea::EditTarget),
     HistorySearch(String),
     VimSearch(String, super::super::textarea::EditTarget),

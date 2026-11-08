@@ -14,6 +14,15 @@ impl App {
     ) {
         match action {
             KeyEventAction::None => {}
+            KeyEventAction::PasteText { shortcut } => {
+                if self.pending_right_click_paste.is_none() {
+                    self.start_clipboard_text_paste(
+                        tui,
+                        PasteSource::Clipboard,
+                        Some(shortcut),
+                    );
+                }
+            }
             KeyEventAction::CopyLastResponse(text) => {
                 let result = tui
                     .clipboard

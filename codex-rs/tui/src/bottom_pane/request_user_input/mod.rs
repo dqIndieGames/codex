@@ -1497,6 +1497,25 @@ impl BottomPaneView for RequestUserInputOverlay {
         self.composer.handle_paste(pasted)
     }
 
+    fn clipboard_paste_target(
+        &self,
+        shortcut: Option<KeyCode>,
+    ) -> Option<crate::bottom_pane::ClipboardPasteTarget> {
+        if shortcut.is_none() || self.done || self.confirm_unanswered.is_some() {
+            return None;
+        }
+        Some(crate::bottom_pane::ClipboardPasteTarget::Question {
+            request_id: format!("{}:{}", self.request.turn_id, self.request.item_id),
+            question_id: self.current_question()?.id.clone(),
+            editor: Box::new(self.composer.clipboard_paste_target(shortcut)?),
+        })
+    }
+
+    fn prepare_clipboard_paste(&mut self) {
+        self.snooze_auto_resolution();
+        self.composer.flush_pending_input();
+    }
+
     fn flush_paste_burst_if_due(&mut self) -> bool {
         self.composer.flush_paste_burst_if_due()
     }

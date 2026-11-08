@@ -294,6 +294,24 @@ impl BottomPaneView for AsyncQuestions {
         self.composer.flush_pending_input();
         self.composer.handle_paste(text)
     }
+    fn clipboard_paste_target(
+        &self,
+        shortcut: Option<KeyCode>,
+    ) -> Option<crate::bottom_pane::ClipboardPasteTarget> {
+        if shortcut.is_none() || !self.expanded || self.is_complete() {
+            return None;
+        }
+        let answer = self.current_answer()?;
+        Some(crate::bottom_pane::ClipboardPasteTarget::Question {
+            request_id: answer.message_id.clone(),
+            question_id: answer.question_id.clone(),
+            editor: Box::new(self.composer.clipboard_paste_target(shortcut)?),
+        })
+    }
+    fn prepare_clipboard_paste(&mut self) {
+        self.snooze_auto_resolution();
+        self.composer.flush_pending_input();
+    }
     fn flush_paste_burst_if_due(&mut self) -> bool {
         self.composer.flush_paste_burst_if_due()
     }

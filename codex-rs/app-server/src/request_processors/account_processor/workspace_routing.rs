@@ -185,6 +185,16 @@ fn workspace_config_load_reason(error: &io::Error) -> String {
 }
 
 impl WorkspaceRoutingResolver for AccountRequestProcessor {
+    fn refresh_file_auth_policy(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            self.config_manager
+                .update_managed_config_loader(self.auth_manager.clone(), &self.config);
+            self.config_manager.refresh_application_network_policy().await?;
+            Ok(())
+        })
+
     fn resolve(
         &self,
         request: WorkspaceRoutingRequest,

@@ -1991,6 +1991,12 @@ impl BottomPane {
         &self,
         shortcut: Option<KeyCode>,
     ) -> Option<ClipboardPasteTarget> {
+        if let Some(view) = self.view_stack.last() {
+            return view.clipboard_paste_target(shortcut);
+        }
+        if let Some(questions) = self.questions.as_ref().filter(|q| q.expanded) {
+            return questions.clipboard_paste_target(shortcut);
+        }
         if self.has_active_view() || (shortcut.is_none() && !self.no_modal_or_popup_active()) {
             return None;
         }
@@ -2312,7 +2318,13 @@ impl BottomPane {
 
     /// Commit accepted typing before snapshotting the target of an asynchronous paste.
     pub(crate) fn prepare_composer_clipboard_paste(&mut self) {
-        self.composer.flush_pending_paste_burst();
+        if let Some(view) = self.view_stack.last_mut() {
+            view.prepare_clipboard_paste();
+        } else if let Some(questions) = self.questions.as_mut().filter(|q| q.expanded) {
+            questions.prepare_clipboard_paste();
+        } else {
+            self.composer.flush_pending_paste_burst();
+        }
     }
 
     pub(crate) fn is_in_paste_burst(&self) -> bool {

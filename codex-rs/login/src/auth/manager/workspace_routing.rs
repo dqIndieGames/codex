@@ -52,6 +52,13 @@ pub trait WorkspaceRoutingResolver: Send + Sync {
         &self,
         request: WorkspaceRoutingRequest,
     ) -> Pin<Box<dyn Future<Output = io::Result<Option<WorkspaceRouting>>> + Send + '_>>;
+
+    /// Reload the account owner's policy after local file credentials changed.
+    fn refresh_file_auth_policy(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Err(io::Error::other("auth policy reload is unavailable")) })
+    }
 }
 
 impl AuthManager {
