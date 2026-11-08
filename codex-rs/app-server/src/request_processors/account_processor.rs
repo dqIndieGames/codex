@@ -1042,7 +1042,7 @@ impl AccountRequestProcessor {
         self.thread_manager.invalidate_mcp_runtimes().await;
         clear_account_configuration(&self.config_manager, &config).await?;
 
-        self.config_manager.clear_cloud_config_bundle_loader();
+        self.config_manager.clear_chatgpt_config_loader();
 
         if self.config.auth_account.is_none()
             && config.model_provider.is_amazon_bedrock()
