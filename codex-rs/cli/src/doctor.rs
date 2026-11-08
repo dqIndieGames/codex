@@ -2460,6 +2460,7 @@ fn websocket_error_detail(err: &ApiError) -> String {
                 TransportError::Policy(denied) => denied.to_string(),
                 TransportError::Http { status, .. } => format!("http {status}: [redacted]"),
                 TransportError::RetryLimit => "retry limit reached".to_string(),
+                TransportError::RetryInterrupted(_) => "request retry interrupted: [redacted]".to_string(),
                 TransportError::Timeout => "timeout".to_string(),
                 TransportError::Connection(_) => "connection failed: [redacted]".to_string(),
                 TransportError::Network(_) => "network error: [redacted]".to_string(),
