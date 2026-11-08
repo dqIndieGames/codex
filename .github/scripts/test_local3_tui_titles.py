@@ -9,7 +9,7 @@ from verify_local3_hidden_tui import windows, is_user_request
 from test_local3_runtime_refresh import RuntimeFixture
 
 
-def verify(binary, root):
+def verify(binary, root, gaps=False):
     root.mkdir(parents=True, exist_ok=True)
     home = root/'home'; home.mkdir(exist_ok=True)
     for path in (home/'auth.json', home/'accounts/alpha/auth.json'):
@@ -72,7 +72,7 @@ supports_websockets = false
                 registration = next(path for path in (home/'app_servers').glob('*.json')
                                     if path not in registrations_before)
                 endpoint = json.loads(registration.read_text())['control_endpoint']
-                for provider in ('wanfeng', 'openai'):
+                for provider in (('wanfeng', 'openai', 'yunyi') if gaps else ('wanfeng', 'openai')):
                     configure(provider)
                     with open(endpoint, 'r+b', buffering=0) as pipe:
                         pipe.write(b'{"op":"refresh_all_loaded_threads","scope":"console"}\n')
@@ -96,7 +96,32 @@ supports_websockets = false
                         console.wait_text('WS_RECOVERY_OK')
                     console.screenshot(root/f'alpha-{provider}.png')
                     observed.append(windows(console.desktop)[0][1])
-            console.close(); console = None
+                if gaps:
+                    # 当前真实线程在 yunyi 上；同窗官方→第三方已由上面的最后一次切换覆盖。
+                    session_files = list((home/'sessions').rglob('*.jsonl'))
+                    assert session_files
+                    with session_files[0].open(encoding='utf-8') as stream:
+                        session_id = json.loads(stream.readline())['payload']['id']
+                    console.close(); console = None
+                    for action in ('resume', 'fork'):
+                        console = HiddenConsole([*args, action, session_id, '--no-alt-screen'], home)
+                        console.wait_text('WS_RECOVERY_OK')
+                        marker = 'LOCAL3_TITLE_'+action
+                        before = len(server.requests)
+                        console.type('Reply briefly. '+marker); time.sleep(.15); console.keys([(13, '\r', 0)])
+                        deadline = time.monotonic()+4
+                        while not any(is_user_request(r, marker) for r in server.requests[before:]) and time.monotonic()<deadline:
+                            time.sleep(.03)
+                        assert any(is_user_request(r, marker) for r in server.requests[before:])
+                        time.sleep(.2)
+                        title = windows(console.desktop)[0][1]
+                        assert title.startswith('[y] ') and not title.startswith('[y] [y] ')
+                        console.screenshot(root/f'alpha-{action}.png')
+                        (root/f'{action}-screen.txt').write_text(console.text(), encoding='utf-8')
+                        observed.append(title)
+                        console.close(); console = None
+            if console:
+                console.close(); console = None
         (root/'result.json').write_text(json.dumps({'passed': True, 'titles': observed,
             'visual_status': 'pending actual inspection'}, ensure_ascii=False, indent=2), encoding='utf-8')
         print('PASS title identity and live provider changes')
@@ -107,4 +132,4 @@ supports_websockets = false
 
 
 if __name__ == '__main__':
-    verify(str(Path(sys.argv[1]).resolve(strict=True)), Path(sys.argv[2]).resolve())
+    verify(str(Path(sys.argv[1]).resolve(strict=True)), Path(sys.argv[2]).resolve(), 'gaps' in sys.argv[3:])

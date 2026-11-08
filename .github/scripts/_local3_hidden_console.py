@@ -102,10 +102,13 @@ class HiddenConsole:
             raise AssertionError('cannot attach to owned hidden console')
         self.input = K.CreateFileW('CONIN$', 0xc0000000, 3, None, 3, 0, None)
         self.output = K.CreateFileW('CONOUT$', 0xc0000000, 3, None, 3, 0, None)
+        # 隔离 conhost 默认继承系统 936 码页，会改变 Unicode 窄字符列宽。
+        # 只配置本次测试终端，不改用户终端或产品状态。
+        assert K.SetConsoleCP(65001) and K.SetConsoleOutputCP(65001)
         font = FONT(); font.size = C.sizeof(font)
         if not K.GetCurrentConsoleFontEx(self.output, False, C.byref(font)):
             raise C.WinError(C.get_last_error())
-        font.face = 'Consolas'; font.cell = COORD(0, 16); font.family = 54; font.weight = 400
+        font.face = 'DejaVu Sans Mono'; font.cell = COORD(0, 16); font.family = 54; font.weight = 400
         if not K.SetCurrentConsoleFontEx(self.output, False, C.byref(font)):
             raise C.WinError(C.get_last_error())
         while time.monotonic() < deadline:
