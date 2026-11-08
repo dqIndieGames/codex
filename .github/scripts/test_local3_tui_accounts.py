@@ -16,7 +16,7 @@ import time
 
 from test_local3_runtime_refresh import RuntimeFixture
 from test_websocket_recovery import command
-from verify_local3_hidden_tui import U, K, STARTUPINFO, PROCESSINFO, windows, capture
+from verify_local3_hidden_tui import U, K, STARTUPINFO, PROCESSINFO, windows, capture, prepare_window, is_user_request
 
 
 def normalized(entry, credential):
@@ -52,6 +52,7 @@ def normalized(entry, credential):
 def verify(binary, root):
     root.mkdir(parents=True, exist_ok=True)
     home = root / 'home'; home.mkdir(exist_ok=True)
+    (home/'config.toml').write_text('[notice.model_migrations]\n"gpt-5.5" = "gpt-6-sol"\n', encoding='utf-8')
     for account, key in (('default', 'sk-default-tui-fixture'), ('alpha', 'sk-alpha-tui-fixture')):
         auth = home / ('auth.json' if account == 'default' else 'accounts/alpha/auth.json')
         auth.parent.mkdir(parents=True, exist_ok=True)
@@ -75,7 +76,8 @@ def verify(binary, root):
                         '-c', f'model_providers.fixture.supports_websockets={str(transport == "ws").lower()}',
                         '-c', f'projects.{json.dumps(str(home))}.trust_level="trusted"']
                 if account != 'default': args += ['--account', account]
-                args.append('Reply with a short confirmation.')
+                prompt = 'Reply with a short confirmation. LOCAL3_ACCOUNT_USER_REQUEST'
+                args.append(prompt)
                 desktop_name = f'Local3Accounts_{os.getpid()}_{label}'
                 desktop = U.CreateDesktopW(desktop_name, None, None, 0, 0x01ff, None)
                 if not desktop: raise C.WinError(C.get_last_error())
@@ -92,15 +94,23 @@ def verify(binary, root):
                     K.ResumeThread(process.hThread)
                     if not U.SetThreadDesktop(desktop): raise C.WinError(C.get_last_error())
                     deadline = time.monotonic() + 15
-                    while len(server.requests) == start and time.monotonic() < deadline: time.sleep(.05)
-                    assert len(server.requests) == start + 1, f'{label}: one successful request required'
+                    selected = []
+                    while time.monotonic() < deadline:
+                        selected = [entry for entry in server.requests[start:]
+                                    if is_user_request(entry, prompt)]
+                        if selected:
+                            break
+                        if K.WaitForSingleObject(process.hProcess, 0) == 0:
+                            raise AssertionError(f'{label}: TUI exited before the user request')
+                        time.sleep(.05)
+                    assert len(selected) == 1, f'{label}: one target user request required'
                     time.sleep(.25)
                     found = windows(desktop)
                     assert len(found) == 1, (label, found)
                     hwnd, title = found[0]
-                    U.SetWindowPos(hwnd, None, 0, 0, 1200, 800, 0x14)
+                    prepare_window(hwnd)
                     capture(hwnd, root / f'{label}.png')
-                    request = server.requests[-1]
+                    request = selected[0]
                     assert request['transport'] == transport
                     credential = f'sk-{account}-tui-fixture'
                     results[label] = normalized(request, credential)
@@ -116,6 +126,8 @@ def verify(binary, root):
                     U.SetThreadDesktop(previous); U.CloseDesktop(desktop)
             assert results[f'{transport}-default'] == results[f'{transport}-alpha'], f'{transport}: account changed non-auth request fields'
         (root/'result.json').write_text(json.dumps({'passed': True, 'real_tui': True,
+            'startup': 'embedded: CLI -c overrides and bypass_hook_trust exclude daemon',
+            'daemon_verified': False,
             'http_and_ws_account_requests_equal': True, 'visual_status': 'pending actual inspection'}, indent=2), encoding='utf-8')
         print('PASS real TUI account request equivalence', flush=True)
     finally:

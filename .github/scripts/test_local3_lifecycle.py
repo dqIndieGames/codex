@@ -30,7 +30,7 @@ class Rpc:
         self.stderr = (output / 'app-server.stderr.txt').open('w', encoding='utf-8')
         self.log = (output / 'rpc.jsonl').open('w', encoding='utf-8')
         self.process = subprocess.Popen([binary, '--dangerously-bypass-hook-trust',
-            '--dangerously-bypass-approvals-and-sandbox', 'app-server', *settings, *extra],
+            '--dangerously-bypass-approvals-and-sandbox', 'app-server', '-c', 'model="gpt-5.5"', *settings, *extra],
             cwd=home, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
             text=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
         self.queue = queue.Queue()

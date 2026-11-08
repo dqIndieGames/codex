@@ -10,6 +10,7 @@ import threading
 import time
 from PIL import Image
 from test_websocket_recovery import Fixture, command
+from test_local3_runtime_refresh import RuntimeFixture
 from _groundtruth.local3_retry_contract import WS_FAILURES_BEFORE_HTTP
 
 U, K, G = C.WinDLL('user32', use_last_error=True), C.WinDLL('kernel32', use_last_error=True), C.WinDLL('gdi32', use_last_error=True)
@@ -38,6 +39,7 @@ U.SetWindowPos.argtypes = [W.HWND, W.HWND, C.c_int, C.c_int, C.c_int, C.c_int, W
 U.GetDC.argtypes = [W.HWND]; U.GetDC.restype = W.HDC
 U.ReleaseDC.argtypes = [W.HWND, W.HDC]
 U.PrintWindow.argtypes = [W.HWND, W.HDC, W.UINT]; U.PrintWindow.restype = W.BOOL
+U.RedrawWindow.argtypes = [W.HWND, C.c_void_p, W.HANDLE, W.UINT]
 G.CreateCompatibleDC.argtypes = [W.HDC]; G.CreateCompatibleDC.restype = W.HDC
 G.CreateDIBSection.argtypes = [W.HDC, C.POINTER(BITMAPINFO), W.UINT, C.POINTER(C.c_void_p), W.HANDLE, W.DWORD]; G.CreateDIBSection.restype = W.HBITMAP
 G.SelectObject.argtypes = [W.HDC, W.HANDLE]; G.SelectObject.restype = W.HANDLE
@@ -48,19 +50,42 @@ K.TerminateProcess.argtypes = [W.HANDLE, W.UINT]
 K.WaitForSingleObject.argtypes = [W.HANDLE, W.DWORD]
 K.CloseHandle.argtypes = [W.HANDLE]
 
-class VisualFixture(Fixture):
+def is_user_request(entry, marker):
+    headers = {key.lower(): value for key, value in entry.get('headers', {}).items()}
+    metadata = json.loads(headers.get('x-codex-turn-metadata', '{}'))
+    return metadata.get('thread_source') == 'user' and marker in json.dumps(entry['payload'], ensure_ascii=False)
+
+
+def prepare_window(hwnd):
+    U.SetWindowPos(hwnd, None, 0, 0, 1200, 800, 0x14)
+    # 先让终端处理尺寸变化，再要求真实窗口完成绘制；不拼接或重画截图。
+    time.sleep(.3)
+    U.RedrawWindow(hwnd, None, None, 0x1 | 0x4 | 0x80 | 0x100 | 0x400)
+    time.sleep(.2)
+
+
+class VisualFixture(RuntimeFixture):
     def __init__(self):
-        super().__init__('close')
+        super().__init__()
         self.failed, self.third_failure, self.completed = threading.Event(), threading.Event(), threading.Event()
-    def record(self, transport, payload, user_agent=None):
-        result = super().record(transport, payload, user_agent)
-        if transport == 'ws':
+        self.target_requests = []
+
+    def events(self, payload, compact=False):
+        entry = self.local.entry
+        if not is_user_request(entry, 'LOCAL3_VISUAL_RECOVERY'):
+            return super().events(payload, compact)
+        self.target_requests.append(entry)
+        if entry['transport'] == 'ws' and len(self.failures) < WS_FAILURES_BEFORE_HTTP:
+            self.failures.append(time.monotonic())
             self.failed.set()
-            if len(self.requests) == WS_FAILURES_BEFORE_HTTP:
+            if len(self.failures) == WS_FAILURES_BEFORE_HTTP:
                 self.third_failure.set()
-        if transport == 'http':
+            return [{'type': 'response.failed', 'response': {'error': {
+                'code': 'server_error', 'message': 'fixture user request failure',
+                'headers': {'Retry-After': '2'}}}}]
+        if entry['transport'] == 'http':
             self.completed.set()
-        return result
+        return super().events(payload, compact)
 
 def windows(desktop):
     found = []
@@ -90,39 +115,34 @@ def capture(hwnd, target):
         G.SelectObject(dc, previous); G.DeleteObject(bitmap); G.DeleteDC(dc); U.ReleaseDC(hwnd, source)
 
 def verify(binary, root):
+    from _local3_hidden_console import HiddenConsole, SCREEN
     root.mkdir(parents=True, exist_ok=True)
     server = VisualFixture(); worker = threading.Thread(target=server.serve_forever, daemon=True); worker.start()
     home = root/'home'; home.mkdir(exist_ok=True)
-    env = os.environ.copy(); env['CODEX_HOME'] = str(home)
-    for key in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL'): env.pop(key, None)
+    (home/'config.toml').write_text('[notice.model_migrations]\n"gpt-5.5" = "gpt-6-sol"\n', encoding='utf-8')
     args = command(binary, server)
     settings = args[args.index('-c'):-1]
     args = [binary, '--dangerously-bypass-hook-trust', '--dangerously-bypass-approvals-and-sandbox',
-        '--no-alt-screen', '-m', 'gpt-5.5', *settings,
+        '-m', 'gpt-5.5', *settings,
         '-c', 'tui.notifications=false',
-        '-c', f'projects.{json.dumps(str(home))}.trust_level="trusted"', '你好']
-    desktop_name = f'DevVerify_local3_{os.getpid()}'
-    desktop = U.CreateDesktopW(desktop_name, None, None, 0, 0x01ff, None)
-    if not desktop: raise C.WinError(C.get_last_error())
-    previous_desktop = U.GetThreadDesktop(K.GetCurrentThreadId())
-    info, process = STARTUPINFO(), PROCESSINFO()
-    info.cb, info.lpDesktop, info.lpTitle = C.sizeof(info), desktop_name, 'local3 verification'
-    # CREATE_NEW_CONSOLE | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT.
-    block = C.create_unicode_buffer('\0'.join(f'{k}={v}' for k, v in sorted(env.items()))+'\0\0')
+        '-c', f'projects.{json.dumps(str(home))}.trust_level="trusted"', 'Reply briefly. LOCAL3_VISUAL_RECOVERY']
+    console = None
     try:
-        # 显式使用现成 conhost，避免默认终端委托把窗口转交用户当前桌面。
-        console_host = str(Path(os.environ['SystemRoot'])/'System32'/'conhost.exe')
-        if not K.CreateProcessW(console_host, C.create_unicode_buffer(subprocess.list2cmdline([console_host, *args])), None, None, False,
-                0x10 | 0x4 | 0x400, block, str(home), C.byref(info), C.byref(process)):
-            raise C.WinError(C.get_last_error())
-        K.ResumeThread(process.hThread)
-        if not U.SetThreadDesktop(desktop): raise C.WinError(C.get_last_error())
-        if not server.failed.wait(20): raise AssertionError('TUI did not reach the real model request')
+        console = HiddenConsole(args, home)
+        process, desktop = console.process, console.desktop
+        deadline = time.monotonic() + 20
+        while not server.failed.wait(.05) and time.monotonic() < deadline:
+            if K.WaitForSingleObject(process.hProcess, 0) == 0:
+                raise AssertionError('TUI process exited before the first request')
+        if not server.failed.is_set():
+            for index, (hwnd, title) in enumerate(windows(desktop)):
+                capture(hwnd, root/f'tui-startup-failure-{index}.png')
+                print(title, flush=True)
+            raise AssertionError('TUI did not reach the real model request')
         found = windows(desktop)
         assert len(found) == 1, ('expected one owned terminal on hidden desktop', found)
         hwnd, title = found[0]
-        U.SetWindowPos(hwnd, None, 0, 0, 1200, 800, 0x14)
-        time.sleep(.2)
+        prepare_window(hwnd)
         capture(hwnd, root/'tui-retry.png')
         if not server.third_failure.wait(25): raise AssertionError('TUI did not reach three failed WS attempts')
         time.sleep(.3)
@@ -130,16 +150,19 @@ def verify(binary, root):
         if not server.completed.wait(15): raise AssertionError('TUI retry did not recover')
         time.sleep(.3)
         capture(hwnd, root/'tui-completed.png')
+        assert [entry['transport'] for entry in server.target_requests] == ['ws'] * WS_FAILURES_BEFORE_HTTP + ['http']
+        (root/'requests.json').write_text(json.dumps(server.target_requests, ensure_ascii=False, indent=2), encoding='utf-8')
         final_title = windows(desktop)[0][1]
         assert final_title.startswith('[f] '), ('effective fixture provider title', final_title)
+        screen = SCREEN()
+        K.GetConsoleScreenBufferInfo(console.output, C.byref(screen))
         (root/'result.json').write_text(json.dumps({'captured': True, 'visual_passed': False,
-            'inspection': 'pending actual image review', 'mode': 'DEV-assisted', 'desktop': desktop_name,
+            'inspection': 'pending actual image review', 'mode': 'DEV-assisted',
+            'columns': screen.size.x, 'viewport_columns': screen.window.right-screen.window.left+1,
             'no_switch_desktop': True, 'exe': binary, 'pid': process.pid, 'title_before': title, 'title_after': final_title}, indent=2), encoding='utf-8')
     finally:
-        if process.hProcess:
-            K.TerminateProcess(process.hProcess, 0); K.WaitForSingleObject(process.hProcess, 3000)
-            K.CloseHandle(process.hProcess); K.CloseHandle(process.hThread)
-        U.SetThreadDesktop(previous_desktop); U.CloseDesktop(desktop)
+        if console:
+            console.close()
         server.shutdown(); server.server_close(); worker.join(2)
 
 if __name__ == '__main__': verify(str(Path(sys.argv[1]).resolve(strict=True)), Path(sys.argv[2]).resolve())

@@ -23,7 +23,7 @@ def main():
         ledger['used_seconds'] += elapsed
         ledger['checks'].append({'name': '实际打开图片验收', 'seconds': elapsed})
         ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding='utf-8')
-        print(json.dumps(ledger, ensure_ascii=False))
+        print(json.dumps({'used_seconds': ledger['used_seconds']}, ensure_ascii=False))
         if ledger['used_seconds'] > RELEASE_TEST_SECONDS - RELEASE_CHECK_RESERVE_SECONDS - CLEANUP_RESERVE_SECONDS:
             raise SystemExit('视觉验收超出剩余额度，不得发布')
         return
@@ -60,12 +60,15 @@ def main():
     if not job:
         raise C.WinError(C.get_last_error())
     process = None
+    output_path = ledger_path.parent / f'check-{len(ledger["checks"])+1}.log'
+    output = output_path.open('w', encoding='utf-8')
     code, cleanup_ok = 1, False
     try:
         env = os.environ.copy()
         env['LOCAL3_CHECK_REMAINING_SECONDS'] = str(remaining)
         # 启动后先分配 Job，再恢复线程，防止子进程逃出本轮清理范围。
-        process = subprocess.Popen(command, env=env, creationflags=0x4 | subprocess.CREATE_NO_WINDOW)
+        process = subprocess.Popen(command, env=env, stdout=output, stderr=subprocess.STDOUT,
+                                   creationflags=0x4 | subprocess.CREATE_NO_WINDOW)
         if not kernel.AssignProcessToJobObject(job, int(process._handle)):
             process.kill()
             raise C.WinError(C.get_last_error())
@@ -89,10 +92,12 @@ def main():
         if process is not None and cleanup_ok:
             process.wait(timeout=.1)
         kernel.CloseHandle(job)
+        output.close()
         elapsed = time.monotonic() - started
         ledger.pop('active', None)
         ledger['used_seconds'] += elapsed
-        ledger['checks'].append({'command': command, 'seconds': elapsed, 'exit_code': code, 'process_tree_clean': cleanup_ok})
+        ledger['checks'].append({'command': command, 'seconds': elapsed, 'exit_code': code, 'process_tree_clean': cleanup_ok,
+                                 'output': str(output_path)})
         ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding='utf-8')
         print(json.dumps({'used_seconds': ledger['used_seconds'], 'exit_code': code, 'process_tree_clean': cleanup_ok}), flush=True)
     if not cleanup_ok or ledger['used_seconds'] > RELEASE_TEST_SECONDS:

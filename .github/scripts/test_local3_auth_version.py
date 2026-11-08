@@ -11,6 +11,21 @@ from _groundtruth.local3_retry_contract import AUTH_FILE_RELOAD_FAILURES
 
 
 class AuthHandler(Handler):
+    def do_GET(self):
+        if self.headers.get('Upgrade', '').lower() == 'websocket' and self.server.reject_handshakes:
+            self.server.authorizations.append(self.headers.get('Authorization'))
+            error = self.server.http_error({}, False)
+            if error is not None:
+                status, payload = error
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header('Retry-After', '0')
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers(); self.wfile.write(body); self.wfile.flush()
+                return
+        super().do_GET()
+
     def do_POST(self):
         if self.path.endswith('/server/enroll'):
             payload = json.loads(self.read_exact(int(self.headers['Content-Length'])))
@@ -36,10 +51,13 @@ class AuthFixture(Fixture):
         self.enrolled = threading.Event()
         self.enrollment = None
         self.reload_count = 0
+        self.reject_handshakes = False
+        self.replacements = None
     def http_error(self, payload, compact):
         if self.reload_count and len(self.authorizations) <= self.reload_count:
             index = len(self.authorizations)
-            (self.home/'auth.json').write_text(json.dumps({'OPENAI_API_KEY': f'sk-fixture-{index}'}), encoding='utf-8')
+            replacement = self.replacements[index-1] if self.replacements is not None else json.dumps({'OPENAI_API_KEY': f'sk-fixture-{index}'})
+            (self.home/'auth.json').write_text(replacement, encoding='utf-8')
             return 401, {'error': {'message': 'fixture rejected old credentials'}}
         return None
 
@@ -65,6 +83,16 @@ def verify(binary, root, version):
         assert fixture.authorizations == [f'Bearer sk-fixture-{i}' for i in range(fixture.reload_count + 1)]
         rpc.stop()
         rpc = None
+        fixture.authorizations.clear()
+        fixture.reject_handshakes = True
+        (home/'auth.json').write_text(json.dumps({'OPENAI_API_KEY': 'sk-fixture-0'}), encoding='utf-8')
+        rpc = Rpc(binary, fixture, home, root/'reload-ws', [*extra,
+            '-c', 'model_providers.fixture.supports_websockets=true'])
+        tid = rpc.start(home)
+        rpc.turn(tid, 'Reply briefly after handshake recovery.')
+        assert fixture.authorizations == [f'Bearer sk-fixture-{i}' for i in range(fixture.reload_count + 1)]
+        rpc.stop(); rpc = None
+        fixture.reject_handshakes = False
         fixture.reload_count = 0
         def part(value):
             return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip('=')
@@ -73,10 +101,21 @@ def verify(binary, root, version):
             'email': 'fixture@example.invalid', 'https://api.openai.com/auth': {
                 'chatgpt_account_id': 'fixture-account', 'chatgpt_user_id': 'fixture-user',
                 'chatgpt_plan_type': 'plus'}}) + '.c2lnbmF0dXJl'
-        (home/'auth.json').write_text(json.dumps({'auth_mode': 'chatgpt', 'OPENAI_API_KEY': None,
+        chatgpt_auth = json.dumps({'auth_mode': 'chatgpt', 'OPENAI_API_KEY': None,
             'tokens': {'id_token': token, 'access_token': 'fixture-access', 'refresh_token': 'fixture-refresh',
                        'account_id': 'fixture-account'},
-            'last_refresh': datetime.now(timezone.utc).isoformat()}), encoding='utf-8')
+            'last_refresh': datetime.now(timezone.utc).isoformat()})
+        # 无效 JSON 与不同认证身份均不得覆盖仍有效的 API key 缓存。
+        fixture.authorizations.clear()
+        fixture.replacements = ['{incomplete', chatgpt_auth]
+        fixture.reload_count = len(fixture.replacements)
+        (home/'auth.json').write_text(json.dumps({'OPENAI_API_KEY': 'sk-kept-fixture'}), encoding='utf-8')
+        rpc = Rpc(binary, fixture, home, root/'retained-auth', extra)
+        tid = rpc.start(home); rpc.turn(tid, 'Reply with retained credentials.')
+        assert fixture.authorizations == ['Bearer sk-kept-fixture'] * (len(fixture.replacements)+1)
+        rpc.stop(); rpc = None
+        fixture.reload_count = 0; fixture.replacements = None
+        (home/'auth.json').write_text(chatgpt_auth, encoding='utf-8')
         rpc = Rpc(binary, fixture, home, root/'registration', [
             '-c', 'cli_auth_credentials_store="file"', '-c', f'chatgpt_base_url="http://127.0.0.1:{fixture.server_port}/backend-api/"',
             '--remote-control'])
@@ -84,6 +123,7 @@ def verify(binary, root, version):
         assert fixture.enrollment['body']['app_server_version'] == version
         assert '-local3' not in fixture.enrollment['ua']
         report = {'passed': True, 'file_reload_failures': AUTH_FILE_RELOAD_FAILURES,
+                  'http_and_ws_reload': True, 'bad_file_and_identity_preserve_cache': True,
                   'enrollment': fixture.enrollment}
         (root/'result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         print(json.dumps(report), flush=True)

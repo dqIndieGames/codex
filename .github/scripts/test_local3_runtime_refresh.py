@@ -39,10 +39,16 @@ class RuntimeFixture(Fixture):
         self.tool_sent = True
 
     def record(self, transport, payload, user_agent=None):
-        compact = super().record(transport, payload, user_agent)
-        self.requests[-1]['headers'] = dict(getattr(self.local, 'headers', {}))
-        self.requests[-1]['method'] = getattr(self.local, 'method', None)
-        self.requests[-1]['path'] = getattr(self.local, 'path', None)
+        compact = 'COMPACT_FIXTURE' in json.dumps(payload) or any(
+            item.get('type') == 'compaction_trigger' for item in payload.get('input', []))
+        entry = {'transport': transport, 'compact': compact, 'payload': payload,
+                 'at': time.monotonic(), 'user_agent': user_agent,
+                 'headers': dict(getattr(self.local, 'headers', {})),
+                 'method': getattr(self.local, 'method', None),
+                 'path': getattr(self.local, 'path', None)}
+        with self.lock:
+            self.requests.append(entry)
+        self.local.entry = entry
         return compact
 
     def events(self, payload, compact=False):
