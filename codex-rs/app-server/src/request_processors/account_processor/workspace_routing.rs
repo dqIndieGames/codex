@@ -194,6 +194,7 @@ impl WorkspaceRoutingResolver for AccountRequestProcessor {
             self.config_manager.refresh_application_network_policy().await?;
             Ok(())
         })
+    }
 
     fn resolve(
         &self,
