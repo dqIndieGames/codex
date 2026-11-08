@@ -331,8 +331,8 @@ pub(crate) fn resolve_provider_auth_with_manager(
 ) -> codex_protocol::error::Result<SharedAuthProvider> {
     let resolved = resolve_provider_auth(auth, provider)?;
     if provider.requires_openai_auth
-        && provider.api_key()?.is_none()
         && !provider.experimental_bearer_token_is_non_empty()
+        && provider.api_key()?.is_none()
         && provider.auth.is_none()
         && let (Some(manager), Some(auth)) = (auth_manager, auth)
         && manager.uses_file_auth_storage()
@@ -426,12 +426,12 @@ fn should_bootstrap_chatgpt_agent_identity(
 fn bearer_auth_for_provider(
     provider: &ModelProviderInfo,
 ) -> codex_protocol::error::Result<Option<BearerAuthProvider>> {
-    if let Some(api_key) = provider.api_key()? {
-        return Ok(Some(BearerAuthProvider::new(api_key)));
-    }
-
     if let Some(token) = provider.experimental_bearer_token_non_empty() {
         return Ok(Some(BearerAuthProvider::new(token)));
+    }
+
+    if let Some(api_key) = provider.api_key()? {
+        return Ok(Some(BearerAuthProvider::new(api_key)));
     }
 
     Ok(None)

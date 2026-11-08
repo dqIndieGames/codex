@@ -81,6 +81,7 @@ wire_api = "responses"
 supports_websockets = {str(ws).lower()}
 requires_openai_auth = false
 experimental_bearer_token = {json.dumps(token)}
+env_key = "LOCAL3_VERIFY_UNUSED_ENV_KEY"
 request_max_retries = 0
 stream_max_retries = {budget}
 ''', encoding='utf-8')

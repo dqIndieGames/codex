@@ -110,7 +110,9 @@ def verify(binary, root):
     # CREATE_NEW_CONSOLE | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT.
     block = C.create_unicode_buffer('\0'.join(f'{k}={v}' for k, v in sorted(env.items()))+'\0\0')
     try:
-        if not K.CreateProcessW(binary, C.create_unicode_buffer(subprocess.list2cmdline(args)), None, None, False,
+        # 显式使用现成 conhost，避免默认终端委托把窗口转交用户当前桌面。
+        console_host = str(Path(os.environ['SystemRoot'])/'System32'/'conhost.exe')
+        if not K.CreateProcessW(console_host, C.create_unicode_buffer(subprocess.list2cmdline([console_host, *args])), None, None, False,
                 0x10 | 0x4 | 0x400, block, str(home), C.byref(info), C.byref(process)):
             raise C.WinError(C.get_last_error())
         K.ResumeThread(process.hThread)

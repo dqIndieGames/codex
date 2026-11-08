@@ -2856,6 +2856,7 @@ fn interrupt_on_provider_refresh(
     let consumer_dropped = CancellationToken::new();
     let stopped = consumer_dropped.clone();
     let interrupt = stream.interrupt.take();
+    let routing_affinity = stream.routing_affinity.take();
     tokio::spawn(async move {
         loop {
             let event = tokio::select! {
@@ -2872,7 +2873,7 @@ fn interrupt_on_provider_refresh(
             if tx_event.send(event).await.is_err() || terminal { break; }
         }
     });
-    ResponseStream { rx_event, interrupt, consumer_dropped }
+    ResponseStream { routing_affinity, rx_event, interrupt, consumer_dropped }
 }
 
 /// Stamp a ResponsesWsRequest with the current time.

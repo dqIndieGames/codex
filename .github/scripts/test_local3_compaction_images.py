@@ -8,6 +8,7 @@ import json
 import random
 import threading
 import time
+import uuid
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from test_local3_lifecycle import Rpc
@@ -26,20 +27,12 @@ def images(payload):
     walk(payload.get('input', []))
     return result
 
-def tool_output(payload, call_id):
-    for item in reversed(payload.get('input', [])):
-        if item.get('type') == 'function_call_output' and item.get('call_id') == call_id:
-            output = item['output']
-            if isinstance(output, list): output = '\n'.join(p.get('text', '') for p in output)
-            return json.loads(output)
-    return None
-
 class ImageFixture(Fixture):
     def __init__(self, root):
         super().__init__('images-v2')
-        self.root, self.phase, self.generation = root, 'list', 0
+        self.root, self.phase = root, 'ready'
         self.remaining, self.failure_index = 0, 0
-        self.image_ids, self.last_images = [], []
+        self.last_images = []
         self.snapshots, self.tool_sent = set(), True
         self.failure_plan = []
 
@@ -73,33 +66,16 @@ class ImageFixture(Fixture):
             return 413, {'error': {'message': 'Payload Too Large'}}
         return None
 
-    def call_events(self, arguments, suffix):
-        item = {'type': 'function_call', 'name': 'image_context', 'call_id': suffix, 'arguments': json.dumps(arguments)}
-        return [{'type': 'response.created', 'response': {'id': suffix}},
-            {'type': 'response.output_item.done', 'output_index': 0, 'item': item},
-            {'type': 'response.completed', 'response': {'id': suffix, 'status': 'completed', 'output': [item]}}]
-
     def events(self, payload, compact=False):
         if self.failure_plan:
             return [self.failure_plan.pop(0)]
-        if self.phase == 'list':
-            self.phase = 'release'
-            return self.call_events({'action': 'list'}, f'list_{self.generation}')
-        if self.phase == 'release':
-            result = tool_output(payload, f'list_{self.generation}')
-            assert result and result['images'], 'image_context must return real identities'
-            self.image_ids = [entry['image_id'] for entry in result['images']]
-            release = [entry['image_id'] for entry in result['images'] if entry['tier'] < 5 and entry['image_id'] != self.image_ids[1]]
-            self.phase = 'armed'
-            return self.call_events({'action': 'release', 'image_ids': release,
-                'analysis_complete': True, 'details_required': False}, f'release_{self.generation}')
-        if self.phase == 'armed':
-            assert tool_output(payload, f'release_{self.generation}'), 'release acknowledged'
-            self.phase = 'ready'
         if self.phase == 'fail' and self.remaining:
             self.failure_index += 1; self.remaining -= 1
-            error = {'code': 'turn_rate_limit_exceeded', 'message': 'fixture', 'headers': {'Retry-After': '0'}}
-            response = {'status': 'failed', 'error': error} if self.failure_index % COUNT else {'status': 'failed'}
+            # 同一六档序列覆盖已解析、未知、缺失和异常 error，真值来自清单 6.1。
+            causes = [None, {'code': 42}, {'code': 'invalid_api_key'}, {'code': 'insufficient_quota'},
+                      {'code': 'turn_rate_limit_exceeded'}, {'code': 'server_is_overloaded'},
+                      {'code': 'invalid_prompt'}, {'code': 'cyber_policy'}]
+            response = {'status': 'failed', 'error': causes[(self.failure_index - 1) % len(causes)]}
             return [{'type': 'response.failed', 'response': response, 'headers': {'Retry-After': '0'}}]
         return super().events(payload, compact)
 
@@ -129,7 +105,7 @@ def verify(binary, root):
         extra = ['-c', 'model_providers.fixture.supports_websockets=false', '-c', 'model_providers.fixture.request_max_retries=5']
         rpc = Rpc(binary, server, home, root / 'rpc', extra)
         tid = rpc.start(home)
-        rpc.turn(tid, 'Analyze these images; retain image 2 as the required reference.', [
+        rpc.turn(tid, 'Analyze these images in arrival order.', [
             {'type': 'localImage', 'path': str(path), 'detail': 'original'} for path, _ in originals])
         initial_images = server.last_images
         boundary_thread = rpc.call('thread/fork', {'threadId': tid})['thread']['id']
@@ -154,7 +130,7 @@ def verify(binary, root):
             assert all(r['images'] == initial_images for r in attempts[:COUNT])
             assert sum(x['bytes'] for x in attempts[-1]['images']) < sum(x['bytes'] for x in initial_images)
             if code == 'image_dimensions_exceeded':
-                assert all(max(x['size']) <= IMAGE_LONG_EDGES[3] for i, x in enumerate(attempts[-1]['images']) if i != 1)
+                assert all(max(x['size']) <= IMAGE_LONG_EDGES[3] for x in attempts[-1]['images'])
         # 两种上下文封装都应交回官方，不增加尝试以凑三次，不改变图片。
         for event in (
             {'http': 400, 'error': {'code': 'context_length_exceeded', 'message': 'context limit'}},
@@ -169,7 +145,7 @@ def verify(binary, root):
             assert len(server.requests[start:]) == 1 and server.last_images == initial_images
         server.phase = 'ready'
         server.arm(COUNT*6); start = len(server.requests)
-        rpc.turn(tid, 'Continue using the recorded image dependencies.')
+        rpc.turn(tid, 'Continue using the images in arrival order.')
         attempts = server.requests[start:]
         assert len(attempts) == COUNT*6+1, 'one count per remote failure'
         for round_index in range(6):
@@ -178,25 +154,62 @@ def verify(binary, root):
             after = attempts[(round_index+1)*COUNT]['images']
             assert sum(x['bytes'] for x in after) < sum(x['bytes'] for x in before)
             assert len(after) == len(before)
-            assert after[1] == attempts[0]['images'][1], 'protect old reference while other images have room'
         for tier, edge in IMAGE_LONG_EDGES.items():
-            assert all(max(x['size']) <= edge for i, x in enumerate(attempts[tier*COUNT]['images']) if i != 1)
+            assert all(max(x['size']) <= edge for x in attempts[tier*COUNT]['images'])
         assert all(x['format'] == 'PNG' for x in attempts[COUNT]['images'])
-        assert all(x['format'] == 'JPEG' for i, x in enumerate(attempts[2*COUNT]['images']) if i != 1)
+        assert all(x['format'] == 'JPEG' for x in attempts[2*COUNT]['images'])
         assert all(x['size'] == initial_images[i]['size'] for i, x in enumerate(attempts[2*COUNT]['images']))
         fifth = attempts[5*COUNT]['images']
         retained = {i for i, x in enumerate(fifth) if tuple(x['size']) != IMAGE_PLACEHOLDER_SIZE}
-        expected = set(range(len(originals)-IMAGE_KEEP_RECENT, len(originals))) | {1}
+        expected = set(range(len(originals)-IMAGE_KEEP_RECENT, len(originals)))
         assert retained == expected, (retained, expected)
         sixth = attempts[6*COUNT]['images']
         assert sum(tuple(x['size']) == IMAGE_PLACEHOLDER_SIZE for x in sixth) == len(originals)-len(expected)+1
-        rpc.stop(); rpc = Rpc(binary, server, home, root / 'resumed', extra)
+        assert {i for i, x in enumerate(sixth) if tuple(x['size']) != IMAGE_PLACEHOLDER_SIZE} == expected - {min(expected)}, 'stage six evicts the oldest remaining image'
+        rpc.stop()
+        # 删除本测试的发送缓存，保留原始内容；resume 必须精确重建，不能恢复更大原图。
+        cache = home / 'cache' / 'local3-images-v2'
+        for path in cache.glob('*'):
+            if path.name.endswith('.image'):
+                path.unlink()
+        source_keys, result_keys = set(), set()
+        for path in home.rglob('*.jsonl'):
+            for line in path.read_text(encoding='utf-8').splitlines():
+                entry = json.loads(line)
+                if entry.get('type') == 'images_shrunk':
+                    for metadata in entry['payload'].get('images', []):
+                        source_keys.add(metadata['source_digest'])
+                        result_keys.add(metadata['result_digest'])
+        assert result_keys, 'recorded image references must exist before cache rebuild'
+        for key in result_keys - source_keys:
+            (cache / key).unlink(missing_ok=True)
+        rpc = Rpc(binary, server, home, root / 'resumed', extra)
         server.phase = 'ready'
         rpc.call('thread/resume', {'threadId': tid}); rpc.turn(tid, 'Continue with the same image context.')
         assert server.last_images == sixth, 'resume exact image state'
         fork = rpc.call('thread/fork', {'threadId': tid})['thread']['id']
         rpc.turn(fork, 'Continue without restoring degraded images.')
         assert server.last_images == sixth, 'fork exact image state'
+        # 独立旧四档契约：旧第四档只留最后一张；之后加入的图片不能被重算淘汰。
+        legacy_id = str(uuid.uuid4())
+        stamp = '2026-11-07T00:00:00Z'
+        url = 'data:image/png;base64,' + base64.b64encode(originals[0][0].read_bytes()).decode()
+        legacy_items = [
+            {'type': 'session_meta', 'payload': {'id': legacy_id, 'session_id': legacy_id,
+                'timestamp': stamp, 'cwd': str(home), 'originator': 'local3_verify',
+                'cli_version': '0.165.0-local3', 'model_provider': 'fixture', 'base_instructions': None}},
+            {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [
+                {'type': 'input_image', 'image_url': url, 'detail': 'original'} for _ in originals]}},
+            {'type': 'images_shrunk', 'payload': {'tier': 4, 'changed': len(originals)-1}},
+            {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [
+                {'type': 'input_image', 'image_url': url, 'detail': 'original'}]}},
+        ]
+        legacy_path = root / 'legacy-four-stage.jsonl'
+        legacy_path.write_text('\n'.join(json.dumps({'timestamp': stamp, **item}) for item in legacy_items)+'\n', encoding='utf-8')
+        resumed = rpc.call('thread/resume', {'threadId': legacy_id, 'path': str(legacy_path)})['thread']['id']
+        rpc.turn(resumed, 'Continue the legacy image history.')
+        assert len(server.last_images) == len(originals)+1
+        assert [tuple(x['size']) == IMAGE_PLACEHOLDER_SIZE for x in server.last_images] == [True]*(len(originals)-1)+[False, False]
         transparent = Image.new('RGBA', (1440, 900), (0, 0, 0, 0))
         drawing = ImageDraw.Draw(transparent)
         drawing.rectangle((100, 100, 1300, 800), fill=(40, 160, 220, 128))
@@ -204,8 +217,8 @@ def verify(binary, root):
         alpha_path = root / 'original-transparent.png'
         transparent.save(alpha_path, compress_level=0)
         originals.append((alpha_path, hashlib.sha256(alpha_path.read_bytes()).hexdigest()))
-        server.phase = 'list'; server.generation += 1
-        rpc.turn(tid, 'Analyze this new batch then release when no longer required.', [
+        server.phase = 'ready'
+        rpc.turn(tid, 'Analyze this new batch in arrival order.', [
             {'type': 'localImage', 'path': str(originals[0][0]), 'detail': 'original'},
             {'type': 'localImage', 'path': str(alpha_path), 'detail': 'original'}])
         new_before = server.last_images[-1]
@@ -241,7 +254,8 @@ def verify(binary, root):
                     assert 'base64,' not in line
                     markers.append(item)
         assert markers, 'durable image changes'
-        report = {'passed': True, 'six_stages': True, 'protection': True, 'resume': True, 'fork': True,
+        report = {'passed': True, 'six_stages': True, 'chronological_retention': True, 'resume': True, 'fork': True,
+                  'cache_rebuilt': True, 'legacy_four_stage': True,
                   'new_image_after_top': True, 'originals_unchanged': True, 'compact_entries': compact_evidence,
                   'visual_status': 'pending actual inspection'}
         (root / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
