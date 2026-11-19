@@ -355,6 +355,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
         extra: None,
         session_id: "thread-1".to_string(),
         forked_from_id: None,
+        attached_to_thread_id: None,
         parent_thread_id: None,
         preview: String::new(),
         ephemeral: false,
@@ -388,6 +389,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: vec![ThreadItem::untimed(
                     AppServerThreadItemPayload::AgentMessage {
+                        moderation: None,
                         id: "msg-1".to_string(),
                         text: "hello".to_string(),
                         phase: None,
@@ -423,6 +425,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
         turn_items_for_thread(&thread, "turn-1"),
         Some(vec![ThreadItem::untimed(
             AppServerThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "msg-1".to_string(),
                 text: "hello".to_string(),
                 phase: None,
@@ -866,6 +869,7 @@ fn sample_thread_start_response() -> ThreadStartResponse {
             extra: None,
             session_id: "67e55044-10b1-426f-9247-bb680e5fe0c7".to_string(),
             forked_from_id: None,
+            attached_to_thread_id: None,
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,

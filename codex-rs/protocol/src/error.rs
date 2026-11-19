@@ -128,7 +128,7 @@ pub enum CodexErrorDetails {
     #[error("turn aborted. Something went wrong? Hit `/feedback` to report the issue.")]
     TurnAborted,
 
-    #[error("shared rollout token budget exhausted")]
+    #[error("budget reached")]
     SessionBudgetExceeded,
 
     /// Returned by ResponsesClient when the SSE stream disconnects or errors out **after** the HTTP
@@ -137,6 +137,9 @@ pub enum CodexErrorDetails {
     /// The Session loop treats this as a transient error and will automatically retry the turn.
     #[error("stream disconnected before completion: {0}")]
     Stream(String),
+    /// The peer's WebSocket message size limit requires sending this request over HTTP.
+    #[error("websocket request exceeds the peer's message size limit")]
+    WebsocketMessageTooLarge,
     /// A response stopped by the content filter. Sampling retries need developer guidance.
     #[error(
         "stream disconnected before completion: Incomplete response returned, reason: content_filter"
@@ -171,6 +174,12 @@ pub enum CodexErrorDetails {
     /// surface a polite FunctionCallOutput back to the model instead of crashing the CLI.
     #[error("interrupted (Ctrl-C). Something went wrong? Hit `/feedback` to report the issue.")]
     Interrupted,
+    /// The account cannot use Codex in the selected workspace.
+    #[error("{0}")]
+    WorkspaceAccessDenied(UnexpectedResponseError),
+    /// The provider denied the access program required for this request.
+    #[error("{0}")]
+    AccessProgramNotEnabled(ProviderRejection),
     /// Unexpected HTTP status code.
     #[error("{0}")]
     UnexpectedStatus(UnexpectedResponseError),
@@ -178,7 +187,11 @@ pub enum CodexErrorDetails {
     #[error("{0}")]
     InvalidRequest(String),
     #[error("{message}")]
-    InvalidAudioInput { message: String },
+    InvalidAudioInput {
+        message: String,
+        /// True when the provider rejected an individual clip, independent of request size.
+        per_recording: bool,
+    },
     #[error("{message}")]
     ModelNotFound {
         message: String,
@@ -186,6 +199,15 @@ pub enum CodexErrorDetails {
     },
     #[error("{message}")]
     InvalidPrompt { message: String },
+    /// The workspace's inference hook explicitly denied this request.
+    #[error("{message}")]
+    InferenceHookDenied { message: String },
+    /// The provider rejected the input under its content policy.
+    #[error("{message}")]
+    ContentPolicyViolation {
+        message: String,
+        status: Option<StatusCode>,
+    },
     /// Multiple registered tools share the same effective name.
     #[error("duplicate tool: {0}")]
     ToolCollision(String),
@@ -474,8 +496,21 @@ impl CodexErr {
         )
     }
 
+    pub fn requires_http_fallback(&self) -> bool {
+        matches!(self.details(), CodexErrorDetails::WebsocketMessageTooLarge)
+    }
+
     pub fn is_retryable(&self) -> bool {
         match self.details() {
+            CodexErrorDetails::UnexpectedStatus(error)
+                if is_runtime_auth_denial(
+                    error.status,
+                    &error.body,
+                    error.identity_error_code.as_deref(),
+                ) =>
+            {
+                false
+            }
             CodexErrorDetails::TurnAborted
             | CodexErrorDetails::SessionBudgetExceeded
             | CodexErrorDetails::Interrupted
@@ -486,6 +521,7 @@ impl CodexErr {
             | CodexErrorDetails::InvalidAudioInput { .. }
             | CodexErrorDetails::ResponseIncomplete(_)
             | CodexErrorDetails::ModelNotFound { .. }
+            | CodexErrorDetails::InferenceHookDenied { .. }
             | CodexErrorDetails::ToolCollision(_)
             | CodexErrorDetails::RefreshTokenFailed(_)
             | CodexErrorDetails::GatewayLoginRequired(_)
@@ -498,6 +534,10 @@ impl CodexErr {
             | CodexErrorDetails::Spawn
             | CodexErrorDetails::SessionConfiguredNotFirstEvent => false,
             CodexErrorDetails::Stream(..)
+            | CodexErrorDetails::WebsocketMessageTooLarge
+            | CodexErrorDetails::WorkspaceAccessDenied(_)
+            | CodexErrorDetails::AccessProgramNotEnabled(_)
+            | CodexErrorDetails::ContentPolicyViolation { .. }
             | CodexErrorDetails::ContentFilter
             | CodexErrorDetails::RateLimitExceeded(_)
             | CodexErrorDetails::Timeout
@@ -570,21 +610,24 @@ impl CodexErr {
                 CodexErrorInfo::PolicyCapacityUnavailable
             }
             CodexErrorDetails::FlexUnavailable => CodexErrorInfo::FlexUnavailable,
+            CodexErrorDetails::InferenceHookDenied { .. } => CodexErrorInfo::InferenceHookDenied,
             CodexErrorDetails::CyberPolicy { .. } => CodexErrorInfo::CyberPolicy,
             CodexErrorDetails::BioPolicy { .. } => CodexErrorInfo::BioPolicy,
             CodexErrorDetails::ModelNotFound { .. } => CodexErrorInfo::ModelNotFound,
-            CodexErrorDetails::InvalidPrompt { .. } => CodexErrorInfo::InvalidPrompt,
+            CodexErrorDetails::InvalidPrompt { .. }
+            | CodexErrorDetails::ContentPolicyViolation { .. } => CodexErrorInfo::InvalidPrompt,
             CodexErrorDetails::MisalignmentPolicyViolation { .. } => {
                 CodexErrorInfo::MisalignmentPolicyViolation
             }
             CodexErrorDetails::RetryLimit(_) => CodexErrorInfo::ResponseTooManyFailedAttempts {
                 http_status_code: self.http_status_code_value(),
             },
-            CodexErrorDetails::ConnectionFailed(_) | CodexErrorDetails::UnexpectedStatus(_) => {
-                CodexErrorInfo::HttpConnectionFailed {
-                    http_status_code: self.http_status_code_value(),
-                }
-            }
+            CodexErrorDetails::ConnectionFailed(_)
+            | CodexErrorDetails::WorkspaceAccessDenied(_)
+            | CodexErrorDetails::AccessProgramNotEnabled(_)
+            | CodexErrorDetails::UnexpectedStatus(_) => CodexErrorInfo::HttpConnectionFailed {
+                http_status_code: self.http_status_code_value(),
+            },
             CodexErrorDetails::ResponseStreamFailed(_) => {
                 CodexErrorInfo::ResponseStreamConnectionFailed {
                     http_status_code: self.http_status_code_value(),
@@ -612,6 +655,7 @@ impl CodexErr {
         ErrorEvent {
             message,
             codex_error_info: Some(self.to_codex_protocol_error()),
+            rejected_audio_file_ids: Vec::new(),
             misalignment: match &self.details {
                 CodexErrorDetails::MisalignmentPolicyViolation { misalignment, .. } => {
                     misalignment.clone()
@@ -624,9 +668,12 @@ impl CodexErr {
     pub fn http_status_code_value(&self) -> Option<u16> {
         let http_status_code = match &self.details {
             CodexErrorDetails::FlexUnavailable => Some(StatusCode::TOO_MANY_REQUESTS),
-            CodexErrorDetails::ModelNotFound { status, .. } => *status,
+            CodexErrorDetails::ModelNotFound { status, .. }
+            | CodexErrorDetails::ContentPolicyViolation { status, .. } => *status,
             CodexErrorDetails::RetryLimit(err) => Some(err.status),
-            CodexErrorDetails::UnexpectedStatus(err) => Some(err.status),
+            CodexErrorDetails::WorkspaceAccessDenied(err)
+            | CodexErrorDetails::AccessProgramNotEnabled(ProviderRejection::Http(err))
+            | CodexErrorDetails::UnexpectedStatus(err) => Some(err.status),
             CodexErrorDetails::ConnectionFailed(err) => err.source.status(),
             CodexErrorDetails::ResponseStreamFailed(err) => err.source.status(),
             _ => None,
@@ -666,6 +713,15 @@ impl std::fmt::Display for ResponseStreamFailed {
     }
 }
 
+/// A provider can reject a request before or after opening the response stream.
+#[derive(Debug, Error)]
+pub enum ProviderRejection {
+    #[error(transparent)]
+    Http(UnexpectedResponseError),
+    #[error("{0}")]
+    Stream(String),
+}
+
 #[derive(Clone, Debug)]
 pub struct UnexpectedResponseError {
     pub status: StatusCode,
@@ -676,6 +732,39 @@ pub struct UnexpectedResponseError {
     pub request_id: Option<String>,
     pub identity_authorization_error: Option<String>,
     pub identity_error_code: Option<String>,
+}
+
+/// Runtime denial cannot be repaired by retrying the request or refreshing its original credential.
+/// Keep unavailable verification state and ordinary credential errors on their existing paths.
+pub fn is_runtime_auth_denial(
+    status: StatusCode,
+    body: &str,
+    identity_error_code: Option<&str>,
+) -> bool {
+    if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return false;
+    }
+    let is_terminal = |code| {
+        matches!(
+            code,
+            Some(
+                "runtime_assertion_invalid"
+                    | "runtime_instance_paused"
+                    | "runtime_instance_revoked"
+                    | "invalid_agent_instance_assertion"
+            )
+        )
+    };
+    if is_terminal(identity_error_code) {
+        return true;
+    }
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    is_terminal(
+        body.pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+    )
 }
 
 const UNEXPECTED_RESPONSE_BODY_MAX_BYTES: usize = 1000;
@@ -694,7 +783,8 @@ impl UnexpectedResponseError {
         truncate_with_ellipsis(trimmed_body, UNEXPECTED_RESPONSE_BODY_MAX_BYTES)
     }
 
-    fn extract_error_message(&self) -> Option<String> {
+    /// Returns the provider message from a structured HTTP error body.
+    pub fn extract_error_message(&self) -> Option<String> {
         let json = serde_json::from_str::<serde_json::Value>(&self.body).ok()?;
         let message = json
             .get("error")

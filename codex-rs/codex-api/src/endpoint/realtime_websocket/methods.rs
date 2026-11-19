@@ -65,9 +65,8 @@ use tungstenite::protocol::frame::coding::CloseCode;
 use url::Url;
 
 const REALTIME_WIRE_LOG_TARGET: &str = "codex_api::realtime_websocket::wire";
+mod sideband;
 const OPENAI_REALTIME_API_BASE_URL: &str = "https://api.openai.com/v1";
-const MAX_ACTIVE_TRANSCRIPT_BYTES: usize = 8 * 1024;
-const TRUNCATED_TRANSCRIPT_PREFIX: &str = "…";
 const ROUTE_RECOVERY_RETRY_THRESHOLD: u64 = 3;
 
 #[derive(Debug, Clone)]
@@ -84,7 +83,8 @@ pub type RequestRetryGuard = Arc<dyn Fn() -> bool + Send + Sync>;
 
 struct WsStream {
     tx_command: mpsc::Sender<WsCommand>,
-    pump_task: tokio::task::JoinHandle<()>,
+    transport_task: tokio::task::JoinHandle<()>,
+    sideband_input_stop: Option<tokio::sync::watch::Sender<bool>>,
     terminal_policy_error: tokio::sync::watch::Receiver<Option<NetworkPolicyDenied>>,
 }
 
@@ -107,7 +107,7 @@ impl WsStream {
         let (tx_message, rx_message) = async_channel::unbounded::<Result<Message, WsError>>();
 
         let (terminal_policy_tx, terminal_policy_error) = tokio::sync::watch::channel(None);
-        let pump_task = tokio::spawn(async move {
+        let transport_task = tokio::spawn(async move {
             let mut inner = inner;
             let report_write_policy_error = |error: &WsError| {
                 if let Some(denied) = codex_websocket_client::network_policy_denial(error) {
@@ -208,7 +208,8 @@ impl WsStream {
         (
             Self {
                 tx_command,
-                pump_task,
+                transport_task,
+                sideband_input_stop: None,
                 terminal_policy_error,
             },
             rx_message,
@@ -255,7 +256,7 @@ impl WsStream {
 
 impl Drop for WsStream {
     fn drop(&mut self) {
-        self.pump_task.abort();
+        self.transport_task.abort();
     }
 }
 
@@ -893,8 +894,8 @@ fn contains_transcript_entry(entries: &[RealtimeTranscriptEntry], role: &str, te
 
 pub struct RealtimeWebsocketClient {
     provider: Provider,
-    auth: Option<crate::auth::SharedAuthProvider>,
     http_client_factory: HttpClientFactory,
+    auth: Option<crate::SharedAuthProvider>,
     webrtc_sideband_base_url: String,
     request_retry_notifier: Option<RealtimeRetryNotifier>,
     request_retry_timeout: Option<RequestRetryTimeout>,
@@ -912,8 +913,8 @@ impl RealtimeWebsocketClient {
     pub fn new(provider: Provider, http_client_factory: HttpClientFactory) -> Self {
         Self {
             provider,
-            auth: None,
             http_client_factory,
+            auth: None,
             webrtc_sideband_base_url: OPENAI_REALTIME_API_BASE_URL.to_string(),
             request_retry_notifier: None,
             request_retry_timeout: None,
@@ -936,15 +937,21 @@ impl RealtimeWebsocketClient {
         self
     }
 
-    /// Overrides the direct WebRTC sideband URL for local development and tests.
-    pub fn with_webrtc_sideband_base_url(mut self, base_url: String) -> Self {
-        self.webrtc_sideband_base_url = base_url;
+    /// Use the transport captured with the selected authentication source.
+    pub fn with_http_client_factory(mut self, factory: HttpClientFactory) -> Self {
+        self.http_client_factory = factory;
         self
     }
 
-    /// Retains the authentication source so every handshake can use reloaded credentials.
-    pub fn with_auth(mut self, auth: crate::auth::SharedAuthProvider) -> Self {
+    /// Resolve request auth on every handshake, including sideband retries and reconnects.
+    pub fn with_auth(mut self, auth: crate::SharedAuthProvider) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    /// Overrides the direct WebRTC sideband URL for local development and tests.
+    pub fn with_webrtc_sideband_base_url(mut self, base_url: String) -> Self {
+        self.webrtc_sideband_base_url = base_url;
         self
     }
 
@@ -1188,10 +1195,7 @@ impl RealtimeWebsocketClient {
         request.headers_mut().extend(headers);
         if let Some(auth) = &self.auth {
             let headers = std::mem::take(request.headers_mut());
-            *request.headers_mut() = auth
-                .apply_auth_headers(headers)
-                .await
-                .map_err(TransportError::from)?;
+            *request.headers_mut() = auth.apply_auth_headers(headers).await?;
         }
 
         info!("connecting realtime websocket: {ws_url}");
@@ -1684,8 +1688,9 @@ mod tests {
         assert_eq!(second_events.take_transcript_tail().await, vec![]);
     }
 
+    // 官方 0.170.0 在完成事件时冲刷历史；尚未完成的文本必须完整保留。
     #[tokio::test]
-    async fn active_transcript_retains_a_bounded_suffix() {
+    async fn active_transcript_preserves_pending_text_until_flush() {
         let (_tx_message, rx_message) = async_channel::unbounded();
         let events = RealtimeWebsocketEvents {
             rx_message,
@@ -1694,23 +1699,14 @@ mod tests {
             event_parser: RealtimeEventParser::FramelessBidi,
             is_closed: Arc::new(AtomicBool::new(false)),
         };
-        let mut oversized = RealtimeEvent::InputTranscriptDelta(RealtimeTranscriptDelta {
-            delta: format!("old{}new", "x".repeat(MAX_ACTIVE_TRANSCRIPT_BYTES)),
+        let delta = format!("old{}new", "x".repeat(16 * 1024));
+        let mut event = RealtimeEvent::InputTranscriptDelta(RealtimeTranscriptDelta {
+            delta: delta.clone(),
         });
-        for frame in [
-            None,
-            Some(TranscriptFrame {
-                start_ms: 0,
-                end_ms: 200,
-            }),
-        ] {
-            events.update_active_transcript(&mut oversized, frame).await;
-
-            let tail = events.take_transcript_tail().await;
-            assert!(transcript_entries_bytes(&tail) <= MAX_ACTIVE_TRANSCRIPT_BYTES);
-            assert!(tail[0].text.starts_with(TRUNCATED_TRANSCRIPT_PREFIX));
-            assert!(tail[0].text.ends_with("new"));
-        }
+        events.update_active_transcript(&mut event).await;
+        let tail = events.transcript_state.take_transcript_tail().await;
+        assert_eq!(tail.first().map(|entry| entry.text.as_str()), Some(delta.as_str()));
+        assert!(events.transcript_state.take_transcript_tail().await.is_empty());
     }
 
     // Checklist sections 3 and 11: remote status does not bypass the configured
@@ -1751,12 +1747,12 @@ mod tests {
     }
 
     #[test]
-    fn terminal_sideband_handshake_statuses_are_not_retryable() {
+    fn sideband_remote_statuses_follow_local3_retry_policy() {
         for status in [StatusCode::NOT_FOUND, StatusCode::GONE] {
-            assert!(webrtc_sideband_session_ended(&ApiError::Api {
+            assert!(crate::api_bridge::map_api_error(ApiError::Api {
                 status,
                 message: "session ended".to_string(),
-            }));
+            }).is_retryable());
         }
     }
 
@@ -3455,3 +3451,7 @@ mod tests {
         server.await.expect("server task");
     }
 }
+
+#[cfg(test)]
+#[path = "methods_auth_tests.rs"]
+mod auth_tests;

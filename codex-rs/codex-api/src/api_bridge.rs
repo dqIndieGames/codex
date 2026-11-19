@@ -11,6 +11,7 @@ use codex_protocol::auth::PlanType;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::ConnectionFailedError;
+use codex_protocol::error::ProviderRejection;
 use codex_protocol::error::RetryLimitReachedError;
 use codex_protocol::error::UnexpectedResponseError;
 use codex_protocol::error::UsageLimitReachedError;
@@ -59,17 +60,22 @@ fn map_api_error_with_mode(err: ApiError, mode: HttpErrorMode) -> CodexErr {
         | ApiError::Transport(_)
         | ApiError::Api { .. }
         | ApiError::Stream(_)
+        | ApiError::WebsocketMessageTooLarge
         | ApiError::ContentFilter
         | ApiError::ResponseIncomplete(_)
         | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
+        | ApiError::SessionBudgetExceeded
         | ApiError::FlexUnavailable
         | ApiError::RateLimit(_)
         | ApiError::InvalidRequest { .. }
+        | ApiError::AccessProgramNotEnabled { .. }
         | ApiError::InvalidAudioInput { .. }
         | ApiError::ModelNotFound { .. }
         | ApiError::InvalidPrompt { .. }
+        | ApiError::InferenceHookDenied { .. }
+        | ApiError::ContentPolicyViolation { .. }
         | ApiError::CyberPolicy { .. }
         | ApiError::BioPolicy { .. }
         | ApiError::MisalignmentPolicyViolation { .. } => None,
@@ -158,6 +164,7 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
+        ApiError::SessionBudgetExceeded => CodexErr::SessionBudgetExceeded,
         ApiError::Retryable { message, .. } => CodexErr::Stream(message),
         ApiError::RateLimitExceeded { message, .. } => {
             CodexErr::new(CodexErrorDetails::RateLimitExceeded(message))
@@ -168,6 +175,9 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
             } else {
                 CodexErr::Stream(msg)
             }
+        }
+        ApiError::WebsocketMessageTooLarge => {
+            CodexErr::new(CodexErrorDetails::WebsocketMessageTooLarge)
         }
         ApiError::ContentFilter => CodexErr::new(CodexErrorDetails::ContentFilter),
         ApiError::ResponseIncomplete(incomplete) => {
@@ -195,14 +205,27 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
             HttpErrorMode::Default => CodexErr::InvalidRequest(message),
             HttpErrorMode::RequestLayer | HttpErrorMode::StreamLayer => retryable_stream(message),
         },
-        ApiError::InvalidAudioInput { message } => {
-            CodexErr::new(CodexErrorDetails::InvalidAudioInput { message })
+        ApiError::AccessProgramNotEnabled { message } => {
+            CodexErrorDetails::AccessProgramNotEnabled(ProviderRejection::Stream(message)).into()
         }
+        ApiError::InvalidAudioInput {
+            message,
+            per_recording,
+        } => CodexErr::new(CodexErrorDetails::InvalidAudioInput {
+            message,
+            per_recording,
+        }),
         ApiError::ModelNotFound { message, status } => {
             CodexErr::new(CodexErrorDetails::ModelNotFound { message, status })
         }
         ApiError::InvalidPrompt { message } => {
             CodexErr::new(CodexErrorDetails::InvalidPrompt { message })
+        }
+        ApiError::InferenceHookDenied { message } => {
+            CodexErr::new(CodexErrorDetails::InferenceHookDenied { message })
+        }
+        ApiError::ContentPolicyViolation { message, status } => {
+            CodexErrorDetails::ContentPolicyViolation { message, status }.into()
         }
         ApiError::CyberPolicy { message } => {
             CodexErr::new(CodexErrorDetails::CyberPolicy { message })
@@ -387,7 +410,7 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                         }
                     }
                 } else {
-                    CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                    let response = UnexpectedResponseError {
                         status,
                         user_message: api_error_user_message(status, &body_text),
                         body: body_text,
@@ -399,7 +422,26 @@ fn map_api_error_details(err: ApiError, mode: HttpErrorMode) -> CodexErr {
                             X_OPENAI_AUTHORIZATION_ERROR_HEADER,
                         ),
                         identity_error_code: extract_x_error_json_code(headers.as_ref()),
-                    })
+                    };
+                    let body_code = parsed_body.as_ref().and_then(|body| {
+                        ["/detail/code", "/error/code"]
+                            .into_iter()
+                            .find_map(|path| body.pointer(path)?.as_str())
+                    });
+                    let code = body_code.or(response.identity_error_code.as_deref());
+                    match (status, code) {
+                        (
+                            http::StatusCode::FORBIDDEN,
+                            Some("invalid_workspace_selected" | "codex_workspace_access_denied"),
+                        ) => CodexErrorDetails::WorkspaceAccessDenied(response).into(),
+                        (http::StatusCode::FORBIDDEN, Some("access_program_not_enabled")) => {
+                            CodexErrorDetails::AccessProgramNotEnabled(ProviderRejection::Http(
+                                response,
+                            ))
+                            .into()
+                        }
+                        _ => CodexErr::UnexpectedStatus(response),
+                    }
                 }
             }
             TransportError::RetryLimit => CodexErr::RetryLimit(RetryLimitReachedError {

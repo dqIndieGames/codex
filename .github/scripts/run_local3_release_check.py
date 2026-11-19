@@ -17,11 +17,13 @@ def main():
     mode = sys.argv[2]
     ledger = json.loads(ledger_path.read_text(encoding='utf-8')) if ledger_path.exists() else {'used_seconds': 0, 'checks': []}
     if ledger.get('active'):
-        if mode != 'visual-end':
+        if mode != 'visual-end' or ledger['active']['mode'] != 'visual-start':
             raise SystemExit('存在未结算验证段，须先结算；不能重置额度')
-        elapsed = time.time() - ledger.pop('active')['started_at']
+        segment = ledger.pop('active')
+        elapsed = time.time() - segment['started_at']
         ledger['used_seconds'] += elapsed
-        ledger['checks'].append({'name': '实际打开图片验收', 'seconds': elapsed})
+        ledger['checks'].append({**segment, 'name': '实际打开图片验收', 'seconds': elapsed,
+                                 'finished_at': time.time(), 'state': 'completed'})
         ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding='utf-8')
         print(json.dumps({'used_seconds': ledger['used_seconds']}, ensure_ascii=False))
         if ledger['used_seconds'] > RELEASE_TEST_SECONDS - RELEASE_CHECK_RESERVE_SECONDS - CLEANUP_RESERVE_SECONDS:
@@ -35,7 +37,8 @@ def main():
         raise SystemExit('累计验证额度已用尽，不得继续测试或发布')
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    ledger['active'] = {'started_at': time.time(), 'mode': mode}
+    ledger['active'] = {'started_at': time.time(), 'mode': mode, 'state': 'started',
+                        'session_id': os.environ['LOCAL3_CHECK_SESSION_ID']}
     ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding='utf-8')
     if mode == 'visual-start':
         print(json.dumps({'visual_seconds_available': remaining}))
@@ -94,9 +97,11 @@ def main():
         kernel.CloseHandle(job)
         output.close()
         elapsed = time.monotonic() - started
-        ledger.pop('active', None)
+        segment = ledger.pop('active')
         ledger['used_seconds'] += elapsed
-        ledger['checks'].append({'command': command, 'seconds': elapsed, 'exit_code': code, 'process_tree_clean': cleanup_ok,
+        ledger['checks'].append({**segment, 'finished_at': time.time(),
+                                 'state': 'completed' if code != 124 else 'interrupted',
+                                 'command': command, 'seconds': elapsed, 'exit_code': code, 'process_tree_clean': cleanup_ok,
                                  'output': str(output_path)})
         ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding='utf-8')
         print(json.dumps({'used_seconds': ledger['used_seconds'], 'exit_code': code, 'process_tree_clean': cleanup_ok}), flush=True)

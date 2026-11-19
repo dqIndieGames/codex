@@ -263,6 +263,7 @@ mod tests {
         let (response, imagegen_request_id) = client
             .generate(
                 &ImageGenerationRequest {
+                    output: None,
                     prompt: "a red fox in a field".to_string(),
                     background: Some(ImageBackground::Opaque),
                     model: "gpt-image-1.5".to_string(),
@@ -312,6 +313,7 @@ mod tests {
         let (response, _) = client
             .generate(
                 &ImageGenerationRequest {
+                    output: None,
                     prompt: "test".to_string(),
                     background: None,
                     model: "gpt-image-2".to_string(),
@@ -342,6 +344,7 @@ mod tests {
         let (response, imagegen_request_id) = client
             .edit(
                 &ImageEditRequest {
+                    output: None,
                     images: vec![
                         ImageReference::Inline {
                             image_url: "data:image/png;base64,Zm9v".to_string(),
@@ -390,6 +393,7 @@ mod tests {
         let error = client
             .generate(
                 &ImageGenerationRequest {
+                    output: None,
                     prompt: "a red fox in a field".to_string(),
                     background: None,
                     model: "gpt-image-1.5".to_string(),

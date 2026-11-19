@@ -42,6 +42,9 @@ impl Default for ResponsesStreamRetryState {
 
 impl ResponsesStreamRetryState {
     pub(crate) fn observe_image_failure(&mut self, err: &CodexErr) -> bool {
+        if err.requires_http_fallback() {
+            return false;
+        }
         if !is_request_size_error(err) {
             self.compaction_size_failures = 0;
             return false;
@@ -126,6 +129,12 @@ pub(crate) async fn handle_response_stream_error(
     if matches!(err.details(), CodexErrorDetails::Stream(message)
         if message == crate::client::PROVIDER_RUNTIME_REFRESHED) {
         client_session.reset_retry_websocket_connection();
+        return Ok(());
+    }
+    // The peer's advertised limit rejected no upload: choose HTTP without
+    // spending a retry, waiting, reporting failure, or changing image counters.
+    if err.requires_http_fallback() {
+        client_session.try_switch_fallback_transport();
         return Ok(());
     }
     let retry_at = err.retry_after().map(|advice| advice.deadline())

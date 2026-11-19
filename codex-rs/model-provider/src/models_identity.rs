@@ -16,8 +16,7 @@ pub(crate) fn identity(
     provider_info: &ModelProviderInfo,
     auth: Option<&CodexAuth>,
 ) -> CoreResult<String> {
-    // Provider credentials must isolate routing and cache identity from global login.
-    let auth = if provider_info.experimental_bearer_token_is_non_empty() {
+    let auth = if provider_info.env_key.is_some() || provider_info.experimental_bearer_token_is_non_empty() {
         None
     } else {
         auth

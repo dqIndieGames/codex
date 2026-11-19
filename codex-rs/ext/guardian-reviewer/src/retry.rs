@@ -194,6 +194,7 @@ fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
             CodexErrorInfo::ContextWindowExceeded
             | CodexErrorInfo::SessionBudgetExceeded
             | CodexErrorInfo::UsageLimitExceeded
+            | CodexErrorInfo::InferenceHookDenied
             | CodexErrorInfo::CyberPolicy
             | CodexErrorInfo::BioPolicy
             | CodexErrorInfo::MisalignmentPolicyViolation

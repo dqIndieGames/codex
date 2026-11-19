@@ -30,8 +30,11 @@ use wiremock::http::Method;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
 
+#[path = "websocket_fallback_close.rs"]
+mod close_code;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn websocket_fallback_switches_to_http_on_upgrade_required_connect() -> Result<()> {
+async fn websocket_fallback_switches_to_http_after_three_upgrade_required_failures() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -53,9 +56,8 @@ async fn websocket_fallback_switches_to_http_on_upgrade_required_connect() -> Re
             config.model_provider.base_url = Some(base_url);
             config.model_provider.wire_api = WireApi::Responses;
             config.model_provider.supports_websockets = true;
-            // If we don't treat 426 specially, the sampling loop would retry the WebSocket
-            // handshake before switching to the HTTP transport.
-            config.model_provider.stream_max_retries = Some(2);
+            // 真值：功能清单 §3.1、§3.4。426 与普通失败相同，第三次后且预算允许时转 HTTP。
+            config.model_provider.stream_max_retries = Some(3);
             config.model_provider.request_max_retries = Some(0);
         }
     });
@@ -73,53 +75,7 @@ async fn websocket_fallback_switches_to_http_on_upgrade_required_connect() -> Re
         .filter(|req| req.method == Method::POST && req.url.path().ends_with("/responses"))
         .count();
 
-    // The startup prewarm request sees 426 and immediately switches the session to HTTP fallback,
-    // so the first turn goes straight to HTTP with no additional websocket connect attempt.
-    assert_eq!(websocket_attempts, 1);
-    assert_eq!(http_attempts, 1);
-    assert_eq!(response_mock.requests().len(), 1);
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn websocket_fallback_switches_to_http_after_retries_exhausted() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = responses::start_mock_server().await;
-    let response_mock = mount_sse_once(
-        &server,
-        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
-    )
-    .await;
-
-    let mut builder = test_codex().with_config({
-        let base_url = format!("{}/v1", server.uri());
-        move |config| {
-            config.model_provider.base_url = Some(base_url);
-            config.model_provider.wire_api = WireApi::Responses;
-            config.model_provider.supports_websockets = true;
-            config.model_provider.stream_max_retries = Some(2);
-            config.model_provider.request_max_retries = Some(0);
-        }
-    });
-    let test = builder.build(&server).await?;
-
-    test.submit_turn("hello").await?;
-
-    let requests = server.received_requests().await.unwrap_or_default();
-    let websocket_attempts = requests
-        .iter()
-        .filter(|req| req.method == Method::GET && req.url.path().ends_with("/responses"))
-        .count();
-    let http_attempts = requests
-        .iter()
-        .filter(|req| req.method == Method::POST && req.url.path().ends_with("/responses"))
-        .count();
-
-    // Deferred request prewarm is attempted at startup.
-    // The first turn then makes 3 websocket stream attempts (initial try + 2 retries),
-    // after which fallback activates and the request is replayed over HTTP.
+    // 一次后台预热不计入用户逻辑请求；目标请求连续失败三次后才转 HTTP。
     assert_eq!(websocket_attempts, 4);
     assert_eq!(http_attempts, 1);
     assert_eq!(response_mock.requests().len(), 1);
@@ -128,7 +84,7 @@ async fn websocket_fallback_switches_to_http_after_retries_exhausted() -> Result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result<()> {
+async fn websocket_fallback_does_not_add_http_after_retry_budget_is_exhausted() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -145,6 +101,95 @@ async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result
             config.model_provider.wire_api = WireApi::Responses;
             config.model_provider.supports_websockets = true;
             config.model_provider.stream_max_retries = Some(2);
+            config.model_provider.request_max_retries = Some(0);
+        }
+    });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("hello").await?;
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    let websocket_attempts = requests
+        .iter()
+        .filter(|req| req.method == Method::GET && req.url.path().ends_with("/responses"))
+        .count();
+    let http_attempts = requests
+        .iter()
+        .filter(|req| req.method == Method::POST && req.url.path().ends_with("/responses"))
+        .count();
+
+    // 真值：功能清单 §3.1、§3.4。初次尝试加两次重试已耗尽预算，不得补发 HTTP。
+    assert_eq!(websocket_attempts, 4);
+    assert_eq!(http_attempts, 0);
+    assert!(response_mock.requests().is_empty());
+
+    Ok(())
+}
+
+#[test_case::test_case(true, Some("invalid_workspace_selected"), 5, 0; "workspace denial on websocket")]
+#[test_case::test_case(false, Some("invalid_workspace_selected"), 0, 8; "workspace denial on http")]
+#[test_case::test_case(true, Some("codex_workspace_access_denied"), 5, 0; "workspace permission denied on websocket")]
+#[test_case::test_case(true, Some("access_program_not_enabled"), 5, 0; "access program denial on websocket")]
+#[test_case::test_case(false, Some("access_program_not_enabled"), 0, 8; "access program denial on http")]
+#[test_case::test_case(true, None, 5, 0; "bare websocket and http denials")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forbidden_responses_obey_local3_explicit_retry_budget(
+    supports_websockets: bool,
+    code: Option<&str>,
+    expected_upgrades: u64,
+    expected_posts: u64,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut denial = ResponseTemplate::new(403);
+    if let Some(code) = code {
+        denial = denial.set_body_json(serde_json::json!({"detail": {"code": code}}));
+    }
+    for (verb, count) in [("GET", expected_upgrades), ("POST", expected_posts)] {
+        Mock::given(method(verb))
+            .and(path_regex(".*/responses$"))
+            .respond_with(denial.clone())
+            .expect(count)
+            .mount(&server)
+            .await;
+    }
+
+    let test = test_codex()
+        .with_config(move |config| {
+            config.model_provider.supports_websockets = supports_websockets;
+            config.model_provider.stream_max_retries = Some(1);
+            config.model_provider.request_max_retries = Some(1);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    // 真值：功能清单 §3.1。WS 每回合初次加一次重试；HTTP 每轮也有一次请求层重试。
+    // 两个独立回合共享协议锁，但失败计数各自重新开始；后台预热另计一次 WS。
+    test.submit_turn("first").await?;
+    test.submit_turn("second").await?;
+    server.verify().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_fallback_shows_every_retry_in_release_and_debug() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+
+    let mut builder = test_codex().with_config({
+        let base_url = format!("{}/v1", server.uri());
+        move |config| {
+            config.model_provider.base_url = Some(base_url);
+            config.model_provider.wire_api = WireApi::Responses;
+            config.model_provider.supports_websockets = true;
+            config.model_provider.stream_max_retries = Some(3);
             config.model_provider.request_max_retries = Some(0);
         }
     });
@@ -183,7 +228,7 @@ async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result
 
     let mut stream_error_messages = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(10), codex.next_event())
+        let event = timeout(Duration::from_secs(20), codex.next_event())
             .await
             .expect("timeout waiting for event")
             .expect("event stream ended unexpectedly")
@@ -195,12 +240,12 @@ async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result
         }
     }
 
-    let expected_stream_errors = if cfg!(debug_assertions) {
-        vec!["Reconnecting... 1", "Reconnecting... 2"]
-    } else {
-        vec!["Reconnecting... 2"]
-    };
-    assert_eq!(stream_error_messages, expected_stream_errors);
+    // 真值：功能清单 §3.7，正式版从第一次重试开始可见；累计序号不因切协议归零。
+    for (index, message) in stream_error_messages.iter().enumerate() {
+        assert!(message.starts_with(&format!("Reconnecting... {} ", index + 1)));
+    }
+    assert_eq!(stream_error_messages.len(), 3);
+    assert!(stream_error_messages.last().unwrap().contains("HTTP"));
     assert_eq!(response_mock.requests().len(), 1);
 
     Ok(())
@@ -226,7 +271,7 @@ async fn websocket_fallback_is_sticky_across_turns() -> Result<()> {
             config.model_provider.base_url = Some(base_url);
             config.model_provider.wire_api = WireApi::Responses;
             config.model_provider.supports_websockets = true;
-            config.model_provider.stream_max_retries = Some(2);
+            config.model_provider.stream_max_retries = Some(3);
             config.model_provider.request_max_retries = Some(0);
         }
     });
@@ -247,7 +292,7 @@ async fn websocket_fallback_is_sticky_across_turns() -> Result<()> {
 
     // WebSocket attempts all happen on the first turn:
     // 1 deferred request prewarm attempt (startup) + 3 stream attempts
-    // (initial try + 2 retries) before fallback.
+    // (initial try + 3 retries with the last attempt over HTTP) before success.
     // Fallback is sticky, so the second turn stays on HTTP and adds no websocket attempts.
     assert_eq!(websocket_attempts, 4);
     assert_eq!(http_attempts, 2);
