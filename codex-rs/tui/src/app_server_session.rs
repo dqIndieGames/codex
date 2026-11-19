@@ -1502,7 +1502,7 @@ impl AppServerSession {
         }
         self.thread_tool_transport()
             .configure_mcp(&mut params.config);
-        let mut response = match self
+        let mut response: ThreadForkResponse = match self
             .request_handle
             .request_typed(ClientRequest::ThreadFork {
                 request_id,
