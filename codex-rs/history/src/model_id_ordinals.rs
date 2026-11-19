@@ -56,6 +56,7 @@ pub fn next_model_id_ordinals(records: &[RolloutItem]) -> (u64, u64) {
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::TokenUsageRecord(_)
+            | RolloutItem::ImagesShrunk(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::RetainedContext(_)

@@ -331,6 +331,7 @@ fn review_original(mut item: RolloutItem) -> anyhow::Result<Option<RolloutItem>>
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::TokenUsageRecord(_)
+        | RolloutItem::ImagesShrunk(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_)
