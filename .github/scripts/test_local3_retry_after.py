@@ -109,10 +109,13 @@ def verify(binary, output, name, mode, advice, location, expected, failures=1, m
             args = command(binary, fixture)
             args[-1:-1] = ['-c', f'model_providers.fixture.supports_websockets={str(mode == "ws").lower()}',
                           '-c', 'model_providers.fixture.request_max_retries=100000']
-            result = subprocess.run(args, cwd=home, env=env, capture_output=True, text=True,
-                encoding='utf8', errors='replace', timeout=120, creationflags=subprocess.CREATE_NO_WINDOW)
-        (output / f'{name}.stdout.txt').write_text(result.stdout, encoding='utf8')
-        (output / f'{name}.stderr.txt').write_text(result.stderr, encoding='utf8')
+            stdout_path = output / f'{name}.stdout.txt'
+            stderr_path = output / f'{name}.stderr.txt'
+            with stdout_path.open('w', encoding='utf8') as stdout, stderr_path.open('w', encoding='utf8') as stderr:
+                result = subprocess.run(args, cwd=home, env=env, stdin=subprocess.DEVNULL,
+                    stdout=stdout, stderr=stderr, timeout=120, creationflags=subprocess.CREATE_NO_WINDOW)
+            result.stdout = stdout_path.read_text(encoding='utf8', errors='replace')
+            result.stderr = stderr_path.read_text(encoding='utf8', errors='replace')
         assert result.returncode == 0 and 'WS_RECOVERY_OK' in result.stdout, (name, result.stderr[-2500:], result.stdout[-1500:])
         waits = []
         assert len(fixture.failures) == failures, (name, fixture.failures)

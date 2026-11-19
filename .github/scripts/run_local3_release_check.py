@@ -16,6 +16,9 @@ def main():
     ledger_path = Path(sys.argv[1]).resolve()
     mode = sys.argv[2]
     ledger = json.loads(ledger_path.read_text(encoding='utf-8')) if ledger_path.exists() else {'used_seconds': 0, 'checks': []}
+    budget_limit = ledger.setdefault('limit_seconds', RELEASE_TEST_SECONDS)
+    release_reserve = ledger.setdefault('release_reserve_seconds', RELEASE_CHECK_RESERVE_SECONDS)
+    cleanup_reserve = ledger.setdefault('cleanup_reserve_seconds', CLEANUP_RESERVE_SECONDS)
     if ledger.get('active'):
         if mode != 'visual-end' or ledger['active']['mode'] != 'visual-start':
             raise SystemExit('存在未结算验证段，须先结算；不能重置额度')
@@ -26,12 +29,12 @@ def main():
                                  'finished_at': time.time(), 'state': 'completed'})
         ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding='utf-8')
         print(json.dumps({'used_seconds': ledger['used_seconds']}, ensure_ascii=False))
-        if ledger['used_seconds'] > RELEASE_TEST_SECONDS - RELEASE_CHECK_RESERVE_SECONDS - CLEANUP_RESERVE_SECONDS:
+        if ledger['used_seconds'] > budget_limit - release_reserve - cleanup_reserve:
             raise SystemExit('视觉验收超出剩余额度，不得发布')
         return
-    limit = RELEASE_TEST_SECONDS - CLEANUP_RESERVE_SECONDS
+    limit = budget_limit - cleanup_reserve
     if mode != 'release':
-        limit -= RELEASE_CHECK_RESERVE_SECONDS
+        limit -= release_reserve
     remaining = limit - ledger['used_seconds']
     if remaining <= 0:
         raise SystemExit('累计验证额度已用尽，不得继续测试或发布')
@@ -83,7 +86,7 @@ def main():
             code = 124
     finally:
         kernel.TerminateJobObject(job, 1)
-        deadline = time.monotonic() + min(CLEANUP_RESERVE_SECONDS, RELEASE_TEST_SECONDS - ledger['used_seconds'] - (time.monotonic() - started))
+        deadline = time.monotonic() + min(cleanup_reserve, budget_limit - ledger['used_seconds'] - (time.monotonic() - started))
         while time.monotonic() < deadline:
             info = Accounting()
             if not kernel.QueryInformationJobObject(job, 1, C.byref(info), C.sizeof(info), None):
@@ -105,7 +108,7 @@ def main():
                                  'output': str(output_path)})
         ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding='utf-8')
         print(json.dumps({'used_seconds': ledger['used_seconds'], 'exit_code': code, 'process_tree_clean': cleanup_ok}), flush=True)
-    if not cleanup_ok or ledger['used_seconds'] > RELEASE_TEST_SECONDS:
+    if not cleanup_ok or ledger['used_seconds'] > budget_limit:
         raise SystemExit('验证清理或累计时限失败，不得发布')
     raise SystemExit(code)
 
