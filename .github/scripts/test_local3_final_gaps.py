@@ -26,7 +26,7 @@ class DelayedClipboard:
         console.delayed_owners.append(self)
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
-        assert self.ready.wait(2), 'delayed clipboard owner not ready'
+        assert self.ready.wait(152), 'delayed clipboard owner not ready'
         if self.error:
             raise self.error
 
@@ -67,6 +67,8 @@ class DelayedClipboard:
             self.error = exc
             self.ready.set(); self.done.set()
         finally:
+            if hasattr(self, 'hwnd') and gui.IsWindow(self.hwnd):
+                gui.DestroyWindow(self.hwnd)
             gui.UnregisterClass(name, None)
 
     def finish(self):
@@ -122,6 +124,8 @@ def verify(binary, root, kinds, menu_paste=False):
         home = output/'home'; home.mkdir(exist_ok=True)
         (home/'config.toml').write_text('model = "gpt-6-sol"\n', encoding='utf-8')
         server = QuestionFixture(kind)
+        # 句柄占用按30秒重查时，mock不得提前结束仍在回答的回合。
+        server.answer_hold_seconds = 170
         worker = threading.Thread(target=server.serve_forever, daemon=True); worker.start()
         base = command(binary, server); settings = base[base.index('-c'):-1]
         args = [binary, '--dangerously-bypass-hook-trust', '--dangerously-bypass-approvals-and-sandbox',
@@ -250,7 +254,8 @@ def verify(binary, root, kinds, menu_paste=False):
             if console:
                 console.close()
                 for owner in getattr(console, 'delayed_owners', []):
-                    gui.PostMessage(owner.hwnd, 0x10, 0, 0)
+                    if gui.IsWindow(owner.hwnd):
+                        gui.PostMessage(owner.hwnd, 0x10, 0, 0)
                     owner.thread.join(2)
             server.shutdown(); server.server_close(); worker.join(2)
             (root/'result.json').write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding='utf-8')

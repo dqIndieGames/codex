@@ -4,19 +4,17 @@
 动态身份作一一映射，保留字段及重复引用关系，不整块忽略 metadata。
 """
 import base64
-import ctypes as C
 import json
-import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 import threading
 import time
 
 from test_local3_runtime_refresh import RuntimeFixture
 from test_websocket_recovery import command
-from verify_local3_hidden_tui import U, K, STARTUPINFO, PROCESSINFO, windows, capture, prepare_window, is_user_request
+from _local3_hidden_console import HiddenConsole
+from verify_local3_hidden_tui import K, windows, is_user_request
 
 
 def normalized(entry, credential):
@@ -64,9 +62,6 @@ def verify(binary, root):
         for transport in ('http', 'ws'):
             for account in ('default', 'alpha'):
                 label = f'{transport}-{account}'
-                env = os.environ.copy(); env['CODEX_HOME'] = str(home)
-                for key in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL', 'CODEX_INTERNAL_AUTH_ACCOUNT'):
-                    env.pop(key, None)
                 base = command(binary, server)
                 settings = base[base.index('-c'):-1]
                 args = [binary, '--dangerously-bypass-hook-trust', '--dangerously-bypass-approvals-and-sandbox',
@@ -78,21 +73,10 @@ def verify(binary, root):
                 if account != 'default': args += ['--account', account]
                 prompt = 'Reply with a short confirmation. LOCAL3_ACCOUNT_USER_REQUEST'
                 args.append(prompt)
-                desktop_name = f'Local3Accounts_{os.getpid()}_{label}'
-                desktop = U.CreateDesktopW(desktop_name, None, None, 0, 0x01ff, None)
-                if not desktop: raise C.WinError(C.get_last_error())
-                previous = U.GetThreadDesktop(K.GetCurrentThreadId())
-                info, process = STARTUPINFO(), PROCESSINFO()
-                info.cb, info.lpDesktop = C.sizeof(info), desktop_name
-                block = C.create_unicode_buffer('\0'.join(f'{k}={v}' for k, v in sorted(env.items()))+'\0\0')
-                host = str(Path(os.environ['SystemRoot'])/'System32/conhost.exe')
                 start = len(server.requests)
+                console = None
                 try:
-                    if not K.CreateProcessW(host, C.create_unicode_buffer(subprocess.list2cmdline([host, *args])),
-                            None, None, False, 0x10 | 0x4 | 0x400, block, str(home), C.byref(info), C.byref(process)):
-                        raise C.WinError(C.get_last_error())
-                    K.ResumeThread(process.hThread)
-                    if not U.SetThreadDesktop(desktop): raise C.WinError(C.get_last_error())
+                    console = HiddenConsole(args, home)
                     deadline = time.monotonic() + 15
                     selected = []
                     while time.monotonic() < deadline:
@@ -100,16 +84,15 @@ def verify(binary, root):
                                     if is_user_request(entry, prompt)]
                         if selected:
                             break
-                        if K.WaitForSingleObject(process.hProcess, 0) == 0:
+                        if K.WaitForSingleObject(console.process.hProcess, 0) == 0:
                             raise AssertionError(f'{label}: TUI exited before the user request')
                         time.sleep(.05)
                     assert len(selected) == 1, f'{label}: one target user request required'
                     time.sleep(.25)
-                    found = windows(desktop)
+                    found = windows(console.desktop)
                     assert len(found) == 1, (label, found)
                     hwnd, title = found[0]
-                    prepare_window(hwnd)
-                    capture(hwnd, root / f'{label}.png')
+                    console.screenshot(root / f'{label}.png')
                     request = selected[0]
                     assert request['transport'] == transport
                     credential = f'sk-{account}-tui-fixture'
@@ -117,13 +100,8 @@ def verify(binary, root):
                     (root/f'{label}-normalized.json').write_text(json.dumps(results[label], ensure_ascii=False, indent=2), encoding='utf-8')
                     assert title.startswith('[f] '), title
                 finally:
-                    if process.hProcess:
-                        subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            creationflags=subprocess.CREATE_NO_WINDOW, timeout=5)
-                        K.WaitForSingleObject(process.hProcess, 3000)
-                        K.CloseHandle(process.hProcess); K.CloseHandle(process.hThread)
-                    U.SetThreadDesktop(previous); U.CloseDesktop(desktop)
+                    if console:
+                        console.close()
             assert results[f'{transport}-default'] == results[f'{transport}-alpha'], f'{transport}: account changed non-auth request fields'
         (root/'result.json').write_text(json.dumps({'passed': True, 'real_tui': True,
             'startup': 'embedded: CLI -c overrides and bypass_hook_trust exclude daemon',

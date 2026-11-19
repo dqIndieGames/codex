@@ -21,6 +21,7 @@ class QuestionFixture(RuntimeFixture):
         self.sent = False
         self.answers = []
         self.answered = threading.Event()
+        self.answer_hold_seconds = 20
 
     def events(self, payload, compact=False):
         entry = self.local.entry
@@ -48,7 +49,7 @@ class QuestionFixture(RuntimeFixture):
         if self.kind == 'async' and not self.release.is_set():
             # 保持发问回合运行，避免真实产品在回合结束时回收尚未回答的问题。
             # 回答经真实队列提交后由驱动释放本次响应，不改变产品状态。
-            self.release.wait(20)
+            self.release.wait(self.answer_hold_seconds)
         for item in payload.get('input', []):
             if self.kind == 'blocking' and item.get('type') == 'function_call_output' and item.get('call_id') == 'call_local3_question':
                 self.answers.append(item['output'])

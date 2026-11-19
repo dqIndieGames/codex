@@ -24,7 +24,8 @@ class RealtimeHandler(Handler):
 
     def failure(self, kind):
         now = time.monotonic()
-        self.server.attempts.append({'kind': kind, 'at': now, 'path': self.path})
+        self.server.attempts.append({'kind': kind, 'at': now, 'path': self.path,
+            'provider_token_selected': self.headers.get('Authorization') == self.server.expected_authorization})
         previous = [r for r in self.server.attempts if r['kind'] == kind]
         if len(previous) == 1:
             self.reply(429, b'{"error":{"code":"turn_rate_limit_exceeded"}}', [('Retry-After', '2')])
@@ -59,13 +60,16 @@ def verify(binary, root, kind):
     fixture = Fixture('healthy')
     fixture.RequestHandlerClass = RealtimeHandler
     fixture.attempts = []
+    token = 'fixture-realtime-provider'
+    fixture.expected_authorization = 'Bearer ' + token
     fixture.release = threading.Event()
     thread = threading.Thread(target=fixture.serve_forever, daemon=True)
     thread.start()
     rpc = None
     try:
         home = root / 'home'
-        configure(home, fixture, budget=100)
+        configure(home, fixture, token=token, budget=100)
+        (home / 'auth.json').write_text(json.dumps({'OPENAI_API_KEY': 'fixture-ambient-must-not-be-used'}), encoding='utf8')
         text = (home / 'config.toml').read_text(encoding='utf8').replace('request_max_retries = 0', 'request_max_retries = 100')
         text = (f'experimental_realtime_ws_base_url = "http://127.0.0.1:{fixture.server_port}/v1"\n'
                 f'experimental_realtime_webrtc_call_base_url = "http://127.0.0.1:{fixture.server_port}/v1"\n' + text)
@@ -79,7 +83,8 @@ def verify(binary, root, kind):
             'outputModality': 'text' if kind == 'websocket' else 'audio',
             'includeStartupContext': False, 'version': 'v2' if kind == 'websocket' else 'v1',
             'transport': transport})
-        rpc.wait(lambda v: v.get('method') == 'thread/realtime/started', timeout=30)
+        started = rpc.wait(lambda v: v.get('method') in ('thread/realtime/started', 'thread/realtime/error'), timeout=30)
+        assert started['method'] == 'thread/realtime/started', started
         wanted = ['websocket'] if kind == 'websocket' else ['call', 'sideband']
         deadline = time.monotonic() + 30
         while not all(sum(r['kind'] == k for r in fixture.attempts) >= 2 for k in wanted):
@@ -92,6 +97,7 @@ def verify(binary, root, kind):
             wait = attempts[1]['at'] - attempts[0]['at']
             assert 1.9 <= wait <= 6, (channel, wait)
             waits[channel] = wait
+        assert all(entry['provider_token_selected'] for entry in fixture.attempts), 'provider token must override env_key and ambient auth'
         rpc.call('thread/realtime/stop', {'threadId': tid})
         report = {'passed': True, 'case': kind, 'waits': waits, 'attempts': fixture.attempts}
         (root / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf8')

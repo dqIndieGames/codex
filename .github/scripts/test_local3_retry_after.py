@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -100,22 +99,24 @@ def verify(binary, output, name, mode, advice, location, expected, failures=1, m
     thread = threading.Thread(target=fixture.serve_forever, daemon=True)
     thread.start()
     try:
-        with tempfile.TemporaryDirectory(prefix='local3-advice-') as home:
-            env = os.environ.copy()
-            env['CODEX_HOME'] = home
-            env['CODEX_INTERNAL_RETRY_MODE'] = 'unbounded'
-            for key in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL', 'CODEX_TUI_COMPLETION_DIAGNOSTICS_DIR'):
-                env.pop(key, None)
-            args = command(binary, fixture)
-            args[-1:-1] = ['-c', f'model_providers.fixture.supports_websockets={str(mode == "ws").lower()}',
-                          '-c', 'model_providers.fixture.request_max_retries=100000']
-            stdout_path = output / f'{name}.stdout.txt'
-            stderr_path = output / f'{name}.stderr.txt'
-            with stdout_path.open('w', encoding='utf8') as stdout, stderr_path.open('w', encoding='utf8') as stderr:
-                result = subprocess.run(args, cwd=home, env=env, stdin=subprocess.DEVNULL,
-                    stdout=stdout, stderr=stderr, timeout=120, creationflags=subprocess.CREATE_NO_WINDOW)
-            result.stdout = stdout_path.read_text(encoding='utf8', errors='replace')
-            result.stderr = stderr_path.read_text(encoding='utf8', errors='replace')
+        # CODEX_HOME保留到外层Job完成进程树清理后再删除，避免后台子进程仍占用cwd。
+        home = output / f'{name}.home'
+        home.mkdir(exist_ok=True)
+        env = os.environ.copy()
+        env['CODEX_HOME'] = str(home)
+        env['CODEX_INTERNAL_RETRY_MODE'] = 'unbounded'
+        for key in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL', 'CODEX_TUI_COMPLETION_DIAGNOSTICS_DIR'):
+            env.pop(key, None)
+        args = command(binary, fixture)
+        args[-1:-1] = ['-c', f'model_providers.fixture.supports_websockets={str(mode == "ws").lower()}',
+                      '-c', 'model_providers.fixture.request_max_retries=100000']
+        stdout_path = output / f'{name}.stdout.txt'
+        stderr_path = output / f'{name}.stderr.txt'
+        with stdout_path.open('w', encoding='utf8') as stdout, stderr_path.open('w', encoding='utf8') as stderr:
+            result = subprocess.run(args, cwd=home, env=env, stdin=subprocess.DEVNULL,
+                stdout=stdout, stderr=stderr, timeout=120, creationflags=subprocess.CREATE_NO_WINDOW)
+        result.stdout = stdout_path.read_text(encoding='utf8', errors='replace')
+        result.stderr = stderr_path.read_text(encoding='utf8', errors='replace')
         assert result.returncode == 0 and 'WS_RECOVERY_OK' in result.stdout, (name, result.stderr[-2500:], result.stdout[-1500:])
         waits = []
         assert len(fixture.failures) == failures, (name, fixture.failures)

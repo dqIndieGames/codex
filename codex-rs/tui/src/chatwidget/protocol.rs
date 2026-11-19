@@ -43,14 +43,26 @@ impl ChatWidget {
         let from_replay = replay_kind.is_some();
         let is_resume_initial_replay =
             matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages));
-        let is_retry_error = matches!(
+        // 后台标题、用量和线程元数据不代表失败的模型请求已经恢复。
+        let request_progress = matches!(
             &notification,
-            ServerNotification::Error(ErrorNotification {
-                will_retry: true,
-                ..
-            })
+            ServerNotification::TurnStarted(_)
+                | ServerNotification::TurnCompleted(_)
+                | ServerNotification::ItemStarted(_)
+                | ServerNotification::ItemCompleted(_)
+                | ServerNotification::AgentMessageDelta(_)
+                | ServerNotification::PlanDelta(_)
+                | ServerNotification::ReasoningSummaryTextDelta(_)
+                | ServerNotification::ReasoningTextDelta(_)
+                | ServerNotification::ReasoningSummaryPartAdded(_)
+                | ServerNotification::CommandExecutionOutputDelta(_)
+                | ServerNotification::FileChangeOutputDelta(_)
+                | ServerNotification::Error(ErrorNotification {
+                    will_retry: false,
+                    ..
+                })
         );
-        if !is_resume_initial_replay && !is_retry_error {
+        if !is_resume_initial_replay && request_progress {
             self.restore_retry_status_header_if_present();
         }
         match notification {
