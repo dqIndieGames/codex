@@ -143,6 +143,9 @@ def verify(binary, root):
         assert len(found) == 1, ('expected one owned terminal on hidden desktop', found)
         hwnd, title = found[0]
         prepare_window(hwnd)
+        console.wait_text('Reconnecting... 1', timeout=1)
+        time.sleep(.2)
+        assert 'Reconnecting... 1' in console.text(), 'background metadata cleared the first retry before recovery'
         capture(hwnd, root/'tui-retry.png')
         if not server.third_failure.wait(25): raise AssertionError('TUI did not reach three failed WS attempts')
         time.sleep(.3)
