@@ -187,7 +187,6 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::Retryable { .. } => "retryable error".to_string(),
         ApiError::RateLimitExceeded { .. } => "rate limit exceeded".to_string(),
         ApiError::RateLimit(_) => "rate limit".to_string(),
-        ApiError::ModelNotFound { .. } => "model not found".to_string(),
         ApiError::AccessProgramNotEnabled { .. } => "access program not enabled".to_string(),
         ApiError::ContentPolicyViolation { .. } => "content policy violation".to_string(),
         ApiError::InvalidRequest { .. }

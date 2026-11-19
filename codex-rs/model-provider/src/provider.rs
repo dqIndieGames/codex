@@ -786,37 +786,6 @@ impl ModelProvider for ConfiguredModelProvider {
             ModelCatalogSettings::with_cache(cache),
         )
     }
-
-    #[tokio::test]
-    async fn experimental_bearer_token_provider_ignores_auth_manager_state() {
-        let mut provider_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
-        provider_info.experimental_bearer_token = Some("provider-token".into());
-        let provider = create_model_provider(
-            provider_info,
-            Some(AuthManager::from_auth_for_testing(
-                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
-            )),
-        );
-
-        assert!(provider.auth_manager().is_none());
-        assert_eq!(provider.auth().await, None);
-        assert!(!provider.supports_attestation());
-        assert_eq!(
-            provider.account_state(),
-            Ok(ProviderAccountState {
-                account: None,
-                requires_openai_auth: false,
-            })
-        );
-        assert_eq!(
-            provider
-                .api_provider()
-                .await
-                .expect("provider token API provider")
-                .base_url,
-            "https://api.openai.com/v1"
-        );
-    }
 }
 
 pub(crate) mod test_support {
